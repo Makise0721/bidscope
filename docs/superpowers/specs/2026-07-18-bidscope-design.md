@@ -80,7 +80,7 @@ On narrow viewports, the evidence and trace column becomes a drawer instead of c
 6. Selecting a citation opens the exact evidence span and source version.
 7. The user downloads the DOCX.
 8. The user saves the confirmed schedule as a subscription.
-9. Importing a prepared second snapshot batch demonstrates new and materially changed notices on the next subscription run.
+9. Importing a prepared second synthetic-demo batch demonstrates new and materially changed notices on the next subscription run.
 10. A prepared missing, stale, or parser-invalid source snapshot demonstrates partial results, a completeness warning, checkpoint recovery, and an idempotent retry.
 
 ## 4. System Architecture
@@ -109,7 +109,7 @@ Snapshot import is an explicit CLI or administrative action and is idempotent. U
 
 ### 4.2 Query and Delivery Plane
 
-A FastAPI service accepts commands and exposes Server-Sent Events for run progress. A LangGraph graph owns each query run. PostgreSQL stores application records, subscriptions, run events, and LangGraph checkpoints. pgvector adds semantic retrieval. S3-compatible object storage holds raw snapshots and generated DOCX files.
+A FastAPI service accepts commands and exposes Server-Sent Events for run progress. A LangGraph graph owns each query run. PostgreSQL stores application records, subscriptions, run events, and LangGraph checkpoints. pgvector adds semantic retrieval. S3-compatible object storage holds immutable snapshot payloads and generated DOCX files.
 
 APScheduler triggers subscriptions. PostgreSQL advisory locks prevent concurrent execution of the same subscription. P0 deliberately avoids Celery and Redis.
 
@@ -208,11 +208,11 @@ class NoticeSnapshotAdapter(Protocol):
     def parse(self, bundle: SnapshotBundle) -> list[NormalizedNotice]: ...
 ```
 
-A bundle declares `capture_kind` as either `raw_response` or `curated_public_excerpt`. A raw-response bundle contains the captured HTML or JSON, source URL, request method and non-secret request parameters, retrieval time, HTTP status, content type and charset, SHA-256 hashes, and parser version. When lawful low-frequency access is blocked, a curated-public-excerpt bundle may contain only publicly verified fields in a source-shaped fixture; it must record the verification URLs and retrieval attempt outcome and must not claim to be the original response. Human-reviewed expected JSON remains test-only metadata. Bundles never contain cookies, session credentials, CAPTCHA tokens or images, or downloaded attachments.
+A bundle declares `capture_kind` as `raw_response`, `curated_public_excerpt`, or `synthetic_demo`. A raw-response bundle contains the captured HTML or JSON, source URL, request method and non-secret request parameters, retrieval time, HTTP status, content type and charset, SHA-256 hashes, and parser version. When lawful low-frequency access is blocked, a curated-public-excerpt bundle may contain only publicly verified fields in a source-shaped fixture; it must record the verification URLs and retrieval attempt outcome and must not claim to be the original response. A synthetic-demo bundle uses reserved IDs and `https://example.invalid/` URLs and exists only to provide enough records for full query, subscription, failure, and E2E scenarios; it must never be presented as an official notice. Human-reviewed expected JSON remains test-only metadata. Bundles never contain cookies, session credentials, CAPTCHA tokens or images, or downloaded attachments.
 
 The public URL patterns and page structures are observable, but neither source offers a documented, versioned public API or stable schema. During design research, 中国政府采购网 returned WAF responses including HTTP 403 and a frequent-access warning. 全国公共资源交易平台 exposed an undocumented Web POST used by its Vue page, but it includes CAPTCHA and anti-automation responses, a result cap, and heterogeneous upstream data. Reliable robots directives or an automated-access grant were not available for either source. Public browser visibility is therefore not treated as permission for automated collection.
 
-P0 is snapshot-only. Raw snapshots must be acquired manually or through a separately authorized process; curated public excerpts may be prepared when source access is blocked, but their different provenance must remain visible. Both forms are imported through an explicit CLI or administrative action. The deployed application never performs live page fetching. The UI labels every record as demonstration snapshot data, distinguishes raw responses from curated excerpts, and displays source URL, retrieval time, content hash, and freshness warning. Contract tests parse fixtures and compare them with human-reviewed expected JSON without hitting public services.
+P0 is snapshot-only. Raw snapshots must be acquired manually or through a separately authorized process; curated public excerpts may be prepared when source access is blocked, but their different provenance must remain visible. Synthetic demo bundles supply the larger dataset needed for the main demonstration and are always labeled as synthetic. All forms are imported through an explicit CLI or administrative action. The deployed application never performs live page fetching. The UI distinguishes raw responses, curated excerpts, and synthetic demo records and displays source or synthetic URL, retrieval time, content hash, and freshness warning. Contract tests parse fixtures and compare them with human-reviewed expected JSON without hitting public services.
 
 A future live adapter requires a separately documented authorization and source contract. It must use a configured HTTPS allowlist, stop at authentication, CAPTCHA, rate limiting, or access denial, and may not weaken the P0 snapshot path.
 
@@ -220,8 +220,8 @@ A future live adapter requires a separately documented authorization and source 
 
 Core records are:
 
-- **`source_notice`:** source, external ID, canonicalized source URL, first and latest fetch timestamps, and current content hash.
-- **`notice_version`:** immutable raw snapshot reference, normalized fields, parser version, and content hash.
+- **`source_notice`:** source, external ID, canonicalized source URL, first and latest observed retrieval timestamps, and current content hash.
+- **`notice_version`:** immutable snapshot-payload reference, capture kind, normalized fields, parser version, and content hash.
 - **`canonical_notice`:** the logical notice shared by one or more source records.
 - **`notice_evidence`:** notice-version ID, text span, character offsets, and span hash.
 - **`snapshot_bundle` / `snapshot_import`:** provenance manifest, object references, hashes, parser version, import status, validation warnings, idempotency key, and metrics.
@@ -336,7 +336,7 @@ These are acceptance targets, not resume claims. README and resume copy use only
 ## 14. Testing Strategy
 
 - **Unit tests:** intent validation, date and money parsing, structured filters, deterministic deduplication, material-change detection, report validation, and scheduling.
-- **Snapshot adapter contract tests:** verify bundle manifests and hashes, parse saved raw responses, compare human-reviewed normalized records, and detect parser drift without network access.
+- **Snapshot adapter contract tests:** verify bundle manifests and hashes, parse saved raw responses or curated public excerpts according to capture kind, compare human-reviewed normalized records, and detect parser drift without network access.
 - **Graph integration tests:** fake model and fake tools verify routing, interrupts, recovery, bounded retries, degradation, and idempotency.
 - **API integration tests:** real PostgreSQL verifies migrations, transactions, advisory locks, notice versioning, checkpoint persistence, and subscription cursor updates.
 - **Frontend tests:** Vitest covers critical state rendering and error boundaries.
@@ -379,7 +379,7 @@ P0 is complete when:
 
 1. A fresh environment starts from documented commands and applies database migrations.
 2. Both official-source snapshot bundles pass provenance and hash validation and ingest normalized, versioned notices through the shared adapter contract.
-3. The representative query completes the confirmed LangGraph flow and produces a cited online report.
+3. The representative query runs over explicitly labeled synthetic-demo notices, completes the confirmed LangGraph flow, and produces a cited online report.
 4. Every factual report claim resolves to an immutable evidence span and source version.
 5. DOCX output matches the structured online report and can be retried without duplicating the logical report.
 6. A recurring query is explicitly confirmed, scheduled, locked against duplicate execution, and reports only new or materially changed notices.
@@ -387,7 +387,7 @@ P0 is complete when:
 8. A transient node failure resumes from a checkpoint without repeating successful upstream model work.
 9. The fixed evaluation command publishes all agreed metrics and clearly distinguishes targets from measured values.
 10. The six critical Playwright flows and all backend test layers pass in the documented environment.
-11. The deployed demonstration visibly labels all records as demonstration snapshots and exposes source URL, retrieval time, content hash, and freshness.
+11. The deployed demonstration visibly distinguishes official-source raw responses, curated public excerpts, and synthetic demo records and exposes URL, retrieval time, content hash, and freshness.
 12. README documents source policy, limitations, architecture, evaluation method, test commands, deployment, and reproducible demo steps.
 
 ## 17. Portfolio Narrative
