@@ -1,0 +1,1 @@
+"""BidScope typed domain contracts."""
