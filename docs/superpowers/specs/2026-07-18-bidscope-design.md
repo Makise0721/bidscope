@@ -29,7 +29,7 @@ P0 includes:
 
 1. Parse natural language into topics, expanded terms, regions, publication window, budget range, and schedule.
 2. Show parsed conditions for correction and confirmation.
-3. Query two public-source connectors over previously ingested and versioned notices.
+3. Query normalized and versioned notices imported from two official-source snapshot adapters.
 4. Apply structured filtering, keyword search, and semantic retrieval.
 5. Normalize fields, merge cross-source duplicates, and preserve notice versions.
 6. Bind every reported fact to a source notice and evidence span.
@@ -60,7 +60,7 @@ The Web application has five primary views:
 - **Run history:** inspect status, timing, errors, retries, node events, and rerun a failed node.
 - **Subscriptions and inbox:** manage schedules and review new, changed, or failed-run events.
 - **Evaluation:** compare quality, latency, and cost across evaluation runs.
-- **Data sources:** inspect connector health, last successful crawl, cursor, freshness, and circuit-breaker state.
+- **Data sources:** inspect snapshot provenance, import status, parser version, freshness, and validation warnings.
 
 The workbench uses a quiet three-column operational layout:
 
@@ -80,22 +80,23 @@ On narrow viewports, the evidence and trace column becomes a drawer instead of c
 6. Selecting a citation opens the exact evidence span and source version.
 7. The user downloads the DOCX.
 8. The user saves the confirmed schedule as a subscription.
-9. A prepared second run demonstrates new and materially changed notices.
-10. A prepared connector-failure scenario demonstrates partial results, a completeness warning, checkpoint recovery, and an idempotent retry.
+9. Importing a prepared second snapshot batch demonstrates new and materially changed notices on the next subscription run.
+10. A prepared missing, stale, or parser-invalid source snapshot demonstrates partial results, a completeness warning, checkpoint recovery, and an idempotent retry.
 
 ## 4. System Architecture
 
 BidScope separates ingestion from user-facing query execution.
 
-### 4.1 Incremental Ingestion Plane
+### 4.1 Snapshot Ingestion Plane
 
-Two connectors fetch public index and detail pages. Each connector owns its own cursor, rate limit, timeout, retry policy, health status, and circuit breaker. A failed connector does not block other connectors.
+P0 uses two source-specific snapshot adapters. Each adapter imports an explicitly supplied snapshot bundle, verifies its manifest and SHA-256 hashes, parses source-specific records, and emits the same normalized notice contract. A failed or stale snapshot from one source does not block the other source.
 
 The ingestion pipeline is:
 
 ```text
-connector fetch
-  -> raw response snapshot
+snapshot bundle + provenance manifest
+  -> integrity and source-policy validation
+  -> source-specific parsing
   -> field normalization
   -> deterministic validation
   -> immutable notice version
@@ -104,7 +105,7 @@ connector fetch
   -> embedding/index update
 ```
 
-A background crawl refreshes cached data. A user query normally reads the controlled data store instead of scraping entire websites in the request path. A bounded refresh tool may update a known source and time range when freshness is insufficient.
+Snapshot import is an explicit CLI or administrative action and is idempotent. User queries read only the controlled, versioned data store. P0 does not fetch public websites in the interactive path or on a background schedule. The adapter boundary remains compatible with a future authorized API or live-source implementation, but no live connector is part of the P0 runtime or acceptance criteria.
 
 ### 4.2 Query and Delivery Plane
 
@@ -190,25 +191,30 @@ Deterministic code handles:
 - Scheduling, locks, retries, and idempotency.
 - Rendering and delivery state transitions.
 
-## 6. Connectors and Source Policy
+## 6. Snapshot Adapters and Source Policy
 
-P0 targets:
+P0 imports snapshot bundles derived from public notices on:
 
 - 中国政府采购网.
 - 全国公共资源交易平台.
 
-A connector conforms to:
+A snapshot adapter conforms to:
 
 ```python
-class NoticeConnector(Protocol):
-    async def fetch_index(self, cursor: CrawlCursor) -> FetchBatch: ...
-    async def fetch_detail(self, item: SourceItem) -> RawNotice: ...
-    async def healthcheck(self) -> ConnectorHealth: ...
+class NoticeSnapshotAdapter(Protocol):
+    source: SourceName
+
+    def inspect(self, bundle: SnapshotBundle) -> SnapshotInspection: ...
+    def parse(self, bundle: SnapshotBundle) -> list[NormalizedNotice]: ...
 ```
 
-Connectors access only configured HTTPS hosts. They use respectful rate limits, identify the application where appropriate, and stop when authentication, CAPTCHA, access controls, or explicit blocking is encountered. JavaScript execution is disabled by default; Playwright is allowed only for a source whose public content cannot be obtained through a normal HTTP client and whose access policy permits it.
+A bundle contains raw HTML or JSON, the source URL, request method and non-secret request parameters, retrieval time, HTTP status, content type and charset, SHA-256 hashes, parser version, and an expected normalized record for contract tests. It never contains cookies, session credentials, CAPTCHA tokens or images, or downloaded attachments.
 
-The online demonstration includes public-page fixtures derived from captured notices. The UI labels records as either live-source data or demonstration snapshots. Snapshot mode is an explicit fallback, not a hidden substitution. Connector contract tests parse fixtures so changes in page structure are detectable without repeatedly hitting public services.
+The public URL patterns and page structures are observable, but neither source offers a documented, versioned public API or stable schema. During design research, 中国政府采购网 returned WAF responses including HTTP 403 and a frequent-access warning. 全国公共资源交易平台 exposed an undocumented Web POST used by its Vue page, but it includes CAPTCHA and anti-automation responses, a result cap, and heterogeneous upstream data. Reliable robots directives or an automated-access grant were not available for either source. Public browser visibility is therefore not treated as permission for automated collection.
+
+P0 is snapshot-only. Snapshots must be acquired manually or through a separately authorized process and then imported through an explicit CLI or administrative action. The deployed application never performs live page fetching. The UI labels every record as demonstration snapshot data and displays its source URL, retrieval time, content hash, and freshness warning. Contract tests parse raw fixtures and compare them with human-reviewed expected JSON without hitting public services.
+
+A future live adapter requires a separately documented authorization and source contract. It must use a configured HTTPS allowlist, stop at authentication, CAPTCHA, rate limiting, or access denial, and may not weaken the P0 snapshot path.
 
 ## 7. Data Model
 
@@ -218,7 +224,7 @@ Core records are:
 - **`notice_version`:** immutable raw snapshot reference, normalized fields, parser version, and content hash.
 - **`canonical_notice`:** the logical notice shared by one or more source records.
 - **`notice_evidence`:** notice-version ID, text span, character offsets, and span hash.
-- **`crawl_run` / `crawl_cursor`:** ingestion batch state, source cursor, failures, retry state, and metrics.
+- **`snapshot_bundle` / `snapshot_import`:** provenance manifest, object references, hashes, parser version, import status, validation warnings, idempotency key, and metrics.
 - **`query_run` / `run_event`:** graph execution status, node events, timing, errors, usage, and checkpoint linkage.
 - **`report` / `report_item`:** the structured report and claim-to-evidence references.
 - **`subscription` / `subscription_seen_item`:** confirmed schedule, normalized intent, last successful run, and seen notice/version pairs.
@@ -249,7 +255,8 @@ A claim must refer to an evidence record belonging to the cited notice version. 
 
 Errors are serialized using bounded types:
 
-- `ConnectorUnavailable`
+- `SnapshotIntegrityError`
+- `SnapshotStale`
 - `ParseDrift`
 - `IntentInvalid`
 - `RetrievalEmpty`
@@ -257,17 +264,17 @@ Errors are serialized using bounded types:
 - `ModelTransientError`
 - `DeliveryError`
 
-Network and transient model failures use exponential backoff with jitter and at most two retries. Parse drift opens the connector circuit and stores a diagnostic sample rather than repeatedly requesting a changed page. Empty retrieval is a valid result, not a system failure.
+Transient model failures use exponential backoff with jitter and at most two retries. Snapshot integrity failures stop that import before any application records are committed. Parse drift stores bounded parser diagnostics and marks the affected source snapshot invalid. Empty retrieval is a valid result, not a system failure.
 
-Every crawl batch, query run, subscription trigger, and report export has an idempotency key. A retry cannot create duplicate logical notices, inbox events, or report records. A connector outage produces partial results with a visible completeness warning when at least one source remains usable. A DOCX failure does not roll back the online report and can be retried independently.
+Every snapshot import, query run, subscription trigger, and report export has an idempotency key. A retry cannot create duplicate logical notices, inbox events, or report records. A missing, stale, or parser-invalid source produces partial results with a visible completeness warning when at least one source remains usable. A DOCX failure does not roll back the online report and can be retried independently.
 
 Graph checkpoints are written at node boundaries. Recovery resumes at the failed node and reuses persisted upstream outputs. Subscription execution uses PostgreSQL advisory locks, and repeated failures pause the subscription and create an inbox event.
 
 ## 10. Security Boundaries
 
-- Network tools use an explicit HTTPS host allowlist and block arbitrary URLs and redirect escapes.
-- The system does not bypass authentication, CAPTCHA, paywalls, access controls, or anti-bot protections.
-- Crawled content is untrusted data. It cannot override system instructions or request tool execution.
+- The P0 deployed runtime has no public-site fetch tool. Snapshot manifests accept source URLs only from an explicit HTTPS host allowlist and reject arbitrary URLs or redirect-derived provenance.
+- Snapshot acquisition must not bypass authentication, CAPTCHA, paywalls, access controls, or anti-bot protections.
+- Imported content is untrusted data. It cannot override system instructions or request tool execution.
 - Agent tools accept validated typed inputs and cannot execute arbitrary SQL, shell commands, or network calls.
 - Raw HTML is never rendered directly. Report text is escaped, URLs are validated, and generated filenames are sanitized.
 - API keys remain in server-side secrets. Logs exclude secrets, full prompts, and unnecessary user content.
@@ -282,7 +289,7 @@ Each run records:
 - Tool name, status, item counts, and retry state.
 - Typed errors and recovery decisions.
 - Model, token use, latency, and estimated cost.
-- Connector freshness and source completeness.
+- Snapshot provenance, age, parser status, and source completeness.
 
 The workbench streams run events through SSE. Run history supports inspection by `run_id` and an idempotent retry from an eligible failed node. Raw source bodies and model context are referenced by ID rather than copied into logs.
 
@@ -329,7 +336,7 @@ These are acceptance targets, not resume claims. README and resume copy use only
 ## 14. Testing Strategy
 
 - **Unit tests:** intent validation, date and money parsing, structured filters, deterministic deduplication, material-change detection, report validation, and scheduling.
-- **Connector contract tests:** parse saved public-page fixtures and verify normalized records and drift detection.
+- **Snapshot adapter contract tests:** verify bundle manifests and hashes, parse saved raw responses, compare human-reviewed normalized records, and detect parser drift without network access.
 - **Graph integration tests:** fake model and fake tools verify routing, interrupts, recovery, bounded retries, degradation, and idempotency.
 - **API integration tests:** real PostgreSQL verifies migrations, transactions, advisory locks, notice versioning, checkpoint persistence, and subscription cursor updates.
 - **Frontend tests:** Vitest covers critical state rendering and error boundaries.
@@ -342,8 +349,8 @@ These are acceptance targets, not resume claims. README and resume copy use only
 
 - Repository and development environment.
 - Database schema and migrations.
-- Connector protocol and two fixture-backed connector implementations.
-- Raw snapshots, normalization, versioning, deterministic quality gates, and ingestion tests.
+- Snapshot bundle contract and two fixture-backed source adapters.
+- Provenance and hash validation, normalization, versioning, deterministic quality gates, and idempotent import tests.
 
 ### Week 2: Agent and Reports
 
@@ -356,7 +363,7 @@ These are acceptance targets, not resume claims. README and resume copy use only
 
 - React workbench and SSE run timeline.
 - Run history, evidence drawer, subscriptions, scheduler, and inbox.
-- Connector health and partial-result states.
+- Snapshot provenance, freshness, parser warnings, and partial-result states.
 - Docker deployment and hosted smoke flow.
 
 ### Week 4: Evidence of Quality
@@ -371,16 +378,16 @@ These are acceptance targets, not resume claims. README and resume copy use only
 P0 is complete when:
 
 1. A fresh environment starts from documented commands and applies database migrations.
-2. Both connector fixtures ingest normalized, versioned notices through the same protocol used by live connectors.
+2. Both official-source snapshot bundles pass provenance and hash validation and ingest normalized, versioned notices through the shared adapter contract.
 3. The representative query completes the confirmed LangGraph flow and produces a cited online report.
 4. Every factual report claim resolves to an immutable evidence span and source version.
 5. DOCX output matches the structured online report and can be retried without duplicating the logical report.
 6. A recurring query is explicitly confirmed, scheduled, locked against duplicate execution, and reports only new or materially changed notices.
-7. A connector outage demonstrates partial results and a visible completeness warning.
+7. A missing, stale, or parser-invalid source snapshot demonstrates partial results and a visible completeness warning.
 8. A transient node failure resumes from a checkpoint without repeating successful upstream model work.
 9. The fixed evaluation command publishes all agreed metrics and clearly distinguishes targets from measured values.
 10. The six critical Playwright flows and all backend test layers pass in the documented environment.
-11. The deployed demonstration visibly labels live-source records and demonstration snapshots.
+11. The deployed demonstration visibly labels all records as demonstration snapshots and exposes source URL, retrieval time, content hash, and freshness.
 12. README documents source policy, limitations, architecture, evaluation method, test commands, deployment, and reproducible demo steps.
 
 ## 17. Portfolio Narrative
