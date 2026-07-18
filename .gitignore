@@ -1,1 +1,36 @@
 .worktrees/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Local services and object storage
+.data/
+.minio/
+.postgres/
+
+# Node tooling
+node_modules/
+.npm/
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
