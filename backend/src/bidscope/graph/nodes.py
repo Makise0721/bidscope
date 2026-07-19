@@ -22,12 +22,19 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 
 from bidscope.domain.enums import RunStatus
+from bidscope.domain.notices import NoticeEvidence
 from bidscope.domain.runs import RunEvent, SerializableError
 from bidscope.domain.types import BidScopeErrorCode
+from bidscope.evidence.extractor import extract_evidence
+from bidscope.evidence.validator import validate_report as validate_report_bindings
 from bidscope.graph.state import DuplicateGroup, RetrievalPlan
-from bidscope.llm.types import DuplicatePair
+from bidscope.llm.types import DuplicatePair, EvidenceSpan, ReportDraft, VerifiedOpportunity
 from bidscope.retrieval.deduplication import classify_duplicate
 from bidscope.retrieval.search import RetrievalFilter
+
+#: Maximum number of synthesis retries after a report-validation failure. The
+#: first failure retries synthesis once; a second failure gives up.
+MAX_SYNTHESIS_RETRIES = 1
 
 
 def _event(config: RunnableConfig, state: Any, node: str, event: str, status: str) -> RunEvent:
@@ -224,13 +231,141 @@ async def resolve_duplicates(state: Any, config: RunnableConfig) -> dict[str, An
     }
 
 
+async def verify_evidence(state: Any, config: RunnableConfig) -> dict[str, Any]:
+    """Bind each verified opportunity to immutable source evidence spans.
+
+    For every candidate notice, extracts a :class:`~bidscope.domain.notices.NoticeEvidence`
+    span per ``claim_supporting_text`` and records both the span (keyed in
+    ``evidence_by_id``) and a lightweight :class:`~bidscope.llm.types.EvidenceSpan`
+    reference on the :class:`~bidscope.llm.types.VerifiedOpportunity`. The model
+    port later quotes only these spans; the validator later checks that every
+    reported claim cites one of them.
+    """
+    deps = _deps(config)
+    views_by_id = deps.load_notice_views(list(state.candidate_notice_ids))
+    evidence_by_id: dict[str, NoticeEvidence] = {}
+    verified: list[VerifiedOpportunity] = []
+
+    for notice_version_id in state.candidate_notice_ids:
+        view = views_by_id.get(notice_version_id)
+        if view is None:
+            continue
+        source_text = "\n".join(view.claim_supporting_texts)
+        snippets = view.claim_supporting_texts
+        spans = extract_evidence(notice_version_id, source_text, snippets)
+        evidence_spans = []
+        for span in spans:
+            evidence_by_id[span.span_hash] = span
+            evidence_spans.append(EvidenceSpan(
+                evidence_id=span.span_hash,
+                text=span.text,
+                notice_id=notice_version_id,
+            ))
+        verified.append(VerifiedOpportunity(
+            notice_id=notice_version_id,
+            title=view.title or notice_version_id,
+            region=view.region,
+            purchaser=view.purchaser,
+            budget_raw=_format_money(view.budget_minor_units, view.budget_currency),
+            evidence=tuple(evidence_spans),
+        ))
+
+    return {
+        "evidence_by_id": evidence_by_id,
+        "verified_opportunities": verified,
+        "status": RunStatus.SYNTHESIZE_REPORT,
+        "node_events": [_event(config, state, "verify_evidence", "evidence_verified", "ok")],
+    }
+
+
+async def synthesize_report(state: Any, config: RunnableConfig) -> dict[str, Any]:
+    """Call the report model once per verified opportunity and merge the drafts."""
+    deps = _deps(config)
+    items = []
+    for opportunity in state.verified_opportunities:
+        draft = await deps.report_model.synthesize(opportunity)
+        items.extend(draft.items)
+
+    report = ReportDraft(items=items) if items else ReportDraft()
+    return {
+        "report": report,
+        "status": RunStatus.VALIDATE_REPORT,
+        "node_events": [_event(config, state, "synthesize_report", "report_synthesized", "ok")],
+    }
+
+
+async def validate_report(state: Any, config: RunnableConfig) -> dict[str, Any]:
+    """Validate the synthesized report against the bound evidence.
+
+    A valid report proceeds to delivery. An invalid one triggers at most one
+    synthesis retry (``retry_count``); a second failure records an
+    ``EvidenceInsufficient`` error and the run stops — no unsupported report
+    is ever delivered.
+    """
+    result = validate_report_bindings(state.report, state.evidence_by_id)
+    if result.valid:
+        return {
+            "status": RunStatus.PERSIST_AND_DELIVER,
+            "node_events": [_event(config, state, "validate_report", "report_valid", "ok")],
+        }
+
+    if state.retry_count < MAX_SYNTHESIS_RETRIES:
+        return {
+            "retry_count": state.retry_count + 1,
+            "report": None,
+            "status": RunStatus.SYNTHESIZE_REPORT,
+            "node_events": [_event(config, state, "validate_report", "report_invalid_retry", "ok")],
+        }
+
+    return {
+        "status": RunStatus.FAILED,
+        "report": None,
+        "errors": [SerializableError(
+            code=BidScopeErrorCode.EVIDENCE_INSUFFICIENT,
+            message=(
+                "Report cited unsupported claims after one synthesis retry;"
+                " refusing to deliver."
+            ),
+            details={"validation_errors": list(result.errors)},
+        )],
+        "node_events": [_event(config, state, "validate_report", "evidence_insufficient", "error")],
+    }
+
+
+async def persist_and_deliver(state: Any, config: RunnableConfig) -> dict[str, Any]:
+    """Finalize the run: the report is now trusted and the run is complete."""
+    return {
+        "status": RunStatus.COMPLETED,
+        "node_events": [_event(config, state, "persist_and_deliver", "run_completed", "ok")],
+    }
+
+
+def route_after_validate_report(state: Any) -> str:
+    """Loop back to synthesis on a retry, otherwise deliver or fail."""
+    if state.status == RunStatus.SYNTHESIZE_REPORT:
+        return "synthesize_report"
+    if state.status == RunStatus.PERSIST_AND_DELIVER:
+        return "persist_and_deliver"
+    return "__end__"
+
+
+def _format_money(minor_units: int | None, currency: str | None) -> str | None:
+    if minor_units is None:
+        return None
+    return f"{currency or 'CNY'} {minor_units}"
+
+
 __all__ = [
     "build_retrieval_plan",
     "confirm_intent",
     "parse_intent",
+    "persist_and_deliver",
     "pause",
     "resolve_duplicates",
     "retrieve_candidates",
     "route_after_confirm",
+    "route_after_validate_report",
+    "synthesize_report",
     "validate_intent",
+    "verify_evidence",
 ]

@@ -78,11 +78,11 @@ class ReportDraft(BaseModel):
 
     model_config = {"frozen": True}
 
-    items: Annotated[list[ReportItem], Field(default_factory=list)]
+    items: list[ReportItem] = Field(default_factory=list)
     freshness_window: str | None = None
-    source_availability: Annotated[list[str], Field(default_factory=list)]
+    source_availability: list[str] = Field(default_factory=list)
     completeness_warning: str | None = None
-    assumptions: Annotated[list[str], Field(default_factory=list)]
+    assumptions: list[str] = Field(default_factory=list)
 
 
 @dataclass(frozen=True)

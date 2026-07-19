@@ -120,6 +120,10 @@ def build_graph(
     graph.add_node("build_retrieval_plan", nodes.build_retrieval_plan)
     graph.add_node("retrieve_candidates", nodes.retrieve_candidates)
     graph.add_node("resolve_duplicates", nodes.resolve_duplicates)
+    graph.add_node("verify_evidence", nodes.verify_evidence)
+    graph.add_node("synthesize_report", nodes.synthesize_report)
+    graph.add_node("validate_report", nodes.validate_report)
+    graph.add_node("persist_and_deliver", nodes.persist_and_deliver)
 
     graph.set_entry_point("parse_intent")
     graph.add_edge("parse_intent", "validate_intent")
@@ -138,7 +142,20 @@ def build_graph(
     graph.add_edge("pause", "build_retrieval_plan")
     graph.add_edge("build_retrieval_plan", "retrieve_candidates")
     graph.add_edge("retrieve_candidates", "resolve_duplicates")
-    graph.set_finish_point("resolve_duplicates")
+    graph.add_edge("resolve_duplicates", "verify_evidence")
+    graph.add_edge("verify_evidence", "synthesize_report")
+    graph.add_edge("synthesize_report", "validate_report")
+    # A validation failure loops back to synthesis once (retry); otherwise the
+    # run delivers or fails as ``EvidenceInsufficient``.
+    graph.add_conditional_edges(
+        "validate_report",
+        nodes.route_after_validate_report,
+        {
+            "synthesize_report": "synthesize_report",
+            "persist_and_deliver": "persist_and_deliver",
+            "__end__": "__end__",
+        },
+    )
 
     # Interrupt AFTER ``pause`` so an awaiting-confirmation run pauses with the
     # status already applied; ``Command(resume=...)`` continues retrieval.

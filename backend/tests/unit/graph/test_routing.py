@@ -145,9 +145,9 @@ async def test_low_confidence_non_scheduled_still_confirms() -> None:
     paused = await graph.ainvoke({"user_request": "low confidence"}, config)
 
     assert paused["status"] == RunStatus.AWAITING_CONFIRMATION
-    # Resolving the confirmation completes the slice.
+    # Resolving the confirmation lets the run flow through to completion.
     resumed = await graph.ainvoke(Command(resume={"action": "approve"}), config)
-    assert resumed["status"] == RunStatus.CANDIDATES_RESOLVED
+    assert resumed["status"] == RunStatus.COMPLETED
 
 
 async def test_empty_retrieval_is_valid() -> None:
@@ -162,7 +162,7 @@ async def test_empty_retrieval_is_valid() -> None:
     if first.get("__interrupt__"):
         first = await graph.ainvoke(Command(resume={"action": "approve"}), config)
 
-    assert first["status"] == RunStatus.CANDIDATES_RESOLVED
+    assert first["status"] == RunStatus.COMPLETED
     assert first["candidate_notice_ids"] == []
     assert first["degraded_modes"] == []
 
@@ -178,6 +178,6 @@ async def test_vector_unavailable_degrades_lexically() -> None:
     if first.get("__interrupt__"):
         first = await graph.ainvoke(Command(resume={"action": "approve"}), config)
 
-    assert first["status"] == RunStatus.CANDIDATES_RESOLVED
+    assert first["status"] == RunStatus.COMPLETED
     assert first["candidate_notice_ids"] == ["demo-001"]
     assert first["degraded_modes"] == ["vector_unavailable"]

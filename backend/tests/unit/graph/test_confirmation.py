@@ -86,10 +86,11 @@ async def test_scheduled_query_interrupts_and_resumes() -> None:
     assert deps.searcher.search_count == 0
     assert paused["candidate_notice_ids"] == []
 
-    # Resuming with the application-level approval continues the workflow.
+    # Resuming with the application-level approval continues the workflow
+    # through retrieval, evidence binding, synthesis and delivery to completion.
     resumed = await graph.ainvoke(Command(resume={"action": "approve"}), config)
 
-    assert resumed["status"] == RunStatus.CANDIDATES_RESOLVED
+    assert resumed["status"] == RunStatus.COMPLETED
     assert resumed["search_intent"].schedule is not None
     assert resumed["candidate_notice_ids"]
     # Retrieval ran exactly once and resolved duplicates after it.
@@ -112,7 +113,7 @@ async def test_pause_blocks_until_resume() -> None:
     assert deps.searcher.search_count == 0
     # A resume command advances the run past confirmation to retrieval.
     resumed = await graph.ainvoke(Command(resume={"action": "approve"}), config)
-    assert resumed["status"] == RunStatus.CANDIDATES_RESOLVED
+    assert resumed["status"] == RunStatus.COMPLETED
     assert deps.searcher.search_count == 1
 
 

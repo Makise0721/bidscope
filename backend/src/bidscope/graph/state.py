@@ -23,9 +23,9 @@ from pydantic import BaseModel, Field
 
 from bidscope.domain.enums import RunStatus
 from bidscope.domain.intents import SearchIntent
-from bidscope.domain.reports import Report
+from bidscope.domain.notices import NoticeEvidence
 from bidscope.domain.runs import RunEvent, SerializableError
-from bidscope.llm.types import ModelUsage, VerifiedOpportunity
+from bidscope.llm.types import ModelUsage, ReportDraft, VerifiedOpportunity
 
 
 @dataclass(frozen=True)
@@ -74,6 +74,11 @@ class RunState(BaseModel):
     status: str = RunStatus.PENDING
     search_intent: SearchIntent | None = None
     retrieval_plan: RetrievalPlan | None = None
+    #: Notice-version ID -> immutable evidence span. Built by ``verify_evidence``
+    #: and read by ``validate_report``; never shipped out of the run.
+    evidence_by_id: Annotated[dict[str, NoticeEvidence], lambda left, right: {**left, **right}] = (
+        Field(default_factory=dict)
+    )
     candidate_notice_ids: Annotated[list[str], operator.add] = Field(default_factory=list)
     duplicate_groups: Annotated[list[DuplicateGroup], operator.add] = Field(
         default_factory=list
@@ -81,7 +86,10 @@ class RunState(BaseModel):
     verified_opportunities: Annotated[list[VerifiedOpportunity], operator.add] = Field(
         default_factory=list
     )
-    report: Report | None = None
+    #: A :class:`~bidscope.llm.types.ReportDraft` while the run is being
+    #: synthesized/validated. Clearing it (``None``) on a validation failure is
+    #: how the retry loop forces regeneration; the last writer wins.
+    report: Annotated[ReportDraft | None, lambda left, right: right] = None
     node_events: Annotated[list[RunEvent], operator.add] = Field(default_factory=list)
     token_usage: Annotated[list[ModelUsage], operator.add] = Field(default_factory=list)
     latency: dict[str, float] = Field(default_factory=dict)
