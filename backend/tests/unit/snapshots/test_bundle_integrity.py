@@ -1,0 +1,158 @@
+import hashlib
+import json
+from pathlib import Path
+
+from bidscope.snapshots.adapters import inspect_bundle
+
+
+def _write_bundle(tmp_path: Path, files: dict[str, str], manifest: dict) -> Path:
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    for name, content in files.items():
+        (bundle / name).write_text(content, encoding="utf-8")
+    (bundle / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return bundle
+
+
+def _manifest(payload_files: dict[str, str] | None = None, **overrides: object) -> dict:
+    payload_files = payload_files if payload_files is not None else {}
+    file_hashes = overrides.pop("files", {})
+    return {
+        "schema_version": 1,
+        "bundle_id": "ccgp-central-20260718",
+        "source": "ccgp",
+        "capture_kind": "curated_public_excerpt",
+        "source_urls": ["https://www.ccgp.gov.cn/cggg/zygg/gkzb/202607/example.htm"],
+        "retrieved_at": "2026-07-18T00:00:00+00:00",
+        "retrieval_outcome": "waf_blocked_after_public_verification",
+        "parser_version": "ccgp-v1",
+        "files": {
+            **{
+                name: hashlib.sha256(content.encode("utf-8")).hexdigest()
+                for name, content in payload_files.items()
+            },
+            **file_hashes,
+        },
+        **overrides,
+    }
+
+
+def test_inspect_bundle_rejects_modified_file(tmp_path: Path) -> None:
+    files = {"detail.html": "<html>original</html>"}
+    bundle = _write_bundle(tmp_path, files, _manifest(files))
+    (bundle / "detail.html").write_text("changed", encoding="utf-8")
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert any(error.code == "snapshot_integrity_error" for error in inspection.errors)
+
+
+def test_fixture_hash_is_sha256(tmp_path: Path) -> None:
+    files = {"detail.html": "<html>hello</html>"}
+    bundle = _write_bundle(tmp_path, files, _manifest(files))
+
+    payload = (bundle / "detail.html").read_bytes()
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is True
+    assert inspection.actual_hashes["detail.html"] == hashlib.sha256(payload).hexdigest()
+
+
+def test_inspect_bundle_rejects_undeclared_file(tmp_path: Path) -> None:
+    files = {"detail.html": "<html>x</html>"}
+    bundle = _write_bundle(tmp_path, files, _manifest(files))
+    (bundle / "extra.html").write_text("undeclared", encoding="utf-8")
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert any(error.code == "unexpected_file" for error in inspection.errors)
+
+
+def test_inspect_bundle_rejects_missing_declared_file(tmp_path: Path) -> None:
+    files = {"detail.html": "<html>x</html>"}
+    manifest = _manifest(files)
+    bundle = _write_bundle(tmp_path, {}, manifest)
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert any(error.code == "missing_file" for error in inspection.errors)
+
+
+def test_inspect_bundle_rejects_traversal_path_in_manifest(tmp_path: Path) -> None:
+    payload = {"detail.html": "<html>x</html>"}
+    # Path traversal: declared file would resolve outside the bundle dir.
+    manifest = _manifest(payload, files={"../escape.html": "a" * 64})
+    bundle = _write_bundle(tmp_path, payload, manifest)
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert any(error.code == "invalid_path" for error in inspection.errors)
+
+
+def test_inspect_bundle_rejects_non_https_official_source(tmp_path: Path) -> None:
+    files = {"detail.html": "<html>x</html>"}
+    manifest = _manifest(
+        files,
+        source_urls=["http://www.ccgp.gov.cn/insecure.htm"],
+    )
+    bundle = _write_bundle(tmp_path, files, manifest)
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert any(error.code == "invalid_source_url" for error in inspection.errors)
+
+
+def test_inspect_bundle_rejects_official_host_for_synthetic(tmp_path: Path) -> None:
+    files = {"detail.html": "<html>x</html>"}
+    manifest = _manifest(
+        files,
+        capture_kind="synthetic_demo",
+        source="synthetic_demo",
+        source_urls=["https://www.ccgp.gov.cn/demo.htm"],
+    )
+    bundle = _write_bundle(tmp_path, files, manifest)
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert any(error.code == "invalid_source_url" for error in inspection.errors)
+
+
+def test_inspect_bundle_requires_synthetic_source_for_synthetic_kind(tmp_path: Path) -> None:
+    files = {"detail.html": "<html>x</html>"}
+    manifest = _manifest(
+        files,
+        capture_kind="synthetic_demo",
+        source="ccgp",
+        source_urls=["https://example.invalid/demo.htm"],
+    )
+    bundle = _write_bundle(tmp_path, files, manifest)
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert any(error.code == "synthetic_source_mismatch" for error in inspection.errors)
+
+
+def test_inspect_bundle_accepts_valid_synthetic_bundle(tmp_path: Path) -> None:
+    files = {"detail.html": "<html>demo</html>"}
+    manifest = _manifest(
+        files,
+        bundle_id="demo-batch-1",
+        capture_kind="synthetic_demo",
+        source="synthetic_demo",
+        source_urls=["https://example.invalid/demo.htm"],
+        retrieval_outcome="n/a",
+    )
+    bundle = _write_bundle(tmp_path, files, manifest)
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is True
+    assert inspection.bundle_id == "demo-batch-1"
+    assert inspection.errors == []
