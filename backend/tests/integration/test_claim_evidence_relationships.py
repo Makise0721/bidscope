@@ -24,6 +24,7 @@ from bidscope.persistence.models import (
     ReportItem,
     SourceNotice,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -216,27 +217,17 @@ async def test_duplicate_claim_evidence_pair_is_rejected(
             await session.commit()
 
 
-async def test_cascade_delete_removes_citations(
+async def test_audit_records_are_protected_from_deletion(
     session_factory: async_sessionmaker[AsyncSession],
     evidence_rows: dict[str, str],
 ) -> None:
-    """Deleting the parent report item must cascade to claims and their citations."""
-    async with session_factory() as session:
-        item_id = await _make_report_item(session, evidence_rows["version_id"])
+    """Report claims and their evidence citations are immutable audit records.
 
-        claim = ReportClaim(report_item_id=item_id, text="claim")
-        session.add(claim)
-        await session.flush()
-
-        session.add(
-            ReportClaimCitation(
-                report_claim_id=claim.id,
-                evidence_id=evidence_rows["evidence_a"],
-                label="x",
-            )
-        )
-        await session.commit()
-
+    The foreign keys use NO ACTION so a populated report item / claim cannot
+    be deleted directly; the audit trail is preserved and reports are retired
+    via archival rather than physical removal. Each assertion uses a fresh
+    session so an expectedIntegrityError does not break later steps.
+    """
     # Ensure a clean slate: clean_tables only truncates notices, so the
     # report tables must be reset explicitly for this test.
     async with session_factory() as session:
@@ -245,15 +236,14 @@ async def test_cascade_delete_removes_citations(
         ))
         await session.commit()
 
-    created_report_id: str
+    claim_id: str
+    item_id: str
     async with session_factory() as session:
         item_id = await _make_report_item(session, evidence_rows["version_id"])
         claim = ReportClaim(report_item_id=item_id, text="claim")
         session.add(claim)
         await session.flush()
-        created_report_id = (await session.execute(
-            sa.select(Report.id).join(ReportItem).where(ReportItem.id == item_id)
-        )).scalar_one()
+        claim_id = claim.id
         session.add(
             ReportClaimCitation(
                 report_claim_id=claim.id,
@@ -263,19 +253,16 @@ async def test_cascade_delete_removes_citations(
         )
         await session.commit()
 
+    # Deleting the claim while it still has citations must fail.
     async with session_factory() as session:
-        # Remove descendants in FK-safe order: citations, then claims, then items.
-        await session.execute(sa.text(
-            "DELETE FROM report_claim_citations WHERE report_claim_id IN "
-            "(SELECT id FROM report_claims WHERE report_item_id IN "
-            "(SELECT id FROM report_items WHERE report_id = :rid))"
-        ), {"rid": created_report_id})
-        await session.execute(sa.text(
-            "DELETE FROM report_claims WHERE report_item_id IN "
-            "(SELECT id FROM report_items WHERE report_id = :rid)"
-        ), {"rid": created_report_id})
-        await session.commit()
+        claim = await session.get(ReportClaim, claim_id)
+        with pytest.raises(IntegrityError):
+            await session.delete(claim)
+            await session.commit()
 
+    # Deleting the parent report_item while it still has claims must fail.
     async with session_factory() as session:
-        assert await _count(session, ReportClaim) == 0
-        assert await _count(session, ReportClaimCitation) == 0
+        item = await session.get(ReportItem, item_id)
+        with pytest.raises(IntegrityError):
+            await session.delete(item)
+            await session.commit()

@@ -5,6 +5,10 @@ capture kind, source-URL host and external identifier agreeing with one
 another. Both :class:`~bidscope.domain.snapshots.SnapshotManifest` and
 :class:`~bidscope.domain.notices.NormalizedNotice` route through
 :func:`validate_provenance` so the rule lives in exactly one place.
+
+Official sources map to a precise set of hosts: an official notice may only
+be attributed to the host(s) operated by its declared publisher, preventing
+one official source from impersonating another.
 """
 
 from __future__ import annotations
@@ -13,7 +17,14 @@ from dataclasses import dataclass
 
 from bidscope.domain.enums import CaptureKind, SourceName
 
-OFFICIAL_HOSTS = {"www.ccgp.gov.cn", "search.ccgp.gov.cn", "www.ggzy.gov.cn"}
+#: Per-source host allowlist. An official notice's host must belong to its
+#: declared publisher, which stops CCGP data being attributed to ggzy.gov.cn
+#: and vice versa.
+OFFICIAL_HOSTS_BY_SOURCE: dict[SourceName, frozenset[str]] = {
+    SourceName.CCGP: frozenset({"www.ccgp.gov.cn", "search.ccgp.gov.cn"}),
+    SourceName.GGZY: frozenset({"www.ggzy.gov.cn"}),
+}
+OFFICIAL_HOSTS: frozenset[str] = frozenset().union(*OFFICIAL_HOSTS_BY_SOURCE.values())
 SYNTHETIC_HOST = "example.invalid"
 _SYNTHETIC_ID_PREFIX = "demo-"
 
@@ -41,8 +52,9 @@ def validate_provenance(
       resolve to ``example.invalid`` and carry an ``external_id`` prefixed
       with ``demo-``.
     * Official capture kinds (``raw_response``, ``curated_public_excerpt``)
-      must declare an official source, resolve to a host in
-      :data:`OFFICIAL_HOSTS` and must not impersonate a synthetic id.
+      must declare an official source, resolve to a host in that source's
+      :data:`OFFICIAL_HOSTS_BY_SOURCE` entry and must not impersonate a
+      synthetic id.
     """
     errors: list[str] = []
 
@@ -69,9 +81,14 @@ def validate_provenance(
             errors.append(
                 f"official capture kinds must not use {SYNTHETIC_HOST}; got {host}"
             )
-        if host not in OFFICIAL_HOSTS:
+        allowed = OFFICIAL_HOSTS_BY_SOURCE.get(source)
+        if allowed is None:
             errors.append(
-                f"official bundles may only reference {sorted(OFFICIAL_HOSTS)}; got {host}"
+                f"official capture kinds require an official source; got {source.value}"
+            )
+        elif host not in allowed:
+            errors.append(
+                f"source {source.value} may only reference {sorted(allowed)}; got {host}"
             )
         if external_id.startswith(_SYNTHETIC_ID_PREFIX):
             errors.append(
@@ -82,10 +99,10 @@ def validate_provenance(
     return ProvenanceValidation(valid=not errors, errors=tuple(errors))
 
 
-def allowed_hosts_for(capture_kind: CaptureKind) -> frozenset[str]:
+def allowed_hosts_for(source: SourceName, capture_kind: CaptureKind) -> frozenset[str]:
     if capture_kind == CaptureKind.SYNTHETIC_DEMO:
         return frozenset({SYNTHETIC_HOST})
-    return frozenset(OFFICIAL_HOSTS)
+    return OFFICIAL_HOSTS_BY_SOURCE.get(source, frozenset())
 
 
 def expected_id_prefixes(capture_kind: CaptureKind) -> tuple[str, ...]:

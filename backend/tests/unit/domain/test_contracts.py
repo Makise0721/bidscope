@@ -241,6 +241,54 @@ def test_error_code_rejects_arbitrary_string() -> None:
         SerializableError(code="anything_goes", message="x")
 
 
+def test_normalized_notice_accepts_ccgp_with_ccgp_host() -> None:
+    from bidscope.domain.notices import NormalizedNotice
+    n = NormalizedNotice(
+        source=SourceName.CCGP,
+        external_id="SC-2026",
+        source_url="https://www.ccgp.gov.cn/a.htm",
+        capture_kind=CaptureKind.CURATED_PUBLIC_EXCERPT,
+        parser_version="v1",
+    )
+    assert n.source == SourceName.CCGP
+
+
+def test_normalized_notice_accepts_ggzy_with_ggzy_host() -> None:
+    from bidscope.domain.notices import NormalizedNotice
+    n = NormalizedNotice(
+        source=SourceName.GGZY,
+        external_id="CQ-2026",
+        source_url="https://www.ggzy.gov.cn/a.htm",
+        capture_kind=CaptureKind.CURATED_PUBLIC_EXCERPT,
+        parser_version="v1",
+    )
+    assert n.source == SourceName.GGZY
+
+
+def test_normalized_notice_rejects_ccgp_with_ggzy_host() -> None:
+    from bidscope.domain.notices import NormalizedNotice
+    with pytest.raises(ValidationError):
+        NormalizedNotice(
+            source=SourceName.CCGP,
+            external_id="SC-2026",
+            source_url="https://www.ggzy.gov.cn/a.htm",
+            capture_kind=CaptureKind.CURATED_PUBLIC_EXCERPT,
+            parser_version="v1",
+        )
+
+
+def test_normalized_notice_rejects_ggzy_with_ccgp_host() -> None:
+    from bidscope.domain.notices import NormalizedNotice
+    with pytest.raises(ValidationError):
+        NormalizedNotice(
+            source=SourceName.GGZY,
+            external_id="CQ-2026",
+            source_url="https://www.ccgp.gov.cn/a.htm",
+            capture_kind=CaptureKind.CURATED_PUBLIC_EXCERPT,
+            parser_version="v1",
+        )
+
+
 def test_normalized_notice_rejects_synthetic_kind_with_official_source() -> None:
     from bidscope.domain.notices import NormalizedNotice
 
