@@ -1,8 +1,9 @@
 from typing import Annotated, Any
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 from bidscope.domain.enums import CaptureKind, SourceName
+from bidscope.domain.provenance import validate_provenance
 from bidscope.domain.types import AwareDatetime
 
 
@@ -28,6 +29,16 @@ class NormalizedNotice(BaseModel):
     summary: str | None = None
     parser_version: str
     raw_fields: Annotated[dict[str, Any], Field(default_factory=dict)]
+
+    @model_validator(mode="after")
+    def _validate_provenance(self) -> "NormalizedNotice":
+        validate_provenance(
+            source=self.source,
+            capture_kind=self.capture_kind,
+            host=self.source_url.host,
+            external_id=self.external_id,
+        ).raise_invalid()
+        return self
 
 
 class NoticeEvidence(BaseModel):

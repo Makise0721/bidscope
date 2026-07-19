@@ -4,10 +4,11 @@ from typing import Annotated
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 from bidscope.domain.enums import CaptureKind, SourceName
+from bidscope.domain.provenance import (
+    validate_provenance,
+)
 from bidscope.domain.types import AwareDatetime
 
-OFFICIAL_HOSTS = {"www.ccgp.gov.cn", "search.ccgp.gov.cn", "www.ggzy.gov.cn"}
-SYNTHETIC_HOST = "example.invalid"
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
@@ -50,27 +51,14 @@ class SnapshotManifest(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _validate_source_and_hosts(self) -> "SnapshotManifest":
-        if self.capture_kind == CaptureKind.SYNTHETIC_DEMO:
-            if self.source != SourceName.SYNTHETIC_DEMO:
-                raise ValueError("synthetic_demo bundles must declare source=synthetic_demo")
-            for url in self.source_urls:
-                if url.host != SYNTHETIC_HOST:
-                    raise ValueError(
-                        f"synthetic_demo URLs must use {SYNTHETIC_HOST}: {url}"
-                    )
-        else:
-            if self.source == SourceName.SYNTHETIC_DEMO:
-                raise ValueError(
-                    "official capture kinds must not use source=synthetic_demo"
-                )
-            for url in self.source_urls:
-                if url.host == SYNTHETIC_HOST:
-                    raise ValueError(
-                        f"official capture kinds must not use {SYNTHETIC_HOST}: {url}"
-                    )
-                if url.host not in OFFICIAL_HOSTS:
-                    raise ValueError(
-                        f"official bundles may only reference {sorted(OFFICIAL_HOSTS)}: {url}"
-                    )
+    def _validate_provenance(self) -> "SnapshotManifest":
+        # Source/capture_kind agreement is enforced uniformly via the shared
+        # provenance validator; host agreement is checked per-URL.
+        for url in self.source_urls:
+            validate_provenance(
+                source=self.source,
+                capture_kind=self.capture_kind,
+                host=url.host,
+                external_id=self.bundle_id,
+            ).raise_invalid()
         return self

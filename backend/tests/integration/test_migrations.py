@@ -22,9 +22,13 @@ async def test_initial_migration_creates_core_tables(db_engine: sa.ext.asyncio.A
         "run_events",
         "reports",
         "report_items",
+        "report_claims",
+        "report_claim_citations",
+        "report_citations",
         "subscriptions",
         "subscription_seen_items",
         "inbox_events",
+        "eval_cases",
         "eval_runs",
     } <= set(names)
 
@@ -40,7 +44,7 @@ async def test_migration_enables_required_extensions(
     assert {"vector", "pg_trgm"} <= extensions
 
 
-def test_alembic_uses_settings_checkpoint_url() -> None:
+async def test_alembic_uses_settings_checkpoint_url() -> None:
     """Alembic must follow BIDSCOPE_CHECKPOINT_DATABASE_URL, not a hardcoded default.
 
     With an unreachable checkpoint URL the command must fail rather than
@@ -62,3 +66,36 @@ def test_alembic_uses_settings_checkpoint_url() -> None:
     combined = result.stdout + result.stderr
     assert result.returncode != 0, "alembic must fail when the checkpoint URL is unreachable"
     assert "65432" in combined or "connection" in combined.lower()
+
+
+async def test_idempotency_keys_are_non_null_without_random_default(
+    db_engine: sa.ext.asyncio.AsyncEngine,
+) -> None:
+    """Idempotency columns must be non-nullable and have no server default.
+
+    The application is responsible for deriving a semantic idempotency key;
+    a random default would mask missing-key bugs and would not be unique in
+    practice. The ORM and the migrated schema must agree on both points.
+    """
+    async with db_engine.connect() as connection:
+        rows = await connection.execute(
+            sa.text(
+                "SELECT table_name, column_name, is_nullable, column_default "
+                "FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND column_name IN "
+                "('idempotency_key', 'run_key', 'export_key', 'trigger_key')"
+            )
+        )
+        found = {(row[0], row[1]): (row[2], row[3]) for row in rows}
+    expected = {
+        ("snapshot_imports", "idempotency_key"),
+        ("query_runs", "run_key"),
+        ("reports", "export_key"),
+        ("subscriptions", "trigger_key"),
+    }
+    assert expected <= set(found.keys()), f"missing idempotency columns: {found}"
+    for key, (is_nullable, column_default) in found.items():
+        assert is_nullable == "NO", f"{key} must be non-nullable"
+        assert column_default is None, (
+            f"{key} must have no server default, got {column_default!r}"
+        )

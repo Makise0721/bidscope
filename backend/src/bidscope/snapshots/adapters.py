@@ -24,6 +24,12 @@ class InspectionResult:
 
 
 def _sha256(path: Path) -> str:
+    """Return the SHA-256 hex digest of a regular file.
+
+    Raises :class:`OSError` (e.g. permission denied) so the caller can convert
+    it into a typed :class:`InspectionError` instead of leaking a raw system
+    exception.
+    """
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(65536), b""):
@@ -133,7 +139,31 @@ def inspect_bundle(bundle_path: Path) -> InspectionResult:
         if not target.exists():
             errors.append(InspectionError("missing_file", f"declared file missing: {name}", name))
             continue
-        actual = _sha256(target)
+        # Reject anything that is not a regular file: directories, symlinks,
+        # FIFOs, devices, etc. Symlinks are checked explicitly because a symlink
+        # resolving to a regular file would otherwise pass ``is_file()``.
+        if target.is_symlink() or not target.is_file():
+            errors.append(
+                InspectionError(
+                    "invalid_file_type",
+                    f"declared file must be a regular file, got: {name}",
+                    name,
+                )
+            )
+            continue
+        try:
+            actual = _sha256(target)
+        except OSError as error:
+            # Convert raw OS errors (permission denied, I/O errors) into typed
+            # inspection errors so malicious manifests cannot crash inspection.
+            errors.append(
+                InspectionError(
+                    "file_read_error",
+                    f"could not read declared file {name}: {error}",
+                    name,
+                )
+            )
+            continue
         actual_hashes[name] = actual
         if actual.lower() != expected_hash.lower():
             errors.append(

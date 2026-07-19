@@ -2,6 +2,7 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
 from bidscope.snapshots.adapters import inspect_bundle
 
 
@@ -229,6 +230,50 @@ def test_inspect_bundle_rejects_non_object_manifest(tmp_path: Path) -> None:
 
     assert inspection.valid is False
     assert any(error.code == "invalid_manifest" for error in inspection.errors)
+
+
+
+def test_inspect_bundle_rejects_directory_as_payload(tmp_path: Path) -> None:
+    """Declaring a directory (e.g. ".") as a payload must be rejected."""
+    import hashlib
+
+    payload = {"detail.html": "<html>x</html>"}
+    bundle = _write_bundle(tmp_path, payload, _manifest(payload))
+    dir_hash = hashlib.sha256(b"").hexdigest()
+    manifest = _manifest(payload, files={".": dir_hash})
+    (bundle / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert any(error.code == "invalid_file_type" for error in inspection.errors)
+
+
+def test_inspect_bundle_rejects_symlink_as_payload(tmp_path: Path) -> None:
+    """A symlink declared as a payload must be rejected as invalid_file_type."""
+    import hashlib
+    import sys
+
+    payload = {"detail.html": "<html>x</html>"}
+    bundle = _write_bundle(tmp_path, payload, _manifest(payload))
+    target = tmp_path / "real-target.txt"
+    target.write_text("target", encoding="utf-8")
+    link = bundle / "link.html"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        if sys.platform == "win32":
+            pytest.skip("symlink creation requires privileges on Windows")
+        raise
+
+    link_hash = hashlib.sha256(b"target").hexdigest()
+    manifest = _manifest(payload, files={"link.html": link_hash})
+    (bundle / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert any(error.code == "invalid_file_type" for error in inspection.errors)
 
 
 def test_inspect_bundle_rejects_empty_bundle_id(tmp_path: Path) -> None:

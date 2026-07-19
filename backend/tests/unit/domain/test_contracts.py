@@ -86,6 +86,7 @@ def test_synthetic_demo_manifest_requires_example_invalid_host() -> None:
 
 def test_synthetic_demo_manifest_accepts_example_invalid_host() -> None:
     data = valid_manifest() | {
+        "bundle_id": "demo-batch-1",
         "capture_kind": CaptureKind.SYNTHETIC_DEMO,
         "source": SourceName.SYNTHETIC_DEMO,
         "source_urls": ["https://example.invalid/demo-001"],
@@ -238,6 +239,45 @@ def test_error_code_rejects_arbitrary_string() -> None:
     """SerializableError.code must be one of the bounded error codes."""
     with pytest.raises(ValidationError):
         SerializableError(code="anything_goes", message="x")
+
+
+def test_normalized_notice_rejects_synthetic_kind_with_official_source() -> None:
+    from bidscope.domain.notices import NormalizedNotice
+
+    with pytest.raises(ValidationError):
+        NormalizedNotice(
+            source=SourceName.CCGP,
+            external_id="demo-1",
+            source_url="https://example.invalid/demo-1",
+            capture_kind=CaptureKind.SYNTHETIC_DEMO,
+            parser_version="v1",
+        )
+
+
+def test_normalized_notice_rejects_official_kind_with_synthetic_source() -> None:
+    from bidscope.domain.notices import NormalizedNotice
+
+    with pytest.raises(ValidationError):
+        NormalizedNotice(
+            source=SourceName.SYNTHETIC_DEMO,
+            external_id="SC-2026",
+            source_url="https://www.ccgp.gov.cn/a.htm",
+            capture_kind=CaptureKind.CURATED_PUBLIC_EXCERPT,
+            parser_version="v1",
+        )
+
+
+def test_normalized_notice_rejects_synthetic_kind_without_demo_prefix() -> None:
+    from bidscope.domain.notices import NormalizedNotice
+
+    with pytest.raises(ValidationError):
+        NormalizedNotice(
+            source=SourceName.SYNTHETIC_DEMO,
+            external_id="SC-2026",
+            source_url="https://example.invalid/demo-1",
+            capture_kind=CaptureKind.SYNTHETIC_DEMO,
+            parser_version="v1",
+        )
 
 
 def test_normalized_notice_rejects_naive_datetime() -> None:
