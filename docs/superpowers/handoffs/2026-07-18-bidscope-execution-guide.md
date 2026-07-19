@@ -4,51 +4,48 @@
 **项目根仓库：** `C:\Users\29913\zcode_workspace\bidscope`  
 **实现 worktree：** `C:\Users\29913\zcode_workspace\bidscope\.worktrees\bidscope-p0`  
 **实现分支：** `feat/bidscope-p0`  
-**任务 1 草稿起点：** `198ba54 chore: ignore local worktrees`（手册提交后分支 HEAD 会前进，但任务 1 仍未提交）  
+**当前代码基线：** `9473946 fix: official source-to-host mapping and audit-record immutability`（接管时 HEAD 还会包含本交接文档的纯文档提交）
+**已通过审查：** 任务 1-4 及三个修复提交；下一批只执行任务 5-8
 **设计规格：** `docs/superpowers/specs/2026-07-18-bidscope-design.md`  
 **详细计划：** `docs/superpowers/plans/2026-07-18-bidscope-implementation.md`  
-**本文版本：** 2026-07-18
+**本文版本：** 2026-07-19
 
 ---
 
 ## 0. 可以直接交给接管模型的启动提示词
 
-将下面整段原样交给接管模型。第一次只让它执行任务 1，不要一次要求完成全部 20 个任务。
+将下面整段原样交给负责任务 5-8 的新模型。第一次只让它执行任务 5；任务 5 提交并自检后再继续任务 6。
 
 ```text
-你正在实现 BidScope。请严格遵守以下规则：
+你正在接管 BidScope 的第二个实现批次，只执行任务 5-8。
 
 1. 只在这个目录工作：
    C:\Users\29913\zcode_workspace\bidscope\.worktrees\bidscope-p0
-2. 当前分支必须是 feat/bidscope-p0；禁止在 main 上实现。
-3. 先阅读：
+2. 当前分支必须是 feat/bidscope-p0；提交 9473946 必须是 HEAD 的祖先。
+3. 9473946 之后在接管前只允许存在本交接文档的纯文档提交。若出现其他代码提交，停止并报告。
+4. 任务 1-4 已通过三轮审查。禁止改写、回退或顺手重构任务 1-4。
+5. 先阅读：
    - docs/superpowers/specs/2026-07-18-bidscope-design.md
    - docs/superpowers/plans/2026-07-18-bidscope-implementation.md
    - docs/superpowers/handoffs/2026-07-18-bidscope-execution-guide.md
-4. 当前只执行执行手册指定的一个任务。不要提前创建后续任务的文件。
-5. 严格执行 TDD：
-   - 先写测试；
-   - 运行测试并看见它因功能缺失而失败；
-   - 保存 RED 命令与关键输出；
-   - 再写最小生产代码；
-   - 运行目标测试得到 GREEN；
-   - 最后运行该任务规定的完整验证。
-6. 不得把路径错误、依赖缺失、语法错误当作有效 RED。有效 RED 必须说明：测试已经被 pytest/Vitest 收集，失败原因是目标行为尚未实现。
-7. 不得绕过登录、验证码、WAF、付费墙或反爬措施。P0 运行时不访问任何招投标网站。
-8. 官方来源数据、公开摘录、合成 Demo 数据必须严格区分：
-   - raw_response
-   - curated_public_excerpt
-   - synthetic_demo
-9. 合成数据只能使用 example.invalid URL、demo-* 或 eval-* ID，并在 UI/报告中明确标注。
-10. 每个任务完成后：
-    - 运行 git diff --check；
-    - 检查 git status；
-    - 提交且只提交该任务；
-    - 返回 RED、GREEN、完整验证、提交 SHA、遗留问题。
-11. 遇到不确定行为时，不要猜。先查设计规格和详细计划；仍不清楚才停止并报告。
-12. 禁止删除或覆盖不属于当前任务的文件，禁止重置 main，禁止 git reset --hard。
+6. 当前先执行任务 5。任务 5 独立提交后才执行任务 6；依次完成到任务 8。
+7. 严格执行 TDD：先写测试并取得有效 RED，再写最小生产代码，最后取得 GREEN 和完整门禁。
+8. 路径错误、依赖缺失、语法错误、数据库未启动都不是有效 RED。有效 RED 必须来自目标模块或行为尚未实现。
+9. P0 是 snapshot-only。禁止访问、抓取或探测 CCGP、GGZY 或其他招投标网站。
+10. 数据真实性边界不可改变：
+   - raw_response：真实原始响应
+   - curated_public_excerpt：人工核验公开摘录
+   - synthetic_demo：明确合成数据
+11. 合成数据只能使用 source=synthetic_demo、example.invalid URL、demo-* ID。
+12. CCGP 只允许 www.ccgp.gov.cn/search.ccgp.gov.cn；GGZY 只允许 www.ggzy.gov.cn。
+13. 每个任务必须独立提交，提交消息使用实施计划中的固定文本。
+14. 每个任务结束前运行目标测试、Ruff、mypy、git diff --cached --check，并确认工作树干净。
+15. 禁止提前实现任务 9，禁止添加 LLM、LangGraph 节点、API 或前端代码。
+16. 完成任务 8 后立即暂停，不要执行任务 9。按本文“第二批审查包模板”输出四个提交和验证证据。
+17. 遇到规格冲突或必须访问外部网站才能继续时，停止并报告，不要猜测或绕过限制。
+18. 禁止 git reset --hard、禁止改写 main、禁止 push、禁止发布外部服务。
 
-当前从任务 1 开始。先执行“第 3 节：任务 1 现场恢复”，不要实现任务 2。
+第一条操作：核验 branch=feat/bidscope-p0、9473946 是 HEAD 祖先、9473946..HEAD 只有交接文档、工作树干净，然后只开始任务 5 的 RED。
 ```
 
 ---
@@ -109,16 +106,15 @@ BidScope 是一个证据优先的招投标情报 Agent。用户输入自然语�
 
 ---
 
-## 2. 当前现场：接管前必须知道
+## 2. 当前现场：任务 5-8 接管前必须知道
 
-### 2.1 Git 结构
+### 2.1 Git 结构与审查基线
 
 主仓库：
 
 ```text
 C:\Users\29913\zcode_workspace\bidscope
 branch: main
-HEAD: 198ba54 chore: ignore local worktrees
 status: clean
 ```
 
@@ -127,68 +123,48 @@ status: clean
 ```text
 C:\Users\29913\zcode_workspace\bidscope\.worktrees\bidscope-p0
 branch: feat/bidscope-p0
-HEAD: 198ba54 chore: ignore local worktrees
+code baseline: 9473946 fix: official source-to-host mapping and audit-record immutability
+HEAD: code baseline + this handoff's documentation-only commit
+status: clean
 ```
 
-禁止在主仓库目录实施。所有代码命令都应明确使用实现 worktree。
+禁止在主仓库目录实施。新模型开始前必须得到完全相同的 branch、HEAD 和 clean status；否则停止并报告现场漂移。
 
-### 2.2 任务 1 当前未提交文件
+### 2.2 已完成并冻结的任务 1-4
 
-实现 worktree 当前预期状态：
+以下提交已经通过三轮审查，不应在任务 5-8 中改写：
 
 ```text
- M .gitignore
-?? .env.example
-?? backend/
-?? compose.yaml
-?? pyproject.toml
-?? uv.lock
+a7a9c82  任务 1：仓库骨架与健康检查
+d5f037b  任务 2：类型化领域契约
+766839f  任务 3：PostgreSQL 持久层
+5f02c97  任务 4：快照完整性与对象存储
+b0129e2  修复 1：测试库、Alembic、Manifest、对象存储、S3
+ed1d1ce  修复 2：双 URL 守卫、provenance、文件类型、claim-evidence
+9473946  修复 3：官方 host 精确映射、审计记录不可变
 ```
 
-这些是一次未完成的任务 1 尝试。不要直接提交，也不要假定它们正确。
+冻结边界：
 
-现有测试文件：
+- 不删除或放宽测试数据库 fail-closed 守卫。
+- 不改变官方 source-to-host 映射。
+- 不让 synthetic_demo 冒充官方来源。
+- 不取消 claim-to-evidence 多对多关系。
+- 不把审计记录改为可物理级联删除。
+- 不绕过 Manifest 完整性、目录/symlink 和 SHA-256 校验。
 
-- `backend/tests/unit/test_clock.py`
-- `backend/tests/unit/test_health.py`
+如果任务 5-8 必须修改任务 1-4 文件，只能做当前任务不可避免的接口扩展，并在审查包中逐项解释。
 
-现有项目配置草稿：
+### 2.3 当前依赖、数据库与验证状态
 
-- `pyproject.toml`
-- `uv.lock`
-- `.env.example`
-- `compose.yaml`
-- `.gitignore`
-
-生产模块已经为了恢复 TDD 顺序而删除，预期不存在：
-
-- `backend/src/bidscope/clock.py`
-- `backend/src/bidscope/config.py`
-- `backend/src/bidscope/main.py`
-
-保留的空包文件：
-
-- `backend/src/bidscope/__init__.py`
-
-### 2.3 虚拟环境状态
-
-存在：
+虚拟环境已同步，可直接使用：
 
 ```text
 .worktrees\bidscope-p0\.venv\Scripts\python.exe
 Python 3.12.10
 ```
 
-但在最后一次核验时：
-
-```text
-fastapi=missing
-pytest=missing
-```
-
-`uv.lock` 已生成，但 `uv sync --all-groups --frozen` 多次被终端任务中断，不能认为依赖安装完成。
-
-锁文件中关键解析版本包括：
+关键锁定版本：
 
 - FastAPI `0.139.2`
 - LangGraph `0.6.11`
@@ -197,33 +173,52 @@ pytest=missing
 - mypy `1.20.2`
 - Ruff `0.15.22`
 
-注意：详细计划曾参考更新版 LangGraph 官方示例。实际锁定的是 LangGraph 0.6.11。实现任务 10/12 前必须针对这个锁定版本核验 `interrupt`、`Command`、stream 和 `AsyncPostgresSaver` API，不能机械照抄其他版本示例。
+PostgreSQL Compose 服务已用于测试。集成测试只能使用：
 
-### 2.4 进程状态
+```text
+BIDSCOPE_APP_MODE=test
+BIDSCOPE_DATABASE_URL=postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test
+BIDSCOPE_CHECKPOINT_DATABASE_URL=postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test
+```
 
-最后一个残留 `uv` Windows 进程已被终止。接管模型仍应先运行：
+两个数据库 URL 必须指向同一 host、port 和 test/e2e 数据库；仅 driver 可不同。
+
+任务 1-4 放行时的独立门禁：
+
+```text
+pytest:        88 passed, 1 skipped, 1 warning
+Ruff:          passed
+mypy:          21 source files passed
+Alembic check: passed
+cumulative diff check: passed
+```
+
+Windows symlink 测试因权限不足跳过，后续 Linux CI 必须运行。FastAPI/Starlette 有一条上游弃用警告，当前不阻断任务 5-8。
+
+### 2.4 接管前进程与服务检查
+
+先运行：
 
 ```bash
 ps -W | rg -i 'uv|pytest|python' || true
+docker compose -f "C:/Users/29913/zcode_workspace/bidscope/.worktrees/bidscope-p0/compose.yaml" ps
 ```
 
-如果看到与本项目相关的残留进程，先根据 Windows PID 终止。`ps -W` 输出中通常：
-
-```text
-POSIX_PID PPID WIN_PID ... command
-```
-
-`taskkill.exe /PID` 要使用 `WIN_PID`，并在 Git Bash 中关闭路径转换：
+不要并行启动多个 `uv sync` 或 pytest。若需要终止本项目残留 Windows 进程，使用 `ps -W` 中的 Windows PID：
 
 ```bash
 MSYS_NO_PATHCONV=1 taskkill.exe /PID <WIN_PID> /T /F
 ```
 
+不得终止来源不明的用户进程。
+
 ---
 
-## 3. 任务 1 现场恢复：必须从这里开始
+## 3. 任务 1 现场恢复历史记录：任务 5-8 不要执行
 
-任务 1 目标：建立 Python/uv 后端、可注入时钟、健康检查、PostgreSQL/MinIO 开发服务和第一条完整测试链。
+本节记录任务 1 当时的恢复过程，仅用于排障参考。任务 1 已完成并通过审查；接管任务 5-8 的模型不得删除生产模块、重跑任务 1 RED 或重新提交任务 1。
+
+任务 1 的历史目标：建立 Python/uv 后端、可注入时钟、健康检查、PostgreSQL/MinIO 开发服务和第一条完整测试链。
 
 ### 3.1 第一步：进入正确目录并核验状态
 
@@ -730,7 +725,44 @@ uv run pytest backend/tests/integration/test_migrations.py backend/tests/integra
 
 ### 任务 5：官方与合成快照适配器
 
-数据目录必须分开：
+**进入条件：** `9473946` 是 HEAD 的祖先，基线后只有本文档提交，工作树干净，任务 1-4 全门禁通过。
+**目标：** 用纯离线 Adapter 将三类 bundle 转成 `NormalizedNotice`，不发出任何网络请求。
+
+允许创建：
+
+```text
+backend/src/bidscope/snapshots/ccgp.py
+backend/src/bidscope/snapshots/ggzy.py
+backend/src/bidscope/snapshots/demo.py
+backend/tests/contract/test_ccgp_adapter.py
+backend/tests/contract/test_ggzy_adapter.py
+backend/tests/contract/test_demo_adapter.py
+data/snapshots/ccgp/2026-07-18-central-open/*
+data/snapshots/ggzy/2026-07-18-construction/*
+data/demo/batch-1/*
+data/demo/batch-2/*
+docs/source-policy.md
+```
+
+如需共享纯解析辅助函数，可在 `backend/src/bidscope/snapshots/` 新建一个小文件。不要创建 importer、repository、retrieval 或 LLM 文件。
+
+#### 任务 5 RED
+
+先创建三个 contract test。最小 RED 命令：
+
+```bash
+uv run pytest backend/tests/contract/test_ccgp_adapter.py \
+  backend/tests/contract/test_ggzy_adapter.py \
+  backend/tests/contract/test_demo_adapter.py -q
+```
+
+有效 RED：测试被收集，因 `CcgpSnapshotAdapter`、`GgzySnapshotAdapter`、`DemoSnapshotAdapter` 不存在或 `parse()` 未实现而失败。
+
+不要把缺少 fixture、JSON 拼写错误或 manifest hash 不匹配当成 RED。先让 fixture 自身通过 `inspect_bundle()`，再测试 Adapter 行为。
+
+#### 任务 5 数据边界
+
+目录必须分开：
 
 ```text
 data/snapshots/ccgp/2026-07-18-central-open/
@@ -739,85 +771,461 @@ data/demo/batch-1/
 data/demo/batch-2/
 ```
 
-官方摘录：每个来源只使用已经核验的样例和字段，不凑数量。  
-合成 Demo：至少 12 条 Batch 1；Batch 2 至少 2 新增、2 实质变更、2 未变化。
+官方摘录每个来源只使用已核验的一条样例，不为数量编造官方记录。`capture_kind` 必须是 `curated_public_excerpt`。
 
-Demo 约束：
+CCGP 已核验公开详情 URL：
 
-- ID `demo-*`
-- URL `https://example.invalid/...`
-- source `synthetic_demo`
-- 可有 `synthetic_channel` 演示跨渠道重复
-- UI/报告始终标合成
+```text
+https://www.ccgp.gov.cn/cggg/zygg/gkzb/202607/t20260718_26961813.htm
+```
 
-所有 Adapter 是纯离线解析器，不得包含 HTTPX、requests 或 Playwright 调用。
+GGZY 已核验外层和子页：
 
-提交：`feat: add audited tender source snapshot adapters`
+```text
+https://www.ggzy.gov.cn/information/deal/html/a/530000/0101/20260718/005322a8028794fe4b0f97111b6482009bc5.html
+https://www.ggzy.gov.cn/information/deal/html/b/530000/0101/20260718/005322a8028794fe4b0f97111b6482009bc5.html
+```
+
+禁止重新访问这些 URL。fixture 只能使用设计调研中已经核验的字段，且必须标注 `curated_public_excerpt`，不得声称是原始响应。
+
+每个 bundle 至少包含：
+
+```text
+manifest.json
+source-shaped payload 或 normalized demo JSON
+expected.json
+```
+
+`manifest.json` 中所有 payload hash 必须按实际字节计算。不得放 cookie、session、验证码 token、验证码图片或下载附件。
+
+#### 任务 5 官方 Adapter
+
+每个官方 Adapter 至少公开：
+
+```python
+class CcgpSnapshotAdapter:
+    source = SourceName.CCGP
+    def parse(self, bundle: Path) -> list[NormalizedNotice]: ...
+    def load_expected(self, bundle: Path) -> list[dict[str, object]]: ...
+```
+
+GGZY 使用同样形状。`parse()` 第一件事必须调用 `inspect_bundle()`；无效 bundle 返回明确的类型化 Adapter 错误，不得继续解析。
+
+使用 `selectolax` 解析 HTML，使用标准库 `json` 解析 JSON。只解析已观察字段；未知字段放入 `raw_fields`，字段缺失保持 `None`。
+
+不要把官方 HTML 结构做成通用 CSS 猜测器。每个来源各自拥有明确、可测试的解析规则。
+
+必须覆盖：
+
+- 标题。
+- external ID。
+- source URL。
+- 发布时间。
+- 预算原文和 minor units。
+- 地区。
+- 采购人或来源平台。
+- 截止时间，若公开摘录中确实存在。
+- parser version。
+- capture kind。
+
+字段时间必须 timezone-aware。金额解析失败时保留原始文本并返回 `None`，不得猜金额。
+
+结构漂移测试必须删除一个必需标题元素，并断言返回 `ParseDrift` 类型错误或诊断，不得抛裸 `KeyError`/`AttributeError`。
+
+#### 任务 5 Demo Adapter
+
+Demo bundle 必须：
+
+- `source=synthetic_demo`
+- `capture_kind=synthetic_demo`
+- ID 以 `demo-` 开头
+- URL host 为 `example.invalid`
+- payload 使用规范 JSON，不伪造官方 HTML
+
+Batch 1 至少 12 条，包含匹配和不匹配主演示查询的记录。可使用 `synthetic_channel=channel_a/channel_b` 演示跨渠道重复，但 source 始终是 `synthetic_demo`。
+
+Batch 2 至少包含：
+
+- 2 条新增记录。
+- 2 条实质变更记录。
+- 2 条未变化记录。
+
+测试必须按稳定 ID 对照 Batch 1/2，明确证明这三类数量，而不是只断言总行数。
+
+Demo Adapter 必须拒绝：
+
+- 非 `example.invalid` URL。
+- 非 `demo-` ID。
+- source/capture kind 伪装。
+- naive datetime。
+
+现有 `NormalizedNotice` provenance 校验是第二道防线，不得绕过或用 `model_construct()`。
+
+#### 任务 5 来源政策文档
+
+`docs/source-policy.md` 必须写明：
+
+- 两个官方入口与核验 URL。
+- CCGP WAF/403/频繁访问事实。
+- GGZY 未文档化 POST、验证码、结果上限和聚合来源风险。
+- robots 许可未知。
+- P0 snapshot-only。
+- raw response、curated excerpt、synthetic demo 的区别。
+- P0 不执行实时抓取、附件批量下载或登录访问。
+
+#### 任务 5 完整验证与提交
+
+```bash
+uv run pytest backend/tests/contract -q
+uv run pytest backend/tests/unit/snapshots backend/tests/unit/domain -q
+uv run ruff check backend/src/bidscope/snapshots backend/tests/contract
+uv run mypy backend/src/bidscope/snapshots
+uv run bidscope snapshots inspect data/snapshots/ccgp/2026-07-18-central-open --json
+uv run bidscope snapshots inspect data/snapshots/ggzy/2026-07-18-construction --json
+git diff --cached --check
+```
+
+注意：`bidscope snapshots inspect` CLI 在原计划任务 6 才正式加入。若任务 5 还没有 CLI，任务 5 不要提前实现 CLI；改为用 Python 调用 `inspect_bundle()` 验证两个 bundle，并在任务 6 再运行 CLI 命令。
+
+固定提交：
+
+```text
+feat: add audited tender source snapshot adapters
+```
+
+---
 
 ### 任务 6：幂等快照导入与版本保留
 
-关键事务顺序：
+**进入条件：** 任务 5 已独立提交，工作树干净，所有 contract test 通过。
+**目标：** 将已验证 bundle 事务化导入 PostgreSQL，并保存不可变版本、证据与对象 payload。
 
-1. 在打开写事务前检查 bundle 完整性。
-2. 保存 payload 对象。
-3. 创建或复用 source notice。
-4. 仅 content hash 变化时新增 immutable version。
-5. 创建证据。
-6. 全部成功后 import 状态成功。
+允许创建：
 
-必须测：
+```text
+backend/src/bidscope/persistence/repositories.py
+backend/src/bidscope/snapshots/importer.py
+backend/src/bidscope/cli.py
+backend/tests/integration/test_snapshot_import.py
+```
 
-- 同 bundle 导入两次不增加记录。
-- Batch 2 的变更只增加版本，不增加逻辑 source notice。
-- 中途失败无部分数据库记录。
-- CLI `--json` 可机器读取。
+可对现有 persistence model 做必要且最小的关系补充，但必须新增 Alembic migration，不得直接改旧迁移历史。
 
-提交：`feat: import versioned tender snapshots`
+#### 任务 6 RED
+
+先写集成测试：
+
+```bash
+BIDSCOPE_APP_MODE=test \
+BIDSCOPE_DATABASE_URL=postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test \
+BIDSCOPE_CHECKPOINT_DATABASE_URL=postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test \
+uv run pytest backend/tests/integration/test_snapshot_import.py -q
+```
+
+有效 RED：`SnapshotImporter`/repository 不存在，或幂等行为尚未实现。
+
+#### 任务 6 固定事务顺序
+
+1. 在打开写事务前运行 `inspect_bundle()`。
+2. 无效 bundle 立即停止，不产生数据库记录和对象。
+3. 使用确定性 object key 保存 payload。
+4. 创建或复用 `SnapshotBundle`。
+5. 通过 `(source, external_id)` 创建或复用 `SourceNotice`。
+6. 仅当 content hash 变化时新增 `NoticeVersion`。
+7. 保存解析字段和证据。
+8. 全部成功后把 `SnapshotImport` 标为成功。
+9. 事务失败必须 rollback。
+
+对象存储不参与 PostgreSQL 事务。为避免孤儿对象，key 必须由 bundle ID、文件 hash 或 notice version hash 确定；重复写相同 key 必须幂等。
+
+若数据库失败后已经写入新对象，Importer 要么删除本次新对象，要么保证确定性对象不会污染语义。选择哪种策略必须写测试和注释。
+
+#### 任务 6 幂等语义
+
+调用方必须显式生成语义幂等键，不能依赖随机数据库默认。当前 schema 已要求四类幂等键 `NOT NULL` 且无随机默认。
+
+必须测试：
+
+- 同一个 bundle 导入两次，返回同一逻辑 import，行数不增加。
+- 相同外部 ID、相同 content hash 不增加 version。
+- 相同外部 ID、不同 content hash 增加 version，不增加 source notice。
+- 不同来源可有相同 external ID。
+- 中途数据库错误无部分应用记录。
+- 无效 bundle 在打开写事务前失败。
+- provenance 不一致不会持久化。
+- evidence 关联正确 notice version。
+
+Batch 2 测试要证明：新增记录新增 source notice；变更记录只新增 version；未变化记录不新增 version。
+
+#### 任务 6 CLI
+
+使用 Typer 暴露：
+
+```bash
+uv run bidscope snapshots inspect <bundle>
+uv run bidscope snapshots import <bundle>
+```
+
+两个命令都支持 `--json`。JSON 输出不得混入日志或进度文本，至少包含：
+
+```json
+{
+  "valid": true,
+  "bundle_id": "...",
+  "status": "...",
+  "errors": []
+}
+```
+
+错误时使用非零 exit code。CLI 不得访问网络。
+
+#### 任务 6 完整验证与提交
+
+```bash
+BIDSCOPE_APP_MODE=test \
+BIDSCOPE_DATABASE_URL=postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test \
+BIDSCOPE_CHECKPOINT_DATABASE_URL=postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test \
+uv run pytest backend/tests/integration/test_snapshot_import.py -q
+
+uv run bidscope snapshots inspect data/snapshots/ccgp/2026-07-18-central-open --json
+uv run ruff check backend/src/bidscope/persistence backend/src/bidscope/snapshots backend/src/bidscope/cli.py backend/tests/integration/test_snapshot_import.py
+uv run mypy backend/src/bidscope/persistence backend/src/bidscope/snapshots backend/src/bidscope/cli.py
+BIDSCOPE_CHECKPOINT_DATABASE_URL=postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test uv run alembic check
+git diff --cached --check
+```
+
+固定提交：
+
+```text
+feat: import versioned tender snapshots
+```
+
+---
 
 ### 任务 7：结构化、词法与向量混合检索
 
-先实现 deterministic `HashEmbeddingProvider`。真实 Embedding 只是端口实现。
+**进入条件：** 任务 6 已提交；Batch 1 可导入 test DB；工作树干净。
+**目标：** 对受控数据库执行结构化过滤、词法召回、向量召回和 RRF 融合。
 
-正确顺序：
+允许创建：
 
-1. 地区、预算、日期等结构化过滤。
-2. pg_trgm 词法候选。
-3. pgvector 候选。
+```text
+backend/src/bidscope/retrieval/embeddings.py
+backend/src/bidscope/retrieval/search.py
+backend/tests/unit/retrieval/test_embeddings.py
+backend/tests/integration/test_hybrid_search.py
+```
+
+如新增 trigram/vector index，必须新增 migration。不要改写旧迁移。
+
+#### 任务 7 RED
+
+```bash
+uv run pytest backend/tests/unit/retrieval/test_embeddings.py -q
+```
+
+有效 RED：`HashEmbeddingProvider` 不存在或稳定/归一化断言失败。
+
+随后再写 PostgreSQL 集成 RED：
+
+```bash
+BIDSCOPE_APP_MODE=test \
+BIDSCOPE_DATABASE_URL=postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test \
+BIDSCOPE_CHECKPOINT_DATABASE_URL=postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test \
+uv run pytest backend/tests/integration/test_hybrid_search.py -q
+```
+
+#### 任务 7 HashEmbeddingProvider
+
+必须满足：
+
+- 相同输入跨进程、跨运行稳定。
+- 不能使用 Python 内建 `hash()`，因为它受 hash randomization 影响。
+- 输出 1024 维。
+- L2 norm 接近 1。
+- 空字符串行为明确且有测试。
+- 批量输入保持顺序。
+
+使用 cryptographic hash 派生确定性向量。不要偷偷调用外部 Embedding API。
+
+`OpenAICompatibleEmbeddingProvider` 只作为端口实现；单元测试必须注入 stub transport/client，不使用真实 key 和网络。
+
+#### 任务 7 查询顺序
+
+查询必须按此顺序：
+
+1. 日期、地区、预算等结构化过滤。
+2. `pg_trgm` 词法候选。
+3. pgvector cosine 候选。
 4. Reciprocal Rank Fusion。
 
-必须测：
+结构化过滤必须先于 top-K 召回，否则不相关地区可能挤掉有效结果。
 
-- Hash embedding 稳定、1024 维、归一化。
-- 四川/重庆、500 万、时间窗在融合前生效。
-- Embedding 失败时返回词法结果并记录 `vector_unavailable`。
+集成测试至少插入：
 
-禁止：把整库正文塞进模型上下文。
+- 四川、符合预算和时间的智算记录。
+- 重庆、符合条件的服务器记录。
+- 地区不符但文本高度相似记录。
+- 预算不足记录。
+- 日期过期记录。
+- 文本相关但向量较弱记录。
+- 向量相关但关键词较弱记录。
 
-提交：`feat: add hybrid tender retrieval`
+断言结构化条件先过滤，再融合排名。
 
-### 任务 8：确定性去重与实质变更
+#### 任务 7 RRF 和降级
 
-输出只有：
+RRF 参数必须是命名常量或设置，不要散落魔法数字。测试至少证明词法和向量结果可合并，重复 notice 只出现一次。
 
-- `exact`
-- `distinct`
-- `ambiguous`
+Embedding 不可用或抛临时异常时：
 
-仅 `ambiguous` 可进模型。
+- 返回词法结果。
+- `degraded_modes` 包含 `vector_unavailable`。
+- 不把降级当成空结果或系统失败。
 
-实质变更字段仅：
+禁止把整篇正文或所有候选送给模型；检索返回 notice/version ID 和有限评分元数据。
+
+#### 任务 7 索引
+
+`pg_trgm` extension 已存在。按查询语句添加真正会被使用的 GIN/GiST trigram index；如增加向量索引，确保维度和 operator class 与 cosine 查询一致。
+
+测试 migration 存在性或用 `EXPLAIN` 只在结果稳定时断言。不要为了测试强制数据库一定选择索引。
+
+#### 任务 7 完整验证与提交
+
+```bash
+uv run pytest backend/tests/unit/retrieval -q
+
+BIDSCOPE_APP_MODE=test \
+BIDSCOPE_DATABASE_URL=postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test \
+BIDSCOPE_CHECKPOINT_DATABASE_URL=postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test \
+uv run pytest backend/tests/integration/test_hybrid_search.py -q
+
+uv run ruff check backend/src/bidscope/retrieval backend/tests/unit/retrieval backend/tests/integration/test_hybrid_search.py migrations
+uv run mypy backend/src/bidscope/retrieval
+BIDSCOPE_CHECKPOINT_DATABASE_URL=postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test uv run alembic check
+git diff --cached --check
+```
+
+固定提交：
+
+```text
+feat: add hybrid tender retrieval
+```
+
+---
+
+### 任务 8：确定性去重与实质变更检测
+
+**进入条件：** 任务 7 已提交；工作树干净。
+**目标：** 生成有界去重决策，并只报告业务实质变更。
+
+允许创建：
+
+```text
+backend/src/bidscope/retrieval/deduplication.py
+backend/tests/unit/retrieval/test_deduplication.py
+backend/tests/unit/retrieval/test_material_changes.py
+```
+
+如需要输入值对象，优先定义在 `deduplication.py`。不要提前创建任务 9 的模型端口。
+
+#### 任务 8 RED
+
+先写纯单元测试：
+
+```bash
+uv run pytest backend/tests/unit/retrieval/test_deduplication.py \
+  backend/tests/unit/retrieval/test_material_changes.py -q
+```
+
+有效 RED：目标函数或决策类型不存在，或行为断言失败。
+
+#### 任务 8 去重决策边界
+
+输出只能是：
+
+```text
+exact
+ambiguous
+distinct
+```
+
+`exact` 使用确定性强证据：
+
+- 相同来源 + 相同 canonical URL。
+- 相同且非空的项目编号。
+- 相同内容 hash。
+- 明确的来源 ID 映射。
+
+`distinct` 要有明确冲突证据，例如项目编号不同且采购人/日期/金额明显冲突。
+
+`ambiguous` 才允许后续任务 9 的模型判断。任务 8 不得实现或调用 LLM。
+
+不能仅凭标题相似就判 exact。模糊标题、采购人、金额、日期和 SimHash 只用于候选分组和 ambiguous 评分。
+
+测试至少覆盖：
+
+- 相同项目编号 exact。
+- 相同 hash exact。
+- 空项目编号不产生 exact。
+- 仅标题相似为 ambiguous。
+- 明显不同项目为 distinct。
+- 跨 synthetic_channel 重复仍保持 source=synthetic_demo。
+- 决策理由可序列化、可解释。
+
+#### 任务 8 实质变更边界
+
+实质字段仅：
 
 - deadline
 - budget
 - region
 - purchaser
-- scope
+- procurement scope
 - cancellation state
 - 支持已报告 claim 的源文本
 
-格式变化不是实质变更。
+格式变化不算实质变更：
 
-提交：`feat: classify duplicates and material changes`
+- 首尾空格。
+- 连续空白。
+- Unicode 常见等价形式。
+- 不改变含义的标点/格式变化。
+
+必须测试：
+
+- deadline 改变。
+- budget 改变。
+- region 改变。
+- purchaser 改变。
+- scope 改变。
+- cancellation 改变。
+- 支持 claim 的 evidence 文本改变。
+- title 仅空格变化不改变。
+- raw_fields 中无关字段变化不报告。
+- 返回字段顺序稳定，便于评测与 UI。
+
+不要依赖当前时间；该模块应为纯函数。
+
+#### 任务 8 完整验证与提交
+
+```bash
+uv run pytest backend/tests/unit/retrieval/test_deduplication.py \
+  backend/tests/unit/retrieval/test_material_changes.py -q
+uv run pytest backend/tests/unit/retrieval -q
+uv run ruff check backend/src/bidscope/retrieval backend/tests/unit/retrieval
+uv run mypy backend/src/bidscope/retrieval
+git diff --cached --check
+```
+
+固定提交：
+
+```text
+feat: classify duplicates and material changes
+```
+
+完成任务 8 后立即暂停。不要创建 `backend/src/bidscope/llm/`，不要执行任务 9。按第 13 节模板提交第二批审查包。
 
 ### 任务 9：Fake 与 DeepSeek 模型端口
 
@@ -1333,14 +1741,16 @@ Smallest user decision needed:
 ## 11. 当前任务清单
 
 ```text
-[ ] 1. 仓库骨架与健康检查纵向切片（已留下未提交草稿，尚未完成有效 RED/GREEN）
-[ ] 2. 类型化领域契约
-[ ] 3. PostgreSQL 模型、迁移与事务边界
-[ ] 4. 快照完整性与对象存储
-[ ] 5. 官方与合成快照适配器
-[ ] 6. 幂等快照导入与版本保留
-[ ] 7. 结构化、词法与向量混合检索
-[ ] 8. 确定性去重与实质变更检测
+[x] 1. 仓库骨架与健康检查纵向切片             a7a9c82
+[x] 2. 类型化领域契约                         d5f037b
+[x] 3. PostgreSQL 模型、迁移与事务边界         766839f
+[x] 4. 快照完整性与对象存储                    5f02c97
+[x] 第一批审查修复并放行                      b0129e2 / ed1d1ce / 9473946
+[ ] 5. 官方与合成快照适配器                    当前批次
+[ ] 6. 幂等快照导入与版本保留                  当前批次
+[ ] 7. 结构化、词法与向量混合检索              当前批次
+[ ] 8. 确定性去重与实质变更检测                当前批次
+[ ] 第二批审查：任务 5-8 完成后必须暂停
 [ ] 9. Fake 与 DeepSeek 模型端口
 [ ] 10. 意图、检索与人工确认 LangGraph
 [ ] 11. 证据抽取、报告生成与事实校验
@@ -1359,12 +1769,131 @@ Smallest user decision needed:
 
 ---
 
-## 12. 接管的第一条实际行动
+## 12. 任务 5-8 接管的第一条实际行动
 
-接管模型的第一条实际操作应是：
+新模型第一条操作必须核验现场，不写代码：
 
 ```bash
+git -C "C:/Users/29913/zcode_workspace/bidscope/.worktrees/bidscope-p0" \
+  status --short --branch
+
+git -C "C:/Users/29913/zcode_workspace/bidscope/.worktrees/bidscope-p0" \
+  rev-parse --short HEAD
+
 ps -W | rg -i 'uv|pytest|python' || true
+
+docker compose -f \
+  "C:/Users/29913/zcode_workspace/bidscope/.worktrees/bidscope-p0/compose.yaml" ps
 ```
 
-然后执行第 3.1 至 3.4 节，取得任务 1 的有效 RED。不要先写生产代码，不要运行任务 2，不要访问任何招投标站点。
+随后运行：
+
+```bash
+git -C "C:/Users/29913/zcode_workspace/bidscope/.worktrees/bidscope-p0" \
+  merge-base --is-ancestor 9473946 HEAD
+
+git -C "C:/Users/29913/zcode_workspace/bidscope/.worktrees/bidscope-p0" \
+  diff --name-only 9473946..HEAD
+```
+
+必须满足：
+
+- 当前分支是 `feat/bidscope-p0`。
+- `merge-base --is-ancestor` exit 0。
+- 工作树干净。
+- 接管前 `9473946..HEAD` 只包含本交接文档，不包含源代码、测试、迁移或数据文件。
+
+任一条件不满足时，停止并报告，不要自动 reset、stash 或删除文件。
+
+现场正确后，只创建任务 5 的三个 contract test，运行有效 RED。不要先创建 Adapter 生产代码，不要执行任务 6，不要访问任何招投标站点。
+
+---
+
+## 13. 任务 5-8 完成后的第二批审查包模板
+
+完成任务 8 后立即暂停。把下面模板填完整后交给审查模型；不得进入任务 9。
+
+```markdown
+# BidScope 第二批审查请求
+
+## Batch
+Tasks: 5-8
+Base SHA: 9473946
+Head SHA: <任务8提交SHA>
+Branch: feat/bidscope-p0
+
+## Commits
+- Task 5: <SHA> feat: add audited tender source snapshot adapters
+- Task 6: <SHA> feat: import versioned tender snapshots
+- Task 7: <SHA> feat: add hybrid tender retrieval
+- Task 8: <SHA> feat: classify duplicates and material changes
+
+## Task 5 RED/GREEN
+- RED command:
+- RED exit code:
+- RED expected reason:
+- GREEN command:
+- GREEN pass count:
+- Official fixture provenance:
+- Demo Batch 1/2 counts:
+- Network access performed: no
+
+## Task 6 RED/GREEN
+- RED command:
+- RED exit code:
+- GREEN command:
+- GREEN pass count:
+- Idempotent reimport evidence:
+- Changed-version evidence:
+- Rollback evidence:
+- CLI JSON evidence:
+
+## Task 7 RED/GREEN
+- RED commands:
+- GREEN commands:
+- Hash embedding determinism evidence:
+- Structured-filter-before-ranking evidence:
+- RRF evidence:
+- Vector failure degradation evidence:
+- Migration/index changes:
+
+## Task 8 RED/GREEN
+- RED commands:
+- GREEN commands:
+- exact/ambiguous/distinct coverage:
+- Material-change coverage:
+- Formatting-only non-change coverage:
+- LLM/network calls: none
+
+## Batch Verification
+- Full pytest command/result:
+- Ruff command/result:
+- mypy command/result:
+- Alembic check result:
+- git diff --check 9473946..HEAD:
+- git status:
+
+## Data Truthfulness
+- Official CCGP records count:
+- Official GGZY records count:
+- Synthetic demo records count:
+- All synthetic IDs use demo-*:
+- All synthetic URLs use example.invalid:
+- No live fetch code:
+- No cookies/tokens/CAPTCHA artifacts:
+
+## Files Changed Outside Planned Scope
+- None / list every file and reason
+
+## Deviations
+- None / explain each deviation and why it was necessary
+
+## Known Risks
+- None / list
+
+## Stop Confirmation
+- Task 9 files created: no
+- Worktree clean: yes/no
+```
+
+审查包必须包含真实命令输出摘要。不能只写“已通过”，不能把路径错误、依赖错误或数据库未启动当作 RED。
