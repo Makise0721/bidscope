@@ -101,6 +101,20 @@ class NoticeVersion(Base, TimestampMixin):
             "content_hash",
             name="uq_notice_versions_source_notice_id_content_hash",
         ),
+        # Trigram GIN index for lexical title recall (pg_trgm similarity).
+        sa.Index(
+            "ix_notice_versions_title_trgm",
+            "title",
+            postgresql_using="gin",
+            postgresql_ops={"title": "gin_trgm_ops"},
+        ),
+        # HNSW index for pgvector cosine recall over notice embeddings.
+        sa.Index(
+            "ix_notice_versions_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
     )
 
 
