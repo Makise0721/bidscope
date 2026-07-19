@@ -82,14 +82,6 @@ class QueryWorkflow:
         self._compiled = compiled
         self._recursion_limit = recursion_limit
 
-    async def ainvoke(self, input: Any, config: dict[str, Any] | None = None) -> Any:
-        merged = self._merge_config(config)
-        return await self._compiled.ainvoke(input, merged)
-
-    async def astream(self, input: Any, config: dict[str, Any] | None = None) -> Any:
-        merged = self._merge_config(config)
-        return self._compiled.astream(input, merged)
-
     def _merge_config(self, config: dict[str, Any] | None) -> dict[str, Any]:
         base = dict(config) if config else {}
         configurable = dict(base.get("configurable") or {})
@@ -97,6 +89,28 @@ class QueryWorkflow:
         base["configurable"] = configurable
         base.setdefault("recursion_limit", self._recursion_limit)
         return base
+
+    async def ainvoke(self, input: Any, config: dict[str, Any] | None = None) -> Any:
+        return await self._compiled.ainvoke(input, self._merge_config(config))
+
+    async def astream(
+        self,
+        input: Any,
+        config: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        # ``astream`` is an async generator on the compiled graph; preserve that
+        # protocol while still injecting ``deps`` into the config.
+        async for chunk in self._compiled.astream(input, self._merge_config(config), **kwargs):
+            yield chunk
+
+    async def aget_state(self, config: dict[str, Any] | None = None) -> Any:
+        return await self._compiled.aget_state(self._merge_config(config))
+
+    def __getattr__(self, name: str) -> Any:
+        # Delegate anything else (e.g. aget_state_tuple) to the compiled graph so
+        # the wrapper stays transparent while still injecting ``deps``.
+        return getattr(self._compiled, name)
 
 
 def build_graph(

@@ -65,7 +65,11 @@ async def _clean_tables(session_factory: async_sessionmaker[AsyncSession]) -> No
     ones.
     """
     async with session_factory() as session:
+        # query_runs CASCADEs to run_events and reports; the remaining tables
+        # CASCADE among themselves via their foreign keys.
         await session.execute(
-            sa.text("TRUNCATE TABLE source_notices, canonical_notices CASCADE")
+            sa.text(
+                "TRUNCATE TABLE source_notices, canonical_notices, query_runs CASCADE"
+            )
         )
         await session.commit()

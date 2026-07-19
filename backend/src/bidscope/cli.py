@@ -1,12 +1,16 @@
 """BidScope command-line interface.
 
-Exposes administrative commands for the snapshot ingestion plane:
+Exposes administrative commands for the snapshot ingestion plane and the
+durable execution layer:
 
 * ``bidscope snapshots inspect <bundle>`` — run integrity inspection only.
 * ``bidscope snapshots import <bundle>`` — import a verified bundle.
+* ``bidscope checkpoints setup`` — create the LangGraph checkpoint tables.
 
-Both commands honour ``--json`` for machine-readable output and never access
+The first two honour ``--json`` for machine-readable output and never access
 the network: all work runs against local files and the configured database.
+``checkpoints setup`` is the only path that creates the checkpoint schema; the
+executor never calls it implicitly.
 """
 
 from __future__ import annotations
@@ -19,8 +23,10 @@ from typing import Annotated, Any
 import typer
 
 from bidscope.clock import SystemClock
+from bidscope.config import get_settings
 from bidscope.db import create_engine_and_session
 from bidscope.delivery.objects import LocalObjectStore
+from bidscope.graph.executor import run_setup_checkpoints
 from bidscope.persistence.repositories import SnapshotRepository
 from bidscope.snapshots.importer import SnapshotImporter, SnapshotImportError
 
@@ -35,6 +41,12 @@ snapshots_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(snapshots_app, name="snapshots")
+
+checkpoints_app = typer.Typer(
+    help="LangGraph checkpoint administration.",
+    no_args_is_help=True,
+)
+app.add_typer(checkpoints_app, name="checkpoints")
 
 
 def _build_importer() -> SnapshotImporter:
@@ -137,6 +149,16 @@ def snapshots_import(
         typer.echo(_json_payload(result))
     else:
         typer.echo(f"imported ({record.status}): {record.snapshot_bundle_id}")
+
+
+# --- checkpoints setup -------------------------------------------------------
+
+
+@checkpoints_app.command("setup")
+def checkpoints_setup() -> None:
+    """Create the LangGraph checkpoint tables in the configured database."""
+    run_setup_checkpoints(get_settings())
+    typer.echo("checkpoint tables ready")
 
 
 if __name__ == "__main__":

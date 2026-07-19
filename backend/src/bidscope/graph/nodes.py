@@ -23,7 +23,7 @@ from langchain_core.runnables import RunnableConfig
 
 from bidscope.domain.enums import RunStatus
 from bidscope.domain.notices import NoticeEvidence
-from bidscope.domain.runs import RunEvent, SerializableError
+from bidscope.domain.runs import SerializableError
 from bidscope.domain.types import BidScopeErrorCode
 from bidscope.evidence.extractor import extract_evidence
 from bidscope.evidence.validator import validate_report as validate_report_bindings
@@ -37,13 +37,27 @@ from bidscope.retrieval.search import RetrievalFilter
 MAX_SYNTHESIS_RETRIES = 1
 
 
-def _event(config: RunnableConfig, state: Any, node: str, event: str, status: str) -> RunEvent:
-    """Record a timestamped node event using the injected clock."""
+def _event(
+    config: RunnableConfig, state: Any, node: str, event: str, status: str,
+) -> dict[str, Any]:
+    """Record a timestamped node event using the injected clock.
+
+    Returns a plain dict (not a model instance) so node events serialise cleanly
+    through the LangGraph checkpoint serde and can be re-hydrated in a different
+    process.
+    """
     from datetime import UTC, datetime  # local import keeps module load light
 
     clock = getattr(_deps(config), "clock", None)
     timestamp = clock.now() if clock else datetime.now(UTC)
-    return RunEvent(node=node, event=event, status=status, timestamp=timestamp, details={})
+    return {
+        "node": node,
+        "event": event,
+        "status": status,
+        "timestamp": timestamp.isoformat(),
+        "message": None,
+        "details": {},
+    }
 
 
 def _deps(config: RunnableConfig) -> Any:
