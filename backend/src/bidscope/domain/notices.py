@@ -1,9 +1,9 @@
-from datetime import datetime
 from typing import Annotated, Any
 
 from pydantic import BaseModel, Field, HttpUrl
 
 from bidscope.domain.enums import CaptureKind, SourceName
+from bidscope.domain.types import AwareDatetime
 
 
 class Money(BaseModel):
@@ -22,8 +22,8 @@ class NormalizedNotice(BaseModel):
     title: str | None = None
     purchaser: str | None = None
     region: str | None = None
-    publish_time: datetime | None = None
-    deadline: datetime | None = None
+    publish_time: AwareDatetime | None = None
+    deadline: AwareDatetime | None = None
     budget: Money | None = None
     summary: str | None = None
     parser_version: str

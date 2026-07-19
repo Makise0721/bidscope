@@ -21,6 +21,7 @@ class RunStatus(StrEnum):
     CONFIRM_INTENT = "confirm_intent"
     BUILD_RETRIEVAL_PLAN = "build_retrieval_plan"
     RETRIEVE_CANDIDATES = "retrieve_candidates"
+    CANDIDATES_RESOLVED = "candidates_resolved"
     RESOLVE_DUPLICATES = "resolve_duplicates"
     VERIFY_EVIDENCE = "verify_evidence"
     SYNTHESIZE_REPORT = "synthesize_report"
@@ -28,6 +29,7 @@ class RunStatus(StrEnum):
     PERSIST_AND_DELIVER = "persist_and_deliver"
     COMPLETED = "completed"
     FAILED = "failed"
+    RETRYABLE = "retryable"
     EVIDENCE_INSUFFICIENT = "evidence_insufficient"
 
 

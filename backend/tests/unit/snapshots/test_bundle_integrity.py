@@ -136,7 +136,7 @@ def test_inspect_bundle_requires_synthetic_source_for_synthetic_kind(tmp_path: P
     inspection = inspect_bundle(bundle)
 
     assert inspection.valid is False
-    assert any(error.code == "synthetic_source_mismatch" for error in inspection.errors)
+    assert any(error.code == "source_capture_mismatch" for error in inspection.errors)
 
 
 def test_inspect_bundle_accepts_valid_synthetic_bundle(tmp_path: Path) -> None:
@@ -156,3 +156,87 @@ def test_inspect_bundle_accepts_valid_synthetic_bundle(tmp_path: Path) -> None:
     assert inspection.valid is True
     assert inspection.bundle_id == "demo-batch-1"
     assert inspection.errors == []
+
+
+# --- Regression tests for the gaps the review surfaced ---
+
+
+def test_inspect_bundle_rejects_unknown_capture_kind(tmp_path: Path) -> None:
+    files = {"detail.html": "<html>x</html>"}
+    manifest = _manifest(files, capture_kind="bogus_kind")
+    bundle = _write_bundle(tmp_path, files, manifest)
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert any(error.code == "invalid_enum_value" for error in inspection.errors)
+
+
+def test_inspect_bundle_rejects_synthetic_source_with_official_kind(tmp_path: Path) -> None:
+    files = {"detail.html": "<html>x</html>"}
+    manifest = _manifest(
+        files,
+        source="synthetic_demo",
+        source_urls=["https://www.ccgp.gov.cn/a.htm"],
+    )
+    bundle = _write_bundle(tmp_path, files, manifest)
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert any(error.code == "source_capture_mismatch" for error in inspection.errors)
+
+
+def test_inspect_bundle_handles_none_source_urls(tmp_path: Path) -> None:
+    files = {"detail.html": "<html>x</html>"}
+    manifest = _manifest(files, source_urls=None)
+    bundle = _write_bundle(tmp_path, files, manifest)
+
+    inspection = inspect_bundle(bundle)
+
+    # Must produce a typed error, NOT raise TypeError.
+    assert inspection.valid is False
+    assert inspection.errors, "expected structured errors for None source_urls"
+
+
+def test_inspect_bundle_rejects_empty_files(tmp_path: Path) -> None:
+    manifest = _manifest(files={})
+    bundle = _write_bundle(tmp_path, {}, manifest)
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert any(error.code == "invalid_manifest_field" for error in inspection.errors)
+
+
+def test_inspect_bundle_rejects_invalid_sha256_format(tmp_path: Path) -> None:
+    files = {"detail.html": "<html>x</html>"}
+    manifest = _manifest(files, files={"detail.html": "not-a-hash"})
+    bundle = _write_bundle(tmp_path, files, manifest)
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert any(error.code == "invalid_file_hash" for error in inspection.errors)
+
+
+def test_inspect_bundle_rejects_non_object_manifest(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "manifest.json").write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert any(error.code == "invalid_manifest" for error in inspection.errors)
+
+
+def test_inspect_bundle_rejects_empty_bundle_id(tmp_path: Path) -> None:
+    files = {"detail.html": "<html>x</html>"}
+    manifest = _manifest(files, bundle_id="")
+    bundle = _write_bundle(tmp_path, files, manifest)
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert any(error.code == "invalid_manifest_field" for error in inspection.errors)

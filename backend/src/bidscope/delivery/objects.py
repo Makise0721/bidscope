@@ -29,14 +29,24 @@ class LocalObjectStore:
         target = self._resolve(key)
         target.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(prefix=".tmp-", dir=str(target.parent))
+        fd_open = True
         try:
             os.write(fd, data)
             os.close(fd)
+            fd_open = False
             os.replace(tmp_path, target)
         except BaseException:
-            os.close(fd) if not os.get_inheritable(fd) else None
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+            # Preserve the original exception: never let cleanup errors mask it.
+            try:
+                if fd_open:
+                    os.close(fd)
+            except OSError:
+                pass
+            try:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except OSError:
+                pass
             raise
         return str(target)
 
@@ -60,12 +70,21 @@ class S3ObjectStore:
     every key passed to the store methods is a logical, bucket-relative path.
     """
 
-    def __init__(self, bucket: str, prefix: str = "", endpoint_url: str | None = None) -> None:
-        import boto3  # type: ignore[import-untyped]
+    def __init__(
+        self,
+        bucket: str,
+        prefix: str = "",
+        endpoint_url: str | None = None,
+        client: Any = None,
+    ) -> None:
+        if client is not None:
+            self.client: Any = client
+        else:
+            import boto3  # type: ignore[import-untyped]
 
+            self.client = boto3.client("s3", endpoint_url=endpoint_url)
         self.bucket = bucket
         self.prefix = prefix.strip("/")
-        self.client: Any = boto3.client("s3", endpoint_url=endpoint_url)
 
     def _full_key(self, key: str) -> str:
         if ".." in key or key.startswith("/"):

@@ -138,7 +138,9 @@ class SnapshotImport(Base, TimestampMixin):
 
     id: Mapped[str] = _pk()
     snapshot_bundle_id: Mapped[str] = _fk("snapshot_bundles")
-    idempotency_key: Mapped[str | None] = mapped_column(sa.Text, unique=True)
+    idempotency_key: Mapped[str] = mapped_column(
+        sa.Text, unique=True, server_default=sa.text("gen_random_uuid()::text"), nullable=False
+    )
     status: Mapped[str] = mapped_column(sa.Text, nullable=False)
     warnings: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=_EMPTY_JSON)
     metrics: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=_EMPTY_JSON)
@@ -154,7 +156,9 @@ class QueryRun(Base, TimestampMixin):
     __tablename__ = "query_runs"
 
     id: Mapped[str] = _pk()
-    run_key: Mapped[str | None] = mapped_column(sa.Text, unique=True)
+    run_key: Mapped[str] = mapped_column(
+        sa.Text, unique=True, server_default=sa.text("gen_random_uuid()::text"), nullable=False
+    )
     status: Mapped[str] = mapped_column(sa.Text, nullable=False)
     user_request: Mapped[str] = mapped_column(sa.Text, nullable=False)
     search_intent: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=_EMPTY_JSON)
@@ -189,7 +193,9 @@ class Report(Base, TimestampMixin):
 
     id: Mapped[str] = _pk()
     run_id: Mapped[str | None] = mapped_column(sa.Uuid, sa.ForeignKey("query_runs.id"), index=True)
-    export_key: Mapped[str | None] = mapped_column(sa.Text, unique=True)
+    export_key: Mapped[str] = mapped_column(
+        sa.Text, unique=True, server_default=sa.text("gen_random_uuid()::text"), nullable=False
+    )
     conditions: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=_EMPTY_JSON)
     freshness_window: Mapped[str | None] = mapped_column(sa.Text)
     completeness_warning: Mapped[str | None] = mapped_column(sa.Text)
@@ -211,6 +217,36 @@ class ReportItem(Base, TimestampMixin):
     risk_note: Mapped[str | None] = mapped_column(sa.Text)
 
 
+class ReportClaim(Base, TimestampMixin):
+    __tablename__ = "report_claims"
+
+    id: Mapped[str] = _pk()
+    report_item_id: Mapped[str] = _fk("report_items")
+    text: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    claim_type: Mapped[str] = mapped_column(
+        sa.Text, nullable=False, server_default=sa.text("'factual'")
+    )
+    evidence_span_id: Mapped[str | None] = mapped_column(
+        sa.Uuid, sa.ForeignKey("notice_evidence.id"), index=True
+    )
+    confidence: Mapped[float] = mapped_column(
+        sa.Float, server_default=sa.text("0.0"), nullable=False
+    )
+
+
+class ReportCitation(Base, TimestampMixin):
+    __tablename__ = "report_citations"
+
+    id: Mapped[str] = _pk()
+    report_item_id: Mapped[str] = _fk("report_items")
+    evidence_id: Mapped[str] = mapped_column(
+        sa.Uuid, sa.ForeignKey("notice_evidence.id"), index=True
+    )
+    label: Mapped[str | None] = mapped_column(sa.Text)
+    span_start: Mapped[int | None] = mapped_column(sa.Integer)
+    span_end: Mapped[int | None] = mapped_column(sa.Integer)
+
+
 # ------------------------------------------------------------ subscriptions ---
 
 
@@ -225,7 +261,9 @@ class Subscription(Base, TimestampMixin):
     normalized_intent: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=_EMPTY_JSON)
     last_successful_run_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
     status: Mapped[str] = mapped_column(sa.Text, nullable=False)
-    trigger_key: Mapped[str | None] = mapped_column(sa.Text, unique=True)
+    trigger_key: Mapped[str] = mapped_column(
+        sa.Text, unique=True, server_default=sa.text("gen_random_uuid()::text"), nullable=False
+    )
 
 
 class SubscriptionSeenItem(Base, TimestampMixin):
@@ -261,6 +299,17 @@ class InboxEvent(Base, TimestampMixin):
 
 
 # -------------------------------------------------------------------- eval ---
+
+
+class EvalCase(Base, TimestampMixin):
+    __tablename__ = "eval_cases"
+
+    id: Mapped[str] = _pk()
+    dataset_version: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    case_key: Mapped[str] = mapped_column(sa.Text, unique=True, nullable=False)
+    inputs: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=_EMPTY_JSON)
+    expected_outputs: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=_EMPTY_JSON)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, server_default=_EMPTY_JSON)
 
 
 class EvalRun(Base, TimestampMixin):

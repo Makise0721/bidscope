@@ -73,6 +73,7 @@ def test_manifest_rejects_non_https_source() -> None:
 def test_synthetic_demo_manifest_requires_example_invalid_host() -> None:
     data = valid_manifest() | {
         "capture_kind": CaptureKind.SYNTHETIC_DEMO,
+        "source": SourceName.SYNTHETIC_DEMO,
         "source_urls": ["https://www.ccgp.gov.cn/something"],
     }
     try:
@@ -86,6 +87,7 @@ def test_synthetic_demo_manifest_requires_example_invalid_host() -> None:
 def test_synthetic_demo_manifest_accepts_example_invalid_host() -> None:
     data = valid_manifest() | {
         "capture_kind": CaptureKind.SYNTHETIC_DEMO,
+        "source": SourceName.SYNTHETIC_DEMO,
         "source_urls": ["https://example.invalid/demo-001"],
     }
     manifest = SnapshotManifest.model_validate(data)
@@ -230,3 +232,37 @@ def test_error_union_round_trips_through_json() -> None:
     decoded = SerializableError.model_validate_json(encoded)
     assert decoded.code == "retrieval_empty"
     assert decoded.message == "no matches"
+
+
+def test_error_code_rejects_arbitrary_string() -> None:
+    """SerializableError.code must be one of the bounded error codes."""
+    with pytest.raises(ValidationError):
+        SerializableError(code="anything_goes", message="x")
+
+
+def test_normalized_notice_rejects_naive_datetime() -> None:
+    from bidscope.domain.notices import NormalizedNotice
+
+    with pytest.raises(ValidationError):
+        NormalizedNotice(
+            source=SourceName.CCGP,
+            external_id="x",
+            source_url="https://www.ccgp.gov.cn/a.htm",
+            capture_kind=CaptureKind.RAW_RESPONSE,
+            parser_version="v1",
+            publish_time=datetime(2026, 7, 18),
+        )
+
+
+def test_report_rejects_naive_datetime() -> None:
+    from bidscope.domain.reports import Report
+
+    with pytest.raises(ValidationError):
+        Report(run_id="r", generated_at=datetime(2026, 7, 18), query_conditions={})
+
+
+def test_run_event_rejects_naive_datetime() -> None:
+    from bidscope.domain.runs import RunEvent
+
+    with pytest.raises(ValidationError):
+        RunEvent(node="n", event="e", status="s", timestamp=datetime(2026, 7, 18))

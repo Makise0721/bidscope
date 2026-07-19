@@ -55,6 +55,11 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
+[tool.ruff.lint.per-file-ignores]
+# Alembic auto-generated migration scripts follow a stable template that
+# predates stricter typing-import and union-syntax conventions.
+"migrations/versions/*.py" = ["UP035", "UP007", "I001", "E501"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true

@@ -1,7 +1,8 @@
-from datetime import datetime
 from typing import Annotated
 
 from pydantic import BaseModel, Field, model_validator
+
+from bidscope.domain.types import AwareDatetime
 
 
 class ReportCitation(BaseModel):
@@ -33,7 +34,7 @@ class ReportItem(BaseModel):
 
 class Report(BaseModel):
     run_id: str
-    generated_at: datetime
+    generated_at: AwareDatetime
     query_conditions: dict[str, str]
     freshness_window: str | None = None
     source_availability: Annotated[list[str], Field(default_factory=list)]

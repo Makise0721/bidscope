@@ -4,10 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from bidscope.domain.enums import CaptureKind
-
-OFFICIAL_HOSTS = {"www.ccgp.gov.cn", "search.ccgp.gov.cn", "www.ggzy.gov.cn"}
-SYNTHETIC_HOST = "example.invalid"
+from bidscope.domain.snapshots import SnapshotManifest
+from pydantic import ValidationError
 
 
 @dataclass
@@ -46,46 +44,46 @@ def _safe_relative(base: Path, candidate: str) -> Path | None:
     return resolved
 
 
-def _validate_source_policy(manifest: dict[str, Any], errors: list[InspectionError]) -> None:
-    capture_kind = manifest.get("capture_kind")
-    source = manifest.get("source")
-    for url in manifest.get("source_urls", []):
-        if not url.startswith("https://"):
-            errors.append(
-                InspectionError("invalid_source_url", f"source URL must use HTTPS: {url}", url)
-            )
-            continue
-        host = url.split("/", 3)[2].split("@")[-1].split(":")[0]
-        if capture_kind == CaptureKind.SYNTHETIC_DEMO:
-            if host != SYNTHETIC_HOST:
-                errors.append(
-                    InspectionError(
-                        "invalid_source_url",
-                        f"synthetic_demo URLs must use {SYNTHETIC_HOST}: {url}",
-                        url,
-                    )
-                )
-        else:
-            if host not in OFFICIAL_HOSTS:
-                errors.append(
-                    InspectionError(
-                        "invalid_source_url",
-                        f"official bundles may only reference {sorted(OFFICIAL_HOSTS)}: {url}",
-                        url,
-                    )
-                )
+def _convert_manifest_errors(data: dict[str, Any]) -> list[InspectionError]:
+    """Validate the manifest through the typed SnapshotManifest contract.
 
-    if capture_kind == CaptureKind.SYNTHETIC_DEMO and source != "synthetic_demo":
-        errors.append(
-            InspectionError(
-                "synthetic_source_mismatch",
-                "synthetic_demo bundles must declare source=synthetic_demo",
-            )
-        )
+    Any schema, enum, host-policy or cross-field (source/capture/host) violation
+    is converted into a structured :class:`InspectionError` so callers never see
+    a raw ``ValidationError`` or ``TypeError``.
+    """
+    try:
+        SnapshotManifest.model_validate(data)
+        return []
+    except ValidationError as error:
+        results: list[InspectionError] = []
+        for err in error.errors():
+            loc = ".".join(str(part) for part in err["loc"])
+            err_type = err["type"]
+            msg = err["msg"]
+            if err_type == "value_error":
+                if "source=synthetic_demo" in msg or "synthetic_demo bundles" in msg:
+                    code = "source_capture_mismatch"
+                elif "HTTPS" in msg or "example.invalid" in msg:
+                    code = "invalid_source_url"
+                elif "timezone-aware" in msg:
+                    code = "invalid_timestamp"
+                elif "SHA-256" in msg:
+                    code = "invalid_file_hash"
+                elif "official" in msg.lower():
+                    code = "invalid_source_url"
+                else:
+                    code = "invalid_manifest_field"
+            elif err_type == "missing":
+                code = "missing_manifest_field"
+            elif "enum" in err_type:
+                code = "invalid_enum_value"
+            else:
+                code = "invalid_manifest_field"
+            results.append(InspectionError(code=code, message=f"{loc}: {msg}", path=loc or None))
+        return results
 
 
 def inspect_bundle(bundle_path: Path) -> InspectionResult:
-    errors: list[InspectionError] = []
     manifest_file = bundle_path / "manifest.json"
 
     if not manifest_file.exists():
@@ -95,39 +93,53 @@ def inspect_bundle(bundle_path: Path) -> InspectionResult:
         )
 
     try:
-        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        raw = json.loads(manifest_file.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
-        message = f"manifest.json is not valid JSON: {error}"
         return InspectionResult(
             valid=False,
-            errors=[InspectionError("invalid_manifest", message)],
+            errors=[
+                InspectionError("invalid_manifest", f"manifest.json is not valid JSON: {error}")
+            ],
         )
 
-    _validate_source_policy(manifest, errors)
+    if not isinstance(raw, dict):
+        return InspectionResult(
+            valid=False,
+            errors=[InspectionError("invalid_manifest", "manifest.json must be a JSON object")],
+        )
 
-    declared: dict[str, str] = manifest.get("files", {}) or {}
+    # Single entry point: every structural constraint is validated by the typed
+    # SnapshotManifest contract. Failures become typed InspectionErrors.
+    errors = _convert_manifest_errors(raw)
+    if errors:
+        return InspectionResult(valid=False, errors=errors)
+
+    manifest = SnapshotManifest.model_validate(raw)
+
+    # File-integrity checks (hashes, missing and undeclared payload files).
+    declared = manifest.files or {}
     actual_hashes: dict[str, str] = {}
     payload_files = sorted(
         p for p in bundle_path.rglob("*") if p.is_file() and p.name != "manifest.json"
     )
 
-    # Verify declared files.
     for name, expected_hash in declared.items():
         target = _safe_relative(bundle_path, name)
         if target is None:
-            errors.append(InspectionError("invalid_path", f"declared file escapes bundle: {name}"))
+            errors.append(
+                InspectionError("invalid_path", f"declared file escapes bundle: {name}", name)
+            )
             continue
         if not target.exists():
             errors.append(InspectionError("missing_file", f"declared file missing: {name}", name))
             continue
         actual = _sha256(target)
         actual_hashes[name] = actual
-        if actual != expected_hash:
+        if actual.lower() != expected_hash.lower():
             errors.append(
                 InspectionError("snapshot_integrity_error", f"hash mismatch for {name}", name)
             )
 
-    # Detect undeclared payload files.
     declared_resolved = set()
     for name in declared:
         target = _safe_relative(bundle_path, name)
@@ -142,7 +154,7 @@ def inspect_bundle(bundle_path: Path) -> InspectionResult:
     valid = not errors
     return InspectionResult(
         valid=valid,
-        bundle_id=manifest.get("bundle_id"),
+        bundle_id=manifest.bundle_id,
         errors=errors,
         actual_hashes=actual_hashes,
     )
