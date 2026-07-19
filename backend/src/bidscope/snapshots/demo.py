@@ -36,6 +36,10 @@ class DemoSnapshotAdapter:
     def parse(self, bundle: Path) -> list[NormalizedNotice]:
         inspection = inspect_bundle(bundle)
         self._require_valid_inspection(bundle, inspection)
+        # Reuse the manifest already parsed during integrity inspection instead
+        # of re-reading manifest.json a second time.
+        manifest = inspection.manifest
+        assert manifest is not None  # valid inspection guarantees a parsed manifest
 
         payload = json.loads((bundle / _PAYLOAD_FILE).read_text(encoding="utf-8"))
         records = payload.get("notices")
@@ -46,7 +50,6 @@ class DemoSnapshotAdapter:
                 detail="missing notices array",
             )
 
-        manifest = _parse.load_manifest(bundle)
         notices: list[NormalizedNotice] = []
         for record in records:
             notices.append(self._parse_record(manifest, record))

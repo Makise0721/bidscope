@@ -21,6 +21,9 @@ class InspectionResult:
     bundle_id: str | None = None
     errors: list[InspectionError] = field(default_factory=list)
     actual_hashes: dict[str, str] = field(default_factory=dict)
+    #: The parsed manifest, available when inspection succeeded. Adapters read
+    #: this instead of re-parsing ``manifest.json`` a second time.
+    manifest: SnapshotManifest | None = None
 
 
 def _sha256(path: Path) -> str:
@@ -90,6 +93,9 @@ def _convert_manifest_errors(data: dict[str, Any]) -> list[InspectionError]:
 
 
 def inspect_bundle(bundle_path: Path) -> InspectionResult:
+    # Resolve to an absolute path so rglob results and declared-path resolution
+    # share a common root; otherwise relative inputs are wrongly flagged invalid.
+    bundle_path = bundle_path.resolve()
     manifest_file = bundle_path / "manifest.json"
 
     if not manifest_file.exists():
@@ -187,4 +193,5 @@ def inspect_bundle(bundle_path: Path) -> InspectionResult:
         bundle_id=manifest.bundle_id,
         errors=errors,
         actual_hashes=actual_hashes,
+        manifest=manifest if valid else None,
     )

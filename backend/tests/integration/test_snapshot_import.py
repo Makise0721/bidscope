@@ -319,6 +319,106 @@ async def test_evidence_linked_to_correct_version(
                 assert ev.notice_version_id == version.id
 
 
+# ---------------------------------------------------------------------------
+# Regression tests for findings surfaced in the batch-2 review
+# ---------------------------------------------------------------------------
+
+
+async def test_evidence_covers_each_parsed_field_with_datetime(
+    importer, ccgp_bundle, session_factory
+) -> None:
+    """M1 regression: every parsed field — including publish_time and deadline —
+    produces an evidence span. The count is deterministic and field-exact."""
+    await importer.import_bundle(ccgp_bundle)
+
+    async with session_factory() as session:
+        (version,) = (await session.execute(sa.select(NoticeVersion))).scalars().all()
+        evidence = (
+            await session.execute(
+                sa.select(NoticeEvidence).where(
+                    NoticeEvidence.notice_version_id == version.id
+                )
+            )
+        ).scalars().all()
+
+    # CCGP parses: title, purchaser, region, publish_time, deadline, budget.
+    # summary is absent in the fixture, so exactly six evidence spans are
+    # expected — one per populated, material field (no raw_fields to add).
+    assert len(evidence) == 6, f"expected 6 evidence spans, got {len(evidence)}"
+    texts = {span.text for span in evidence}
+    # ISO-8601 evidence for the two datetime fields is present.
+    assert any("2026-07-18" in text for text in texts), "publish_time evidence missing"
+    assert any("2026-08-10" in text for text in texts), "deadline evidence missing"
+
+
+async def test_inspect_bundle_accepts_relative_path() -> None:
+    """M2 regression: inspect_bundle must resolve relative paths internally so
+    callers need not pass an already-resolved path."""
+    from bidscope.snapshots.adapters import inspect_bundle
+
+    relative = Path("data/demo/batch-1")
+    absolute = relative.resolve()
+    assert inspect_bundle(relative).valid == inspect_bundle(absolute).valid
+    assert inspect_bundle(relative).valid is True
+
+
+async def test_evidence_excludes_metadata_fields(
+    importer, demo_batch_1, session_factory
+) -> None:
+    """M4 regression: raw_fields metadata (e.g. synthetic_channel) must not be
+    written into the evidence table as if it were a business fact."""
+    await importer.import_bundle(demo_batch_1)
+
+    async with session_factory() as session:
+        evidence = (await session.execute(sa.select(NoticeEvidence))).scalars().all()
+
+    texts = {span.text for span in evidence}
+    assert "channel_a" not in texts, "synthetic_channel leaked into evidence"
+    assert "channel_b" not in texts, "synthetic_channel leaked into evidence"
+
+
+async def test_concurrent_source_notice_is_deduplicated(session_factory) -> None:
+    """M5 regression: concurrent get_or_create_source_notice calls for the same
+    (source, external_id) must yield exactly one source notice, with any unique
+    constraint collision handled via savepoint rollback — no unhandled error."""
+    import asyncio
+
+    from bidscope.persistence.repositories import SnapshotRepository
+
+    async def create(session: AsyncSession) -> str:
+        repo = SnapshotRepository(session)
+        notice = await repo.get_or_create_source_notice(
+            source="synthetic_demo",
+            external_id="demo-race",
+            source_url="https://example.invalid/race",
+            content_hash="race-hash",
+            first_seen_at=datetime(2026, 7, 1, tzinfo=UTC),
+            latest_seen_at=datetime(2026, 7, 1, tzinfo=UTC),
+        )
+        await session.commit()
+        return str(notice.id)
+
+    async with session_factory() as first, session_factory() as second:
+        results = await asyncio.gather(
+            create(first), create(second), return_exceptions=True
+        )
+
+    # No unhandled error may propagate.
+    assert not any(isinstance(r, Exception) for r in results), results
+    # Whatever the race outcome, the logical external_id must not be duplicated.
+    async with session_factory() as session:
+        existing = await _count(
+            session,
+            sa.select(SourceNotice)
+            .where(
+                SourceNotice.source == "synthetic_demo",
+                SourceNotice.external_id == "demo-race",
+            )
+            .subquery(),
+        )
+    assert existing == 1, f"expected exactly 1 source notice, got {existing}"
+
+
 async def test_provenance_inconsistency_not_persisted(
     importer, tmp_path: Path, session_factory
 ) -> None:

@@ -29,6 +29,12 @@ QUERY_TEXT = "智算中心 服务器"
 #: CNY 5,000,000 = 500万元 in integer minor units (分).
 MIN_BUDGET_MINOR_UNITS = 500_000_000
 
+#: Fixed reference time so retrieval-window logic is deterministic. The
+#: "recent" fixture (2 days old) passes the 7-day filter; the "expired"
+#: fixture (30 days old) is excluded — identical to the ``datetime.now()``
+#: behaviour but stable across runs.
+FIXED_NOW = datetime(2026, 7, 18, 12, 0, 0, tzinfo=UTC)
+
 
 async def _insert_notice(
     session: AsyncSession,
@@ -93,7 +99,7 @@ async def seeded_session(
     query_embedding: list[float],
 ) -> None:
     """Insert a controlled set of notices exercising every spec scenario."""
-    now = datetime.now(UTC)
+    now = FIXED_NOW
     recent = now - timedelta(days=2)
     expired = now - timedelta(days=30)
     # Maximally distant vector (negated query → cosine distance 2).
@@ -178,8 +184,8 @@ def searcher(provider: HashEmbeddingProvider, session_factory) -> HybridSearcher
     return HybridSearcher(session_factory=session_factory, provider=provider, top_k=10)
 
 
-def _filter_now() -> RetrievalFilter:
-    now = datetime.now(UTC)
+def _fixed_filter() -> RetrievalFilter:
+    now = FIXED_NOW
     return RetrievalFilter(
         regions=["四川省", "重庆市"],
         published_from=now - timedelta(days=7),
@@ -193,7 +199,7 @@ async def test_structured_filter_before_ranking(
     seeded_session, searcher, session_factory
 ) -> None:
     """Structured filters must exclude records before any ranking."""
-    result = await searcher.search(QUERY_TEXT, _filter_now())
+    result = await searcher.search(QUERY_TEXT, _fixed_filter())
     returned_ids = [c.notice_version_id for c in result.candidates]
 
     async with session_factory() as session:
@@ -218,7 +224,7 @@ async def test_vector_contribution_is_deterministic(
     exact query embedding (cosine distance 0) while the vector-weak one stores
     its negation (distance 2), so vector recall must rank the strong one ahead.
     """
-    result = await searcher.search(QUERY_TEXT, _filter_now())
+    result = await searcher.search(QUERY_TEXT, _fixed_filter())
     by_id = {c.notice_version_id: c for c in result.candidates}
 
     async with session_factory() as session:
@@ -239,7 +245,7 @@ async def test_no_duplicate_candidates_after_fusion(
     seeded_session, searcher
 ) -> None:
     """RRF must dedupe: each notice version appears at most once."""
-    result = await searcher.search(QUERY_TEXT, _filter_now())
+    result = await searcher.search(QUERY_TEXT, _fixed_filter())
     ids = [c.notice_version_id for c in result.candidates]
     assert len(ids) == len(set(ids))
 
@@ -259,7 +265,7 @@ async def test_degradation_returns_lexical_without_vector(
     failing_searcher = HybridSearcher(
         session_factory=session_factory, provider=FailingProvider(), top_k=10
     )
-    result = await failing_searcher.search(QUERY_TEXT, _filter_now())
+    result = await failing_searcher.search(QUERY_TEXT, _fixed_filter())
 
     assert result.degraded_modes == ["vector_unavailable"]
     assert result.candidates, "lexical results must still be returned"

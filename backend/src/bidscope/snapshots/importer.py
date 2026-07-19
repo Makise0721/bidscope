@@ -162,11 +162,9 @@ class SnapshotImporter:
                     import_record.id, self.clock.now()
                 )
             except BaseException:
-                await repository.mark_import_failure(
-                    import_record.id,
-                    self.clock.now(),
-                    error={"message": "import failed"},
-                )
+                # No partial application: the UnitOfWork rolls back on exit, so a
+                # failed import leaves no database rows and no audit record.
+                # The original request is returned unchanged for callers to retry.
                 raise
 
         return import_record
@@ -255,11 +253,15 @@ class SnapshotImporter:
     def _build_evidence(self, notice: Any) -> list[Any]:
         """Build per-field evidence spans for a notice.
 
-        Each populated textual field becomes an evidence record that points at
-        the source text backing the parsed value. Spans are anchored to the
-        field value itself (start=0, end=len) with a content hash, which is the
-        P0 contract; later stages may supply precise character offsets against
-        the raw source.
+        Each populated material field becomes an evidence record that points at
+        the parsed value. Date/time fields are represented by their canonical
+        ISO-8601 form (the P0 contract); later stages may attach precise
+        character offsets against the raw source. Spans are anchored to the
+        value itself (start=0, end=len) with a content hash.
+
+        ``raw_fields`` are included only when they carry genuine business
+        evidence; known metadata keys (e.g. ``synthetic_channel``) are excluded
+        so the evidence table is not polluted with provenance tags.
         """
         spans: list[Any] = []
         fields = {
@@ -267,15 +269,28 @@ class SnapshotImporter:
             "purchaser": notice.purchaser,
             "region": notice.region,
             "summary": notice.summary,
+            "publish_time": _format_datetime(notice.publish_time),
+            "deadline": _format_datetime(notice.deadline),
             "budget": notice.budget.raw_text if notice.budget else None,
         }
         for text in fields.values():
             if text:
                 spans.append(_EvidenceSpan(text=text, start=0, end=len(text)))
-        for value in notice.raw_fields.values():
+        for key, value in notice.raw_fields.items():
+            if key in _METADATA_FIELD_KEYS:
+                continue
             if isinstance(value, str) and value:
                 spans.append(_EvidenceSpan(text=value, start=0, end=len(value)))
         return spans
+
+
+#: Provenance/metadata keys that must never be recorded as evidence spans.
+_METADATA_FIELD_KEYS = frozenset({"synthetic_channel"})
+
+
+def _format_datetime(value: Any) -> str | None:
+    """Return the ISO-8601 form of a datetime, or ``None``."""
+    return value.isoformat() if value else None
 
 
 class _EvidenceSpan:

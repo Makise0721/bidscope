@@ -14,9 +14,9 @@ repository never generates random defaults, consistent with the schema's
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
 import sqlalchemy as sa
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bidscope.persistence.models import (
@@ -107,15 +107,6 @@ class SnapshotRepository:
             import_record.status = "success"
             import_record.finished_at = finished_at
 
-    async def mark_import_failure(
-        self, import_id: str, finished_at: datetime, error: dict[str, Any]
-    ) -> None:
-        import_record = await self.session.get(SnapshotImport, import_id)
-        if import_record is not None:
-            import_record.status = "failed"
-            import_record.finished_at = finished_at
-            import_record.error = error
-
     # ---------------------------------------------------- source notices
 
     async def find_source_notice(
@@ -136,26 +127,46 @@ class SnapshotRepository:
         first_seen_at: datetime,
         latest_seen_at: datetime,
     ) -> SourceNotice:
+        """Find an existing source notice or insert one atomically-ish.
+
+        P0 imports run single-process via the CLI, so the check-then-insert
+        race is not exercised today. The insert is nevertheless wrapped in a
+        savepoint so that a future concurrent import which loses the race on
+        ``uq_source_notices_source_external_id`` can roll the insert back
+        without aborting the wider transaction, then reuse the existing row.
+        """
         existing = await self.find_source_notice(source, external_id)
         if existing is not None:
             existing.latest_seen_at = latest_seen_at
             existing.content_hash = content_hash
             return existing
-        canonical = CanonicalNotice()
-        self.session.add(canonical)
-        await self.session.flush()
-        notice = SourceNotice(
-            canonical_notice_id=canonical.id,
-            source=source,
-            external_id=external_id,
-            source_url=source_url,
-            first_seen_at=first_seen_at,
-            latest_seen_at=latest_seen_at,
-            content_hash=content_hash,
-        )
-        self.session.add(notice)
-        await self.session.flush()
-        return notice
+        savepoint = await self.session.begin_nested()
+        try:
+            canonical = CanonicalNotice()
+            self.session.add(canonical)
+            await self.session.flush()
+            notice = SourceNotice(
+                canonical_notice_id=canonical.id,
+                source=source,
+                external_id=external_id,
+                source_url=source_url,
+                first_seen_at=first_seen_at,
+                latest_seen_at=latest_seen_at,
+                content_hash=content_hash,
+            )
+            self.session.add(notice)
+            await self.session.flush()
+            return notice
+        except IntegrityError:
+            # Lost the race: another transaction inserted the same
+            # (source, external_id) first. Reuse its row instead of failing.
+            await savepoint.rollback()
+            existing = await self.find_source_notice(source, external_id)
+            if existing is not None:
+                existing.latest_seen_at = latest_seen_at
+                existing.content_hash = content_hash
+                return existing
+            raise
 
     # ---------------------------------------------------- notice versions
 

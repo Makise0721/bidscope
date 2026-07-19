@@ -36,6 +36,10 @@ class GgzySnapshotAdapter:
     def parse(self, bundle: Path) -> list[NormalizedNotice]:
         inspection = inspect_bundle(bundle)
         self._require_valid_inspection(bundle, inspection)
+        # Reuse the manifest already parsed during integrity inspection instead
+        # of re-reading manifest.json a second time.
+        manifest = inspection.manifest
+        assert manifest is not None  # valid inspection guarantees a parsed manifest
 
         html = (bundle / "detail.html").read_text(encoding="utf-8")
         tree = HTMLParser(html)
@@ -62,7 +66,6 @@ class GgzySnapshotAdapter:
             if field is not None and value:
                 fields[field] = value
 
-        manifest = _parse.load_manifest(bundle)
         notice = _parse.build_notice(
             source=self.source,
             capture_kind=manifest.capture_kind,

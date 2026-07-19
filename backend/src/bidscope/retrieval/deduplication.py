@@ -16,6 +16,7 @@ and the evaluation suite) can consume them without surprises.
 from __future__ import annotations
 
 import unicodedata
+import urllib.parse
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -25,7 +26,11 @@ from bidscope.domain.types import AwareDatetime
 
 @dataclass(frozen=True)
 class NoticeView:
-    """The slice of a notice the dedup/change detectors operate on."""
+    """The slice of a notice the dedup/change detectors operate on.
+
+    ``deadline`` must be timezone-aware; a naive datetime is rejected at
+    construction so the pure functions below never have to branch on tz-awareness.
+    """
 
     source: str
     external_id: str
@@ -41,6 +46,12 @@ class NoticeView:
     procurement_scope: str | None = None
     cancellation: bool = False
     claim_supporting_texts: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        # Frozen-field enforcement of the domain's tz-aware contract; mirrors the
+        # Pydantic ``AwareDatetime`` validator but at the dataclass boundary.
+        if self.deadline is not None and self.deadline.tzinfo is None:
+            raise ValueError("NoticeView.deadline must be timezone-aware")
 
 
 class DuplicateDecision:
@@ -91,9 +102,14 @@ def _normalize_text(value: str | None) -> str:
 
 
 def _canonicalize_url(url: str) -> str:
-    """Return a canonical form of a source URL for equality comparison."""
-    lowered = url.lower().rstrip("/")
-    return lowered
+    """Return a canonical form of a source URL for equality comparison.
+
+    Drops the query string and fragment (e.g. tracking parameters and
+    sections) and lowercases the scheme/host so equivalent notices match.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    path = parsed.path.rstrip("/") or "/"
+    return urllib.parse.urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, "", ""))
 
 
 def classify_duplicate(
@@ -116,12 +132,10 @@ def classify_duplicate(
     if candidate.content_hash == existing.content_hash:
         reasons.append(f"identical content hash: {candidate.content_hash}")
 
-    if (
-        candidate.project_number
-        and existing.project_number
-        and candidate.project_number == existing.project_number
-    ):
-        reasons.append(f"identical project number: {candidate.project_number}")
+    candidate_number = candidate.project_number.strip() if candidate.project_number else ""
+    existing_number = existing.project_number.strip() if existing.project_number else ""
+    if candidate_number and existing_number and candidate_number == existing_number:
+        reasons.append(f"identical project number: {candidate_number}")
 
     if (
         candidate.source == existing.source
