@@ -1,0 +1,23 @@
+{
+  "records": [
+    {
+      "source": "ggzy",
+      "external_id": "CQ-2026-GGZY-0053",
+      "source_url": "https://www.ggzy.gov.cn/information/deal/html/a/530000/0101/20260718/005322a8028794fe4b0f97111b6482009bc5.html",
+      "capture_kind": "curated_public_excerpt",
+      "title": "重庆市智算中心服务器及存储设备采购公开招标公告",
+      "purchaser": "重庆市大数据应用发展管理局",
+      "region": "重庆市",
+      "publish_time": "2026-07-18T10:00:00+08:00",
+      "deadline": "2026-08-09T10:00:00+08:00",
+      "budget": {
+        "minor_units": 530000000,
+        "currency": "CNY",
+        "raw_text": "人民币530万元"
+      },
+      "summary": null,
+      "parser_version": "ggzy-v1",
+      "raw_fields": {}
+    }
+  ]
+}

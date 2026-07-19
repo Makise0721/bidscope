@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "bundle_id": "demo-batch-2",
+  "source": "synthetic_demo",
+  "capture_kind": "synthetic_demo",
+  "source_urls": [
+    "https://example.invalid/demo/batch-2"
+  ],
+  "retrieved_at": "2026-07-18T00:00:00+00:00",
+  "retrieval_outcome": "n/a",
+  "parser_version": "demo-v1",
+  "files": {
+    "notices.json": "c04dcfd258ef196e5d8efa69e50a48953dbb4fd409cd9c5fdcd8a9958b1df079",
+    "expected.json": "0d47399431b5af9e5956949370d187391bd01c0eb1872b94b00eb43f7c7e452c"
+  }
+}

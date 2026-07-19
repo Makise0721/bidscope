@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "bundle_id": "ggzy-construction-20260718",
+  "source": "ggzy",
+  "capture_kind": "curated_public_excerpt",
+  "source_urls": [
+    "https://www.ggzy.gov.cn/information/deal/html/a/530000/0101/20260718/005322a8028794fe4b0f97111b6482009bc5.html",
+    "https://www.ggzy.gov.cn/information/deal/html/b/530000/0101/20260718/005322a8028794fe4b0f97111b6482009bc5.html"
+  ],
+  "retrieved_at": "2026-07-18T00:00:00+00:00",
+  "retrieval_outcome": "captcha_and_undocumented_post_after_public_verification",
+  "parser_version": "ggzy-v1",
+  "files": {
+    "detail.html": "378b2d6bdcd716fe22a9b4d30c46b9ef0b8ee1ca465e57b5556526464979438f",
+    "expected.json": "1b4b49fbb7c2fb0e63e2aebe153ca5e0ca9d85f23c958d9e9b183c916e1fed54"
+  }
+}
