@@ -80,7 +80,14 @@ async def parse_intent(state: Any, config: RunnableConfig) -> dict[str, Any]:
 
 
 def validate_intent(state: Any, config: RunnableConfig) -> dict[str, Any]:
-    """Deterministically reject intents whose conditions are self-contradictory."""
+    """Deterministically reject intents whose conditions are self-contradictory.
+
+    Date/budget inversion is also enforced by ``SearchIntent``'s own Pydantic
+    validators (and so is caught at parse time); these checks are deliberate
+    defence in depth. The independently valuable guard here is the empty
+    topics/regions check, which catches semantically empty intents that pass
+    Pydantic construction.
+    """
     intent = state.search_intent
     errors: list[SerializableError] = []
 

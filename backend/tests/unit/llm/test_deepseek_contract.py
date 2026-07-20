@@ -20,8 +20,15 @@ import json
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from bidscope.llm.deepseek import DeepSeekReportModel
-from bidscope.llm.types import EvidenceSpan, ModelUsage, ReportDraft, VerifiedOpportunity
+from bidscope.llm.deepseek import DeepSeekDuplicateModel, DeepSeekReportModel
+from bidscope.llm.types import (
+    DuplicatePair,
+    EvidenceSpan,
+    ModelUsage,
+    ReportDraft,
+    VerifiedOpportunity,
+)
+from bidscope.retrieval.deduplication import DuplicateClassification, NoticeView
 
 
 @dataclass(frozen=True)
@@ -156,4 +163,40 @@ def test_synthesis_is_async() -> None:
     coro.close()  # avoid "never awaited" warning
 
 
-__all__ = ["ModelUsage", "ReportDraft", "VerifiedOpportunity"]
+def _notice_view(title: str = "四川省智算中心服务器采购项目") -> NoticeView:
+    return NoticeView(
+        source="synthetic_demo",
+        external_id="demo-001",
+        canonical_url="https://example.invalid/demo-001",
+        project_number=None,
+        content_hash="a" * 64,
+        title=title,
+        purchaser="四川省大数据中心",
+        region="四川省",
+    )
+
+
+async def test_deepseek_duplicate_classify_calls_api() -> None:
+    """DeepSeekDuplicateModel.classify() must actually invoke the model port."""
+    from bidscope.llm.deepseek import DuplicateClassificationResult
+
+    structured_response = DuplicateClassificationResult(decision="ambiguous", reasons=["stub"])
+    structured = MagicMock()
+    structured.ainvoke = AsyncMock(return_value=structured_response)
+    chat_open_ai = MagicMock()
+    chat_open_ai.with_structured_output.return_value = structured
+    with patch("bidscope.llm.deepseek.ChatOpenAI", return_value=chat_open_ai):
+        adapter = DeepSeekDuplicateModel(_settings())
+    pair = DuplicatePair(candidate=_notice_view("A"), existing=_notice_view("B"))
+    result = await adapter.classify(pair)
+    assert isinstance(result, DuplicateClassification)
+    assert result.decision == "ambiguous"
+    assert result.reasons == ("stub",)
+    assert structured.ainvoke.await_count == 1, "the model port must be called exactly once"
+    usage = adapter.last_usage
+    assert isinstance(usage, ModelUsage)
+    assert usage.model == "deepseek-chat"
+    assert usage.latency_ms > 0
+
+
+__all__ = ["DuplicateClassification", "ModelUsage", "ReportDraft", "VerifiedOpportunity"]

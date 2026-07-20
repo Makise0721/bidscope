@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import re
 import selectors
+from datetime import UTC, datetime
 from typing import Any
 
 import sqlalchemy as sa
@@ -38,6 +39,16 @@ from langgraph.types import Command
 
 from bidscope.config import Settings, get_settings
 from bidscope.persistence.models import QueryRun, RunEvent
+
+
+def _to_datetime(value: Any) -> datetime:
+    """Parse an ISO-8601 timestamp from a node event, falling back to now."""
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            pass
+    return datetime.now(UTC)
 
 
 def _to_plain_dsn(url: str) -> str:
@@ -135,6 +146,7 @@ async def _append_events(
             session.add(RunEvent(
                 query_run_id=str(run_id),
                 seq=index,
+                timestamp=_to_datetime(event.get("timestamp")),
                 node=event.get("node", ""),
                 event=event.get("event", ""),
                 status=event.get("status", ""),

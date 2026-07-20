@@ -184,6 +184,13 @@ class RunEvent(Base, TimestampMixin):
     id: Mapped[str] = _pk()
     query_run_id: Mapped[str] = _fk("query_runs")
     seq: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    #: Clock-injected moment the graph node emitted this event. Kept separate
+    #: from ``created_at`` (server insert time) so audit records reflect when
+    #: the event actually happened in the run, matching the node_events streamed
+    #: to the API.
+    timestamp: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True), nullable=False,
+    )
     node: Mapped[str] = mapped_column(sa.Text, nullable=False)
     event: Mapped[str] = mapped_column(sa.Text, nullable=False)
     status: Mapped[str] = mapped_column(sa.Text, nullable=False)

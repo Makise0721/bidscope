@@ -93,6 +93,22 @@ async def test_cross_instance_resume_does_not_duplicate_upstream_events(
     assert not duplicates, f"upstream events duplicated: {duplicates}"
     # Graph B added downstream events but did not re-add the upstream ones.
     assert events_after_b >= events_after_a
+    # The Clock-injected timestamp is persisted, not just server insert time.
+    await _assert_timestamps_persisted(run_id, session_factory)
+
+
+async def _assert_timestamps_persisted(run_id: str, session_factory: Any) -> None:
+    """Persisted rows carry a Clock-injected timestamp (M4 regression)."""
+    from datetime import UTC, datetime, timedelta
+    async with session_factory() as session:
+        result = await session.execute(
+            sa.select(RunEvent.timestamp).where(RunEvent.query_run_id == run_id)
+        )
+        timestamps = [row[0] for row in result.all()]
+    assert timestamps, "expected persisted run_events with timestamps"
+    # The injected timestamp (2026-07-18 from FixedClock) precedes server now().
+    upper_bound = datetime.now(tz=UTC) + timedelta(hours=1)
+    assert all(ts < upper_bound for ts in timestamps)
 
 
 async def _count_events(run_id: str, session_factory: Any) -> int:

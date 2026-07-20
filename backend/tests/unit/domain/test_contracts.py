@@ -190,6 +190,45 @@ def test_search_intent_timestamps_must_be_timezone_aware() -> None:
         )
 
 
+def test_search_intent_json_schema_exposes_nested_types() -> None:
+    """``SearchIntent.model_json_schema()`` must describe nested types.
+
+    The DeepSeek intent adapter calls ``with_structured_output(SearchIntent)``,
+    which depends on LangChain generating a correct JSON schema for the nested
+    ``Money``, ``RunSchedule`` and ``AwareDatetime`` fields. This test pins down
+    the schema structure so a regression in those nested types is caught before
+    it reaches the network.
+    """
+    schema = SearchIntent.model_json_schema()
+    properties = schema["properties"]
+    assert properties["topics"]["type"] == "array"
+
+    # Optional fields render as an ``anyOf`` of ``[$ref, null]`` (nested model)
+    # or ``[string, null]`` (AwareDatetime) in Pydantic v2; resolve the
+    # non-null entry and follow ``$ref`` to the concrete shape in ``$defs``.
+    def _resolve(flavor: dict) -> dict:
+        if "anyOf" in flavor:
+            flavor = next(
+                entry for entry in flavor["anyOf"]
+                if entry.get("type") != "null"
+            )
+        if "$ref" in flavor:
+            flavor = schema["$defs"][flavor["$ref"].split("/")[-1]]
+        return flavor
+
+    min_budget = _resolve(properties["min_budget"])
+    assert min_budget["properties"]["minor_units"]["type"] == "integer"
+
+    schedule = _resolve(properties["schedule"])
+    assert schedule["properties"]["cron_expression"]["type"] == "string"
+    assert schedule["properties"]["timezone"]["type"] == "string"
+
+    # published_from/to are date-time strings (AwareDatetime).
+    published_from = _resolve(properties["published_from"])
+    assert published_from.get("type") == "string"
+    assert published_from.get("format") == "date-time"
+
+
 # --- ReportClaim -------------------------------------------------------------
 
 

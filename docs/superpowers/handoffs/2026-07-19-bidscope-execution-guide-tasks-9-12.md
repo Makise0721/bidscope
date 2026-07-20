@@ -1,14 +1,14 @@
 # BidScope 超详细实施执行手册（任务 9-12）
 
-**用途：** 本文供能力较弱、上下文较短或容易越界的编码模型接管 BidScope 任务 9-12 的实现。  
-**项目根仓库：** `C:\Users\29913\zcode_workspace\bidscope`  
-**实现 worktree：** `C:\Users\29913\zcode_workspace\bidscope\.worktrees\bidscope-p0`  
-**实现分支：** `feat/bidscope-p0`  
-**当前代码基线：** `c4442a8 fix: address batch-2 review findings (M1-M6, L1-L4)`（含任务 5-8 全部实施、第二批审查修复、Alembic 检索索引 migration）  
-**已通过审查：** 任务 1-8、三批审查、第二批审查修复 `c4442a8`；下一批只执行任务 9-12  
-**设计规格：** `docs/superpowers/specs/2026-07-18-bidscope-design.md`  
-**详细计划：** `docs/superpowers/plans/2026-07-18-bidscope-implementation.md`  
-**前一批次交接文档：** `docs/superpowers/handoffs/2026-07-18-bidscope-execution-guide.md`（含任务 1-8 所有细节、通用协议、Windows 排障、门禁格式）  
+**用途：** 本文供能力较弱、上下文较短或容易越界的编码模型接管 BidScope 任务 9-12 的实现。
+**项目根仓库：** `C:\Users\29913\zcode_workspace\bidscope`
+**实现 worktree：** `C:\Users\29913\zcode_workspace\bidscope\.worktrees\bidscope-p0`
+**实现分支：** `feat/bidscope-p0`
+**当前代码基线：** `c4442a8 fix: address batch-2 review findings (M1-M6, L1-L4)`（含任务 5-8 全部实施、第二批审查修复、Alembic 检索索引 migration）
+**已通过审查：** 任务 1-8、三批审查、第二批审查修复 `c4442a8`；下一批只执行任务 9-12
+**设计规格：** `docs/superpowers/specs/2026-07-18-bidscope-design.md`
+**详细计划：** `docs/superpowers/plans/2026-07-18-bidscope-implementation.md`
+**前一批次交接文档：** `docs/superpowers/handoffs/2026-07-18-bidscope-execution-guide.md`（含任务 1-8 所有细节、通用协议、Windows 排障、门禁格式）
 **本文版本：** 2026-07-19
 
 ---
@@ -179,7 +179,7 @@ git diff --check: passed
 
 ### 任务 9：Fake 与 DeepSeek 模型端口
 
-**进入条件：** `c4442a8` 是 HEAD 的祖先，工作树干净，任务 1-8 全门禁通过，锁定依赖已核验可用。  
+**进入条件：** `c4442a8` 是 HEAD 的祖先，工作树干净，任务 1-8 全门禁通过，锁定依赖已核验可用。
 **目标:** 三个 async Protocol 的端口实现，Fake 完全离线确定性。
 
 允许创建：
@@ -251,7 +251,7 @@ feat: add deterministic and DeepSeek model ports
 
 ### 任务 10：意图、检索与人工确认 LangGraph
 
-**进入条件：** 任务 9 已独立提交，工作树干净，`InMemorySaver`/`Command`/`interrupt`/`AsyncPostgresSaver` 可用。  
+**进入条件：** 任务 9 已独立提交，工作树干净，`InMemorySaver`/`Command`/`interrupt`/`AsyncPostgresSaver` 可用。
 **目标:** 前六节点，结束状态 `candidates_resolved`（不是 `completed`）。
 
 允许创建：
@@ -306,7 +306,7 @@ feat: add confirmable LangGraph query workflow
 
 ### 任务 11：证据抽取、报告生成与事实校验
 
-**进入条件：** 任务 10 已提交，工作树干净。  
+**进入条件：** 任务 10 已提交，工作树干净。
 **目标:** 后四节点，结束状态 `completed`；严格证据优先。
 
 允许创建：
@@ -358,7 +358,7 @@ feat: enforce evidence-backed Agent reports
 
 ### 任务 12：PostgreSQL Checkpoint 与运行恢复
 
-**进入条件：** 任务 11 已提交，工作树干净，Postgres 已启动。  
+**进入条件：** 任务 11 已提交，工作树干净，Postgres 已启动。
 **目标:** 跨进程恢复，checkpoint 持久化与运行事件。
 
 允许创建：

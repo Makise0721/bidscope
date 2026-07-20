@@ -12,7 +12,6 @@ and their tests — share one definition.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Annotated
 
 from pydantic import BaseModel, Field
 

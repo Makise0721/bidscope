@@ -55,6 +55,32 @@ class FakeHybridSearcher:
         )
 
 
+def _notice_views() -> dict[str, object]:
+    """Minimal notice views so the dedup/evidence pipeline has real input."""
+    from bidscope.retrieval.deduplication import NoticeView
+
+    return {
+        "demo-001": NoticeView(
+            source="synthetic_demo", external_id="demo-001",
+            canonical_url="https://example.invalid/demo-001",
+            project_number="SC-2026-9", content_hash="a" * 64,
+            title="四川省智算中心服务器采购项目",
+            purchaser="四川省大数据中心", region="四川省",
+            budget_minor_units=6_800_000_00, budget_currency="CNY",
+            claim_supporting_texts=("预算金额：680万元。",),
+        ),
+        "demo-002": NoticeView(
+            source="synthetic_demo", external_id="demo-002",
+            canonical_url="https://example.invalid/demo-002",
+            project_number="CQ-2026-1", content_hash="b" * 64,
+            title="重庆市服务器采购项目",
+            purchaser="重庆市公共资源交易中心", region="重庆市",
+            budget_minor_units=5_300_000_00, budget_currency="CNY",
+            claim_supporting_texts=("预算金额：530万元。",),
+        ),
+    }
+
+
 def _deps(
     *,
     candidate_ids: list[str] | None = None,
@@ -68,7 +94,7 @@ def _deps(
             candidate_ids=candidate_ids or ["demo-001", "demo-002"], degraded=degraded
         ),
         clock=FixedClock(datetime(2026, 7, 18, 9, 0, tzinfo=UTC)),
-        load_notice_views=lambda ids: {},
+        load_notice_views=lambda ids: _notice_views(),
     )
 
 
@@ -95,6 +121,8 @@ async def test_scheduled_query_interrupts_and_resumes() -> None:
     assert resumed["candidate_notice_ids"]
     # Retrieval ran exactly once and resolved duplicates after it.
     assert deps.searcher.search_count == 1
+    # With real notice views, evidence binding produced verified opportunities.
+    assert len(resumed["verified_opportunities"]) > 0
 
 
 async def test_pause_blocks_until_resume() -> None:
