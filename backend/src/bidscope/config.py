@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     model_base_url: str = "https://api.deepseek.com"
     model_name: str = "deepseek-chat"
     model_api_key: str | None = None
+    #: Root directory for the local object store (DOCX outputs and snapshot
+    #: payloads in local/demo deployments).
+    object_store_root: str = "data/objects"
+    #: Token required by the ``/api/test-controls/*`` routes. Those routes are
+    #: only registered when ``app_mode == "test"``, and this token gates them.
+    test_control_token: str | None = None
 
 
 @lru_cache

@@ -62,6 +62,9 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 # Alembic auto-generated migration scripts follow a stable template that
 # predates stricter typing-import and union-syntax conventions.
 "migrations/versions/*.py" = ["UP035", "UP007", "I001", "E501"]
+# FastAPI Dependency Injection uses ``Depends(...)`` as a parameter default
+# throughout the route handlers; B008 flags this general pattern.
+"backend/src/bidscope/api/routes/*.py" = ["B008"]
 
 [tool.mypy]
 python_version = "3.12"
