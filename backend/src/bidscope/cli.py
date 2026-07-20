@@ -48,6 +48,12 @@ checkpoints_app = typer.Typer(
 )
 app.add_typer(checkpoints_app, name="checkpoints")
 
+scheduler_app = typer.Typer(
+    help="Subscription scheduler process role.",
+    no_args_is_help=True,
+)
+app.add_typer(scheduler_app, name="scheduler")
+
 
 def _build_importer() -> SnapshotImporter:
     """Construct an importer backed by the configured database and object store."""
@@ -159,6 +165,43 @@ def checkpoints_setup() -> None:
     """Create the LangGraph checkpoint tables in the configured database."""
     run_setup_checkpoints(get_settings())
     typer.echo("checkpoint tables ready")
+
+
+# --- scheduler ---------------------------------------------------------------
+
+
+@scheduler_app.command("run")
+def scheduler_run_once() -> None:
+    """Run one scheduler tick immediately (used by tests and manual triggers)."""
+    from bidscope.subscriptions.scheduler import list_due_subscriptions
+    from bidscope.subscriptions.service import SubscriptionService
+
+    async def _run() -> None:
+        _, session_factory = create_engine_and_session()
+        service = SubscriptionService(session_factory=session_factory)
+        due = await list_due_subscriptions(session_factory)
+        for sub in due:
+            await service.run_subscription(sub.id)
+        typer.echo(f"scheduler tick: ran {len(due)} due subscription(s)")
+
+    asyncio.run(_run())
+
+
+@scheduler_app.command("start")
+def scheduler_start() -> None:
+    """Start the APScheduler process role (blocks; one instance per host)."""
+    from bidscope.subscriptions.scheduler import start_scheduler
+
+    scheduler = start_scheduler()
+    typer.echo("subscription scheduler started (Ctrl+C to stop)")
+    try:
+        import time
+
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        scheduler.shutdown()
+        typer.echo("scheduler stopped")
 
 
 if __name__ == "__main__":
