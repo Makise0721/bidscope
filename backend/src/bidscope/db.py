@@ -5,11 +5,13 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from bidscope.config import get_settings
+from bidscope.config import Settings, get_settings
 
 
-def create_engine_and_session() -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
-    settings = get_settings()
-    engine = create_async_engine(settings.database_url)
+def create_engine_and_session(
+    settings: Settings | None = None,
+) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
+    resolved = settings or get_settings()
+    engine = create_async_engine(resolved.database_url)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     return engine, factory
