@@ -19,11 +19,15 @@ JSONB column under internal keys, leaving the operator-visible intent intact.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
-from datetime import UTC, datetime, timedelta
-from typing import Any
+import re
+from datetime import UTC, datetime
+from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
+from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bidscope.graph.executor import create_run, execute
@@ -46,30 +50,172 @@ KEY_NEXT_RUN_AT = "__next_run_at"
 KEY_CONSECUTIVE_FAILURES = "__consecutive_failures"
 
 
+async def _drain_task[T](task: asyncio.Task[T]) -> T:
+    """Wait for a task to finish while preserving cancellation for the caller."""
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return task.result()
+
+
+async def _acquire_advisory_lock_safely(
+    session: AsyncSession,
+    subscription_id: str,
+    scheduled_at: datetime,
+) -> bool:
+    """Acquire a lock without losing ownership if the caller is cancelled."""
+    acquisition = asyncio.create_task(
+        acquire_advisory_lock(session, subscription_id, scheduled_at),
+    )
+    try:
+        return await asyncio.shield(acquisition)
+    except asyncio.CancelledError as cancellation_error:
+        try:
+            acquired = await _drain_task(acquisition)
+        except BaseException as acquisition_error:
+            raise cancellation_error from acquisition_error
+        if acquired:
+            release = asyncio.create_task(
+                release_advisory_lock(session, subscription_id, scheduled_at),
+            )
+            try:
+                await _drain_task(release)
+            except BaseException as release_error:
+                raise cancellation_error from release_error
+        raise
+    except BaseException:
+        # Acquisition exceptions do not establish lock ownership.
+        raise
+
+
+# Project crontab expressions follow the conventional Sunday=0/7, Monday=1
+# numbering, while APScheduler's numeric weekdays are Monday=0 through Sunday=6.
+_STANDARD_CRON_WEEKDAYS = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")
+_NAMED_CRON_WEEKDAYS = {
+    name: value for value, name in enumerate(_STANDARD_CRON_WEEKDAYS)
+}
+_DOW_VALUE = r"(?:\d+|[A-Za-z]+)"
+_DOW_TOKEN = re.compile(
+    rf"(?P<start>{_DOW_VALUE})(?:-(?P<end>{_DOW_VALUE}))?"
+    r"(?:/(?P<step>\d+))?$"
+)
+_DOW_ALL_TOKEN = re.compile(r"\*(?:/(?P<step>\d+))?$")
+
+
+def _normalize_crontab_day_of_week(cron_expression: str) -> str:
+    """Validate and expand standard crontab DOW syntax for APScheduler.
+
+    Project expressions use Sunday=0/7 and Monday=1 through Saturday=6.
+    APScheduler's numeric weekday syntax has different semantics, so every
+    supported DOW token is expanded to lowercase weekday names. This also
+    makes named ranges with steps explicit and prevents APScheduler's permissive
+    prefix matching from silently accepting malformed tokens.
+    """
+    fields = cron_expression.split()
+    if len(fields) != 5:
+        return cron_expression
+
+    day_of_week = fields[4]
+
+    def weekday_name(value: int) -> str:
+        if value == 7:
+            value = 0
+        if not 0 <= value <= 6:
+            raise ValueError(f"invalid crontab day-of-week value: {value}")
+        return _STANDARD_CRON_WEEKDAYS[value]
+
+    def endpoint_value(raw: str) -> int:
+        if raw.isdigit():
+            value = int(raw)
+            if not 0 <= value <= 7:
+                raise ValueError(f"invalid crontab day-of-week value: {value}")
+            return value
+        named_value = _NAMED_CRON_WEEKDAYS.get(raw.lower())
+        if named_value is None:
+            raise ValueError(f"invalid crontab day-of-week name: {raw}")
+        return named_value
+
+    def expand_token(token: str) -> list[str]:
+        all_match = _DOW_ALL_TOKEN.fullmatch(token)
+        if all_match:
+            step_raw = all_match.group("step")
+            if step_raw is None:
+                return ["*"]
+            step = int(step_raw)
+            if step <= 0:
+                raise ValueError("crontab day-of-week step must be positive")
+            if step > 7:
+                raise ValueError(
+                    "crontab day-of-week step exceeds its seven-day range"
+                )
+            return [weekday_name(value) for value in range(0, 7, step)]
+
+        token_match = _DOW_TOKEN.fullmatch(token)
+        if token_match is None:
+            raise ValueError(f"invalid crontab day-of-week token: {token}")
+
+        start_raw = token_match.group("start")
+        start = endpoint_value(start_raw)
+        end_raw = token_match.group("end")
+        step_raw = token_match.group("step")
+        if end_raw is not None and start_raw.isdigit() != end_raw.isdigit():
+            raise ValueError(
+                "crontab day-of-week range endpoints must use the same syntax"
+            )
+        end = endpoint_value(end_raw) if end_raw is not None else (
+            7 if step_raw is not None else start
+        )
+        step = int(step_raw) if step_raw is not None else 1
+        if step <= 0:
+            raise ValueError("crontab day-of-week step must be positive")
+        if step > 7:
+            raise ValueError(
+                "crontab day-of-week step exceeds its seven-day range"
+            )
+        if start > end:
+            raise ValueError(
+                "crontab day-of-week range start must not exceed its end"
+            )
+        if step > end - start + 1:
+            raise ValueError(
+                "crontab day-of-week step exceeds its range"
+            )
+        return [
+            weekday_name(value)
+            for value in range(start, end + 1, step)
+        ]
+
+    normalized_tokens: list[str] = []
+    seen_weekdays: set[str] = set()
+    for token in day_of_week.split(","):
+        for name in expand_token(token):
+            if name == "*":
+                normalized_tokens.append(name)
+            elif name not in seen_weekdays:
+                seen_weekdays.add(name)
+                normalized_tokens.append(name)
+
+    fields[4] = ",".join(normalized_tokens)
+    return " ".join(fields)
+
+
 def _compute_next_run(
     cron_expression: str, timezone: str, after: datetime | None = None,
 ) -> datetime:
-    """Compute the next run time for a simple ``M H DOM MONTH DOW`` cron.
-
-    Handles the weekly schedules used by the demonstration (e.g. ``0 9 * * 1``
-    = every Monday at 09:00). Falls back to one day after ``after`` for
-    patterns it does not specifically recognize.
-    """
-    after = after or datetime.now(UTC)
-    fields = cron_expression.split()
-    minute, hour, _dom, _month, dow = fields if len(fields) == 5 else (0, 0, "*", "*", "*")
-    # Tolerance: honor a numeric day-of-week (0=Sunday … 6=Saturday).
-    try:
-        target_dow = int(dow) % 7
-    except ValueError:
-        target_dow = after.weekday()
-    candidate = after.replace(
-        hour=int(hour), minute=int(minute), second=0, microsecond=0,
+    """Compute the next run strictly after ``after`` using a five-field cron."""
+    reference = after or datetime.now(UTC)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=UTC)
+    normalized_expression = _normalize_crontab_day_of_week(cron_expression)
+    trigger = CronTrigger.from_crontab(
+        normalized_expression, timezone=ZoneInfo(timezone),
     )
-    days_ahead = (target_dow - candidate.weekday()) % 7
-    if days_ahead == 0 and candidate <= after:
-        days_ahead = 7
-    return candidate + timedelta(days=days_ahead)
+    next_run = trigger.get_next_fire_time(reference, reference)
+    if next_run is None:
+        raise ValueError(f"cron expression has no next run: {cron_expression}")
+    return cast(datetime, next_run)
 
 
 @dataclasses.dataclass
@@ -125,23 +271,44 @@ class SubscriptionService:
             await session.refresh(sub)
         return sub
 
-    async def run_subscription(self, subscription_id: str) -> dict[str, Any]:
+    async def run_subscription(
+        self,
+        subscription_id: str,
+        *,
+        scheduled_at: datetime | None = None,
+    ) -> dict[str, Any]:
         """Run one subscription cycle: lock, retrieve, diff, emit, advance.
 
+        ``scheduled_at`` optionally supplies the scheduled timestamp used for
+        advisory-lock bucketing; when omitted, the current UTC time is used.
         Returns a stats dict with keys ``new_notices``, ``material_changes``,
-        ``unchanged``, and ``failed``.
+        ``unchanged``, ``failed``, and ``skipped``. ``skipped`` is true when
+        another worker already holds the advisory lock for this run.
         """
         async with self.session_factory() as session:
             sub = await session.get(Subscription, subscription_id)
             if sub is None:
                 raise KeyError(f"subscription not found: {subscription_id}")
 
-            scheduled_at = datetime.now(UTC)
+            if scheduled_at is None:
+                scheduled_at = datetime.now(UTC)
+            elif scheduled_at.tzinfo is None:
+                scheduled_at = scheduled_at.replace(tzinfo=UTC)
+            else:
+                scheduled_at = scheduled_at.astimezone(UTC)
             # Advisory lock: a second concurrent worker observes it is already
             # held and skips, guaranteeing exactly one run per time bucket.
-            acquired = await acquire_advisory_lock(session, subscription_id, scheduled_at)
+            acquired = await _acquire_advisory_lock_safely(
+                session, subscription_id, scheduled_at,
+            )
             if not acquired:
-                return {"new_notices": 0, "material_changes": 0, "unchanged": 0, "failed": False}
+                return {
+                    "new_notices": 0,
+                    "material_changes": 0,
+                    "unchanged": 0,
+                    "failed": False,
+                    "skipped": True,
+                }
             try:
                 return await self._run_locked(session, sub, scheduled_at)
             finally:
@@ -157,7 +324,13 @@ class SubscriptionService:
         if self.fail_every_run:
             await self._record_failure(session, sub)
             await session.commit()
-            return {"new_notices": 0, "material_changes": 0, "unchanged": 0, "failed": True}
+            return {
+                "new_notices": 0,
+                "material_changes": 0,
+                "unchanged": 0,
+                "failed": True,
+                "skipped": False,
+            }
 
         # 1. Create a query run (reuses the executor's run lifecycle so a
         #    ``QueryRun`` row exists for the dual-worker assertion).
@@ -291,6 +464,7 @@ class SubscriptionService:
             "material_changes": material_changes,
             "unchanged": unchanged,
             "failed": False,
+            "skipped": False,
         }
 
     async def _advance_seen(
