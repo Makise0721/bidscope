@@ -1,3 +1,5 @@
-# Snapshot bundles are hash-verified byte artifacts. Do not normalize their
-# line endings on checkout; manifests record hashes of the original bytes.
-data/** -text
+# Snapshot bundles are hash-verified byte artifacts. Preserve the byte form
+# recorded by each manifest across checkout on every platform.
+data/**/notices.json -text
+data/**/detail.html -text
+data/**/expected.json text eol=crlf
