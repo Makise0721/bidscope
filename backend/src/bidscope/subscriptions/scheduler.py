@@ -13,17 +13,66 @@ that agree on those two values contend on the same lock.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import sqlalchemy as sa
 
 from bidscope.config import Settings, get_settings
+from bidscope.db import create_engine_and_session
 from bidscope.persistence.models import Subscription
 
 #: One-minute tick, matching the documented APScheduler schedule.
 TICK_MINUTES = 1
+KEY_NEXT_RUN_AT = "__next_run_at"
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalize naive or offset-aware datetimes for due comparisons."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _stored_next_run(subscription: Subscription) -> datetime | None:
+    """Parse the persisted next-run timestamp, ignoring malformed state."""
+    intent = subscription.normalized_intent
+    if not isinstance(intent, dict):
+        return None
+    raw = intent.get(KEY_NEXT_RUN_AT)
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return _as_utc(parsed)
+
+
+async def advance_subscription_next_run(
+    subscription_id: str,
+    *,
+    session_factory: Any,
+    now: datetime,
+) -> None:
+    """Persist the next cron occurrence after a successful scheduler outcome."""
+    from bidscope.subscriptions.service import _compute_next_run
+
+    async with session_factory() as session:
+        subscription = await session.get(Subscription, subscription_id)
+        if subscription is None or subscription.status != "active":
+            return
+        next_run = _compute_next_run(
+            subscription.cron_expression,
+            subscription.timezone,
+            after=now,
+        )
+        intent = dict(subscription.normalized_intent or {})
+        intent[KEY_NEXT_RUN_AT] = next_run.isoformat()
+        subscription.normalized_intent = intent
+        await session.commit()
 
 
 def subscription_lock_key(subscription_id: str, scheduled_time: str) -> int:
@@ -66,19 +115,19 @@ async def release_advisory_lock(
 async def list_due_subscriptions(
     session_factory: Any, now: datetime | None = None,
 ) -> list[Subscription]:
-    """Return active subscriptions.
-
-    The next-run time is derived from the cron expression and stored inside the
-    subscription's ``normalized_intent`` (the relational schema is frozen and
-    carries no ``next_run_at`` column). For P0 the scheduler lists every active
-    subscription; callers that need due-time filtering can compare against
-    ``now`` in Python.
-    """
+    """Return active subscriptions whose persisted next run is due."""
+    reference = _as_utc(now or datetime.now(UTC))
     async with session_factory() as session:
         result = await session.execute(
             sa.select(Subscription).where(Subscription.status == "active")
         )
-        return list(result.scalars())
+        return [
+            subscription
+            for subscription in result.scalars()
+            if subscription.status == "active"
+            and (next_run := _stored_next_run(subscription)) is not None
+            and next_run <= reference
+        ]
 
 
 def build_scheduler(settings: Settings | None = None) -> Any:
@@ -102,9 +151,68 @@ def build_scheduler(settings: Settings | None = None) -> Any:
     return scheduler
 
 
-async def _tick(settings: Settings) -> None:
-    """Placeholder tick body; full tick lives in the service layer."""
-    _ = settings
+def _build_subscription_service(session_factory: Any) -> Any:
+    """Build the subscription service without creating an import cycle."""
+    from bidscope.subscriptions.service import SubscriptionService
+
+    return SubscriptionService(session_factory=session_factory)
+
+
+async def run_scheduler_tick(
+    settings: Settings | None = None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, int]:
+    """Run every due subscription once and return tick counters."""
+    resolved = settings or get_settings()
+    reference = _as_utc(now or datetime.now(UTC))
+    engine, session_factory = create_engine_and_session(resolved)
+    counters = {"due": 0, "ran": 0, "skipped": 0, "failed": 0}
+    try:
+        due = await list_due_subscriptions(session_factory, reference)
+        counters["due"] = len(due)
+        service = _build_subscription_service(session_factory)
+        for subscription in due:
+            scheduled_at = _stored_next_run(subscription)
+            if scheduled_at is None:
+                counters["failed"] += 1
+                continue
+            try:
+                outcome = await service.run_subscription(
+                    subscription.id,
+                    scheduled_at=scheduled_at,
+                )
+            except Exception:
+                counters["failed"] += 1
+                continue
+
+            if outcome.get("failed"):
+                counters["failed"] += 1
+                continue
+            if outcome.get("skipped"):
+                # The lock owner advances this occurrence after its run. A
+                # skipped worker must not overwrite that update from another
+                # session after the owner releases the advisory lock.
+                counters["skipped"] += 1
+                continue
+            try:
+                await advance_subscription_next_run(
+                    subscription.id,
+                    session_factory=session_factory,
+                    now=reference,
+                )
+            except Exception:
+                counters["failed"] += 1
+                continue
+            counters["ran"] += 1
+        return counters
+    finally:
+        await engine.dispose()
+
+
+def _tick(settings: Settings) -> None:
+    """Run one async scheduler tick from APScheduler's sync worker."""
+    asyncio.run(run_scheduler_tick(settings))
 
 
 def start_scheduler(settings: Settings | None = None) -> Any:
