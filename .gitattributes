@@ -1,0 +1,3 @@
+# Snapshot bundles are hash-verified byte artifacts. Do not normalize their
+# line endings on checkout; manifests record hashes of the original bytes.
+data/** -text
