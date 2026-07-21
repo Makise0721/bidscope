@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 import sqlalchemy as sa
+from bidscope import cli
 from bidscope.config import Settings
 from bidscope.persistence.models import Subscription
 from bidscope.subscriptions import scheduler
@@ -406,11 +407,37 @@ async def test_run_scheduler_tick_leaves_lock_skips_for_lock_owner_to_advance(
     engine.dispose.assert_awaited_once()
 
 
+def test_scheduler_run_once_delegates_to_async_core_and_reports_counters(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = Settings()
+    tick = AsyncMock(return_value={"due": 4, "ran": 2, "skipped": 1, "failed": 1})
+    monkeypatch.setattr(cli, "get_settings", Mock(return_value=settings))
+    monkeypatch.setattr(scheduler, "run_scheduler_tick", tick)
+    monkeypatch.setattr(
+        cli,
+        "create_engine_and_session",
+        Mock(side_effect=AssertionError("legacy DB path must not be called")),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "list_due_subscriptions",
+        AsyncMock(side_effect=AssertionError("legacy due-list path must not be called")),
+    )
+
+    cli.scheduler_run_once()
+
+    tick.assert_awaited_once_with(settings)
+    assert capsys.readouterr().out == "scheduler tick: due=4 ran=2 skipped=1 failed=1\n"
+
+
 def test_tick_is_synchronous_and_runs_async_core(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings()
     tick = AsyncMock(return_value={"due": 0, "ran": 0, "skipped": 0, "failed": 0})
     monkeypatch.setattr(scheduler, "run_scheduler_tick", tick)
-    run = Mock(side_effect=lambda coroutine: asyncio.get_event_loop().run_until_complete(coroutine))
+    original_run = asyncio.run
+    run = Mock(side_effect=original_run)
     monkeypatch.setattr(scheduler.asyncio, "run", run)
 
     result = scheduler._tick(settings)

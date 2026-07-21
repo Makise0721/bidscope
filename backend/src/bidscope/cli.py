@@ -173,18 +173,16 @@ def checkpoints_setup() -> None:
 @scheduler_app.command("run")
 def scheduler_run_once() -> None:
     """Run one scheduler tick immediately (used by tests and manual triggers)."""
-    from bidscope.subscriptions.scheduler import list_due_subscriptions
-    from bidscope.subscriptions.service import SubscriptionService
+    from bidscope.subscriptions.scheduler import run_scheduler_tick
 
-    async def _run() -> None:
-        _, session_factory = create_engine_and_session()
-        service = SubscriptionService(session_factory=session_factory)
-        due = await list_due_subscriptions(session_factory)
-        for sub in due:
-            await service.run_subscription(sub.id)
-        typer.echo(f"scheduler tick: ran {len(due)} due subscription(s)")
-
-    asyncio.run(_run())
+    counters = asyncio.run(run_scheduler_tick(get_settings()))
+    typer.echo(
+        "scheduler tick: "
+        f"due={counters['due']} "
+        f"ran={counters['ran']} "
+        f"skipped={counters['skipped']} "
+        f"failed={counters['failed']}"
+    )
 
 
 @scheduler_app.command("start")
