@@ -13,6 +13,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
@@ -316,6 +317,134 @@ async def test_run_subscription_normalizes_naive_scheduled_at(
         persisted_sub = await session.get(Subscription, sub_id)
     assert persisted_sub is not None
     assert persisted_sub.last_successful_run_at == normalized_scheduled_at
+
+
+@pytest.mark.asyncio
+async def test_run_subscription_advances_schedule_before_releasing_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The successful schedule update is committed while the lock is held."""
+    from bidscope.subscriptions import service as service_module
+    from bidscope.subscriptions.service import KEY_NEXT_RUN_AT, SubscriptionService
+
+    sub_id = _next_id("sub-atomic-schedule")
+    sub = _make_subscription(subscription_id=sub_id)
+    initial_next_run = "2026-07-20T09:00:00+00:00"
+    sub.normalized_intent[KEY_NEXT_RUN_AT] = initial_next_run
+    scheduled_at = datetime(2026, 7, 20, 9, tzinfo=UTC)
+    next_run = datetime(2026, 7, 27, 9, tzinfo=UTC)
+    events: list[object] = []
+    lock_held = False
+
+    class _FakeSession:
+        async def __aenter__(self) -> _FakeSession:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def get(self, model: object, subscription_id: str) -> Subscription:
+            del model
+            assert subscription_id == sub_id
+            return sub
+
+        async def commit(self) -> None:
+            events.append(("commit", lock_held, sub.normalized_intent[KEY_NEXT_RUN_AT]))
+
+    class _FakeSessionFactory:
+        def __call__(self) -> _FakeSession:
+            return _FakeSession()
+
+    async def acquire(
+        session: object, subscription_id: str, scheduled_at: datetime,
+    ) -> bool:
+        del session, subscription_id, scheduled_at
+        nonlocal lock_held
+        events.append("acquire")
+        lock_held = True
+        return True
+
+    async def release(
+        session: object, subscription_id: str, scheduled_at: datetime,
+    ) -> None:
+        del session, subscription_id, scheduled_at
+        nonlocal lock_held
+        events.append(("release", lock_held))
+        lock_held = False
+
+    monkeypatch.setattr(service_module, "acquire_advisory_lock", acquire)
+    monkeypatch.setattr(service_module, "release_advisory_lock", release)
+    monkeypatch.setattr(service_module, "create_run", AsyncMock(return_value="run-id"))
+    monkeypatch.setattr(service_module, "execute", AsyncMock())
+    monkeypatch.setattr(
+        service_module, "_compute_next_run", Mock(return_value=next_run),
+    )
+    service = SubscriptionService(_FakeSessionFactory())
+    monkeypatch.setattr(service, "_retrieve_notices", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        service,
+        "_diff_and_emit",
+        AsyncMock(return_value={
+            "new_notices": 0,
+            "material_changes": 0,
+            "unchanged": 0,
+            "failed": False,
+            "skipped": False,
+        }),
+    )
+    monkeypatch.setattr(service, "_advance_seen", AsyncMock())
+
+    result = await service.run_subscription(
+        sub_id, scheduled_at=scheduled_at, advance_schedule=True,
+    )
+
+    assert result["failed"] is False
+    assert sub.normalized_intent[KEY_NEXT_RUN_AT] == next_run.isoformat()
+    assert events == ["acquire", ("commit", True, next_run.isoformat()), ("release", True)]
+
+
+@pytest.mark.asyncio
+async def test_run_subscription_failure_does_not_advance_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed run retains its persisted next-run timestamp."""
+    from bidscope.subscriptions import service as service_module
+    from bidscope.subscriptions.service import KEY_NEXT_RUN_AT, SubscriptionService
+
+    sub_id = _next_id("sub-failed-schedule")
+    sub = _make_subscription(subscription_id=sub_id)
+    initial_next_run = "2026-07-20T09:00:00+00:00"
+    sub.normalized_intent[KEY_NEXT_RUN_AT] = initial_next_run
+    scheduled_at = datetime(2026, 7, 20, 9, tzinfo=UTC)
+    session = Mock()
+    session.get = AsyncMock(return_value=sub)
+    session.commit = AsyncMock()
+
+    class _FakeSessionContext:
+        async def __aenter__(self) -> Mock:
+            return session
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class _FakeSessionFactory:
+        def __call__(self) -> _FakeSessionContext:
+            return _FakeSessionContext()
+
+    monkeypatch.setattr(service_module, "acquire_advisory_lock", AsyncMock(return_value=True))
+    monkeypatch.setattr(service_module, "release_advisory_lock", AsyncMock())
+    compute = Mock(side_effect=AssertionError("failed runs must not compute next run"))
+    monkeypatch.setattr(service_module, "_compute_next_run", compute)
+    service = SubscriptionService(_FakeSessionFactory(), fail_every_run=True)
+
+    result = await service.run_subscription(
+        sub_id, scheduled_at=scheduled_at, advance_schedule=True,
+    )
+
+    assert result["failed"] is True
+    assert sub.normalized_intent[KEY_NEXT_RUN_AT] == initial_next_run
+    compute.assert_not_called()
+    session.commit.assert_awaited_once()
 
 
 def test_compute_next_run_normalizes_naive_reference_to_utc() -> None:

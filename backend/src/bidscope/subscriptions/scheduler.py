@@ -181,6 +181,7 @@ async def run_scheduler_tick(
                 outcome = await service.run_subscription(
                     subscription.id,
                     scheduled_at=scheduled_at,
+                    advance_schedule=True,
                 )
             except Exception:
                 counters["failed"] += 1
@@ -190,19 +191,9 @@ async def run_scheduler_tick(
                 counters["failed"] += 1
                 continue
             if outcome.get("skipped"):
-                # The lock owner advances this occurrence after its run. A
-                # skipped worker must not overwrite that update from another
-                # session after the owner releases the advisory lock.
+                # The lock owner advances this occurrence atomically in its run.
+                # A skipped worker must not attempt any schedule update.
                 counters["skipped"] += 1
-                continue
-            try:
-                await advance_subscription_next_run(
-                    subscription.id,
-                    session_factory=session_factory,
-                    now=reference,
-                )
-            except Exception:
-                counters["failed"] += 1
                 continue
             counters["ran"] += 1
         return counters

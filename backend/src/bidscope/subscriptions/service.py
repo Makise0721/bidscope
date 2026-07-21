@@ -276,11 +276,15 @@ class SubscriptionService:
         subscription_id: str,
         *,
         scheduled_at: datetime | None = None,
+        advance_schedule: bool = False,
     ) -> dict[str, Any]:
         """Run one subscription cycle: lock, retrieve, diff, emit, advance.
 
         ``scheduled_at`` optionally supplies the scheduled timestamp used for
         advisory-lock bucketing; when omitted, the current UTC time is used.
+        ``advance_schedule`` atomically advances the persisted next-run time on
+        successful runs while the advisory lock remains held; it defaults to
+        false for direct/manual callers.
         Returns a stats dict with keys ``new_notices``, ``material_changes``,
         ``unchanged``, ``failed``, and ``skipped``. ``skipped`` is true when
         another worker already holds the advisory lock for this run.
@@ -310,6 +314,10 @@ class SubscriptionService:
                     "skipped": True,
                 }
             try:
+                if advance_schedule:
+                    return await self._run_locked(
+                        session, sub, scheduled_at, advance_schedule=True,
+                    )
                 return await self._run_locked(session, sub, scheduled_at)
             finally:
                 await release_advisory_lock(session, subscription_id, scheduled_at)
@@ -319,6 +327,8 @@ class SubscriptionService:
         session: AsyncSession,
         sub: Subscription,
         scheduled_at: datetime,
+        *,
+        advance_schedule: bool = False,
     ) -> dict[str, Any]:
         """Execute the run while holding the advisory lock."""
         if self.fail_every_run:
@@ -355,6 +365,12 @@ class SubscriptionService:
         sub.last_successful_run_at = scheduled_at
         intent = dict(sub.normalized_intent or {})
         intent[KEY_CONSECUTIVE_FAILURES] = 0
+        if advance_schedule:
+            intent[KEY_NEXT_RUN_AT] = _compute_next_run(
+                sub.cron_expression,
+                sub.timezone,
+                after=scheduled_at,
+            ).isoformat()
         sub.normalized_intent = intent
         await session.commit()
         return stats
