@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "bundle_id": "ccgp-central-20260718",
+  "source": "ccgp",
+  "capture_kind": "curated_public_excerpt",
+  "source_urls": [
+    "https://www.ccgp.gov.cn/cggg/zygg/gkzb/202607/t20260718_26961813.htm"
+  ],
+  "retrieved_at": "2026-07-18T00:00:00+00:00",
+  "retrieval_outcome": "waf_blocked_after_public_verification",
+  "parser_version": "ccgp-v1",
+  "files": {
+    "detail.html": "bc3195300161c599b86606b4db61d0a42313c9dd45477f0499de982b8b1c50b0",
+    "expected.json": "2344bec934fdf0913a4fa9114a03062a1455f60964793f941a6de80082ab1cc3"
+  }
+}

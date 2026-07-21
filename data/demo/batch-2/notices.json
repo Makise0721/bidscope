@@ -1,0 +1,70 @@
+{
+  "notices": [
+    {
+      "id": "demo-001",
+      "url": "https://example.invalid/demo-001",
+      "title": "四川省智算中心服务器采购项目公开招标公告",
+      "purchaser": "四川省大数据中心",
+      "region": "四川省",
+      "publish_time": "2026-07-15T09:00:00+08:00",
+      "deadline": "2026-08-01T09:00:00+08:00",
+      "budget": "920万元",
+      "synthetic_channel": "channel_a"
+    },
+    {
+      "id": "demo-002",
+      "url": "https://example.invalid/demo-002",
+      "title": "重庆市服务器采购招标公开招标公告",
+      "purchaser": "重庆市公共资源交易中心",
+      "region": "重庆市",
+      "publish_time": "2026-07-16T10:00:00+08:00",
+      "deadline": "2026-08-20T10:00:00+08:00",
+      "budget": "530万元",
+      "synthetic_channel": "channel_a"
+    },
+    {
+      "id": "demo-003",
+      "url": "https://example.invalid/demo-003",
+      "title": "四川省智算中心建设公开招标公告",
+      "purchaser": "四川省机关事务管理局",
+      "region": "四川省",
+      "publish_time": "2026-07-14T08:30:00+08:00",
+      "deadline": "2026-07-30T17:00:00+08:00",
+      "budget": "480万元",
+      "synthetic_channel": "channel_a"
+    },
+    {
+      "id": "demo-004",
+      "url": "https://example.invalid/demo-004",
+      "title": "重庆市服务器及存储项目公开招标公告",
+      "purchaser": "重庆市大数据应用发展管理局",
+      "region": "重庆市",
+      "publish_time": "2026-07-13T14:00:00+08:00",
+      "deadline": "2026-08-02T14:00:00+08:00",
+      "budget": "900万元",
+      "synthetic_channel": "channel_b"
+    },
+    {
+      "id": "demo-013",
+      "url": "https://example.invalid/demo-013",
+      "title": "四川省新一批智算中心服务器公开招标公告",
+      "purchaser": "四川省科学技术厅",
+      "region": "四川省",
+      "publish_time": "2026-07-17T09:00:00+08:00",
+      "deadline": "2026-08-04T09:00:00+08:00",
+      "budget": "640万元",
+      "synthetic_channel": "channel_a"
+    },
+    {
+      "id": "demo-014",
+      "url": "https://example.invalid/demo-014",
+      "title": "重庆市新建智算中心设备公开招标公告",
+      "purchaser": "重庆市经济和信息化委员会",
+      "region": "重庆市",
+      "publish_time": "2026-07-18T10:00:00+08:00",
+      "deadline": "2026-08-06T10:00:00+08:00",
+      "budget": "880万元",
+      "synthetic_channel": "channel_b"
+    }
+  ]
+}

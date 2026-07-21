@@ -1,0 +1,256 @@
+{
+  "records": [
+    {
+      "source": "synthetic_demo",
+      "external_id": "demo-001",
+      "source_url": "https://example.invalid/demo-001",
+      "capture_kind": "synthetic_demo",
+      "title": "四川省智算中心服务器采购项目公开招标公告",
+      "purchaser": "四川省大数据中心",
+      "region": "四川省",
+      "publish_time": "2026-07-15T09:00:00+08:00",
+      "deadline": "2026-08-01T09:00:00+08:00",
+      "budget": {
+        "minor_units": 680000000,
+        "currency": "CNY",
+        "raw_text": "680万元"
+      },
+      "summary": null,
+      "parser_version": "demo-v1",
+      "raw_fields": {
+        "synthetic_channel": "channel_a"
+      }
+    },
+    {
+      "source": "synthetic_demo",
+      "external_id": "demo-002",
+      "source_url": "https://example.invalid/demo-002",
+      "capture_kind": "synthetic_demo",
+      "title": "重庆市服务器采购招标公开招标公告",
+      "purchaser": "重庆市公共资源交易中心",
+      "region": "重庆市",
+      "publish_time": "2026-07-16T10:00:00+08:00",
+      "deadline": "2026-08-05T10:00:00+08:00",
+      "budget": {
+        "minor_units": 530000000,
+        "currency": "CNY",
+        "raw_text": "530万元"
+      },
+      "summary": null,
+      "parser_version": "demo-v1",
+      "raw_fields": {
+        "synthetic_channel": "channel_a"
+      }
+    },
+    {
+      "source": "synthetic_demo",
+      "external_id": "demo-003",
+      "source_url": "https://example.invalid/demo-003",
+      "capture_kind": "synthetic_demo",
+      "title": "四川省智算中心建设公开招标公告",
+      "purchaser": "四川省机关事务管理局",
+      "region": "四川省",
+      "publish_time": "2026-07-14T08:30:00+08:00",
+      "deadline": "2026-07-30T17:00:00+08:00",
+      "budget": {
+        "minor_units": 480000000,
+        "currency": "CNY",
+        "raw_text": "480万元"
+      },
+      "summary": null,
+      "parser_version": "demo-v1",
+      "raw_fields": {
+        "synthetic_channel": "channel_a"
+      }
+    },
+    {
+      "source": "synthetic_demo",
+      "external_id": "demo-004",
+      "source_url": "https://example.invalid/demo-004",
+      "capture_kind": "synthetic_demo",
+      "title": "重庆市服务器及存储项目公开招标公告",
+      "purchaser": "重庆市大数据应用发展管理局",
+      "region": "重庆市",
+      "publish_time": "2026-07-13T14:00:00+08:00",
+      "deadline": "2026-08-02T14:00:00+08:00",
+      "budget": {
+        "minor_units": 900000000,
+        "currency": "CNY",
+        "raw_text": "900万元"
+      },
+      "summary": null,
+      "parser_version": "demo-v1",
+      "raw_fields": {
+        "synthetic_channel": "channel_b"
+      }
+    },
+    {
+      "source": "synthetic_demo",
+      "external_id": "demo-005",
+      "source_url": "https://example.invalid/demo-005",
+      "capture_kind": "synthetic_demo",
+      "title": "四川省服务器集群采购公开招标公告",
+      "purchaser": "四川省教育厅",
+      "region": "四川省",
+      "publish_time": "2026-07-12T09:00:00+08:00",
+      "deadline": "2026-07-29T09:30:00+08:00",
+      "budget": {
+        "minor_units": 1200000000,
+        "currency": "CNY",
+        "raw_text": "1200万元"
+      },
+      "summary": null,
+      "parser_version": "demo-v1",
+      "raw_fields": {
+        "synthetic_channel": "channel_b"
+      }
+    },
+    {
+      "source": "synthetic_demo",
+      "external_id": "demo-006",
+      "source_url": "https://example.invalid/demo-006",
+      "capture_kind": "synthetic_demo",
+      "title": "四川省智算中心设备采购公开招标公告",
+      "purchaser": "四川省卫生健康委员会",
+      "region": "四川省",
+      "publish_time": "2026-07-11T11:00:00+08:00",
+      "deadline": "2026-07-28T11:00:00+08:00",
+      "budget": {
+        "minor_units": 500000000,
+        "currency": "CNY",
+        "raw_text": "500万元"
+      },
+      "summary": null,
+      "parser_version": "demo-v1",
+      "raw_fields": {
+        "synthetic_channel": "channel_a"
+      }
+    },
+    {
+      "source": "synthetic_demo",
+      "external_id": "demo-007",
+      "source_url": "https://example.invalid/demo-007",
+      "capture_kind": "synthetic_demo",
+      "title": "重庆市服务器运维服务公开招标公告",
+      "purchaser": "重庆市公安局",
+      "region": "重庆市",
+      "publish_time": "2026-07-10T13:00:00+08:00",
+      "deadline": "2026-07-27T15:00:00+08:00",
+      "budget": {
+        "minor_units": 750000000,
+        "currency": "CNY",
+        "raw_text": "750万元"
+      },
+      "summary": null,
+      "parser_version": "demo-v1",
+      "raw_fields": {
+        "synthetic_channel": "channel_a"
+      }
+    },
+    {
+      "source": "synthetic_demo",
+      "external_id": "demo-008",
+      "source_url": "https://example.invalid/demo-008",
+      "capture_kind": "synthetic_demo",
+      "title": "四川省办公设备采购公开招标公告",
+      "purchaser": "四川省财政厅",
+      "region": "四川省",
+      "publish_time": "2026-07-15T10:00:00+08:00",
+      "deadline": "2026-08-01T17:00:00+08:00",
+      "budget": {
+        "minor_units": 600000000,
+        "currency": "CNY",
+        "raw_text": "600万元"
+      },
+      "summary": null,
+      "parser_version": "demo-v1",
+      "raw_fields": {
+        "synthetic_channel": "channel_b"
+      }
+    },
+    {
+      "source": "synthetic_demo",
+      "external_id": "demo-009",
+      "source_url": "https://example.invalid/demo-009",
+      "capture_kind": "synthetic_demo",
+      "title": "重庆市智算中心公开招标公告",
+      "purchaser": "重庆市规划和自然资源局",
+      "region": "重庆市",
+      "publish_time": "2026-07-14T09:00:00+08:00",
+      "deadline": "2026-07-31T10:00:00+08:00",
+      "budget": {
+        "minor_units": 200000000,
+        "currency": "CNY",
+        "raw_text": "200万元"
+      },
+      "summary": null,
+      "parser_version": "demo-v1",
+      "raw_fields": {
+        "synthetic_channel": "channel_a"
+      }
+    },
+    {
+      "source": "synthetic_demo",
+      "external_id": "demo-010",
+      "source_url": "https://example.invalid/demo-010",
+      "capture_kind": "synthetic_demo",
+      "title": "四川省服务器升级项目公开招标公告",
+      "purchaser": "四川省交通运输厅",
+      "region": "四川省",
+      "publish_time": "2026-07-16T08:00:00+08:00",
+      "deadline": "2026-08-03T09:00:00+08:00",
+      "budget": {
+        "minor_units": 560000000,
+        "currency": "CNY",
+        "raw_text": "560万元"
+      },
+      "summary": null,
+      "parser_version": "demo-v1",
+      "raw_fields": {
+        "synthetic_channel": "channel_a"
+      }
+    },
+    {
+      "source": "synthetic_demo",
+      "external_id": "demo-011",
+      "source_url": "https://example.invalid/demo-011",
+      "capture_kind": "synthetic_demo",
+      "title": "重庆市网络设备采购公开招标公告",
+      "purchaser": "重庆市市场监督管理局",
+      "region": "重庆市",
+      "publish_time": "2026-07-12T15:00:00+08:00",
+      "deadline": "2026-07-29T16:00:00+08:00",
+      "budget": {
+        "minor_units": 550000000,
+        "currency": "CNY",
+        "raw_text": "550万元"
+      },
+      "summary": null,
+      "parser_version": "demo-v1",
+      "raw_fields": {
+        "synthetic_channel": "channel_b"
+      }
+    },
+    {
+      "source": "synthetic_demo",
+      "external_id": "demo-012",
+      "source_url": "https://example.invalid/demo-012",
+      "capture_kind": "synthetic_demo",
+      "title": "四川省智算中心服务器采购项目公开招标公告",
+      "purchaser": "四川省大数据中心",
+      "region": "四川省",
+      "publish_time": "2026-07-15T09:00:00+08:00",
+      "deadline": "2026-08-01T09:00:00+08:00",
+      "budget": {
+        "minor_units": 680000000,
+        "currency": "CNY",
+        "raw_text": "680万元"
+      },
+      "summary": null,
+      "parser_version": "demo-v1",
+      "raw_fields": {
+        "synthetic_channel": "channel_b"
+      }
+    }
+  ]
+}

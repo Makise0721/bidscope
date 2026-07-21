@@ -1,0 +1,23 @@
+{
+  "records": [
+    {
+      "source": "ccgp",
+      "external_id": "SC-2026-CCGP-0018",
+      "source_url": "https://www.ccgp.gov.cn/cggg/zygg/gkzb/202607/t20260718_26961813.htm",
+      "capture_kind": "curated_public_excerpt",
+      "title": "四川省智算中心服务器采购项目公开招标公告",
+      "purchaser": "四川省大数据中心",
+      "region": "四川省",
+      "publish_time": "2026-07-18T09:00:00+08:00",
+      "deadline": "2026-08-10T09:00:00+08:00",
+      "budget": {
+        "minor_units": 680000000,
+        "currency": "CNY",
+        "raw_text": "人民币680万元"
+      },
+      "summary": null,
+      "parser_version": "ccgp-v1",
+      "raw_fields": {}
+    }
+  ]
+}

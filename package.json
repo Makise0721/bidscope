@@ -1,0 +1,12 @@
+{
+  "name": "bidscope",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BidScope evidence-first tender intelligence Agent.",
+  "scripts": {
+    "dev:web": "npm --prefix web run dev",
+    "test:web": "npm --prefix web run test:unit",
+    "build:web": "npm --prefix web run build",
+    "test:e2e": "echo \"E2E disabled in P0 snapshot-only build\" && exit 0"
+  }
+}
