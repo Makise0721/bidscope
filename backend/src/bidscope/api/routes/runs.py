@@ -17,10 +17,12 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+import sqlalchemy as sa
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from bidscope.api.dependencies import RunQueryResult, RunService
+from bidscope.persistence.models import QueryRun
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
 
@@ -58,6 +60,36 @@ async def create_run(
     )
     run = await service.get_run(run_id)
     return RunQueryResult.from_row(run).__dict__ if run else {"id": run_id, "status": "pending"}
+
+
+@router.get("")
+async def list_runs(
+    status: str | None = Query(default=None, min_length=1),
+    limit: int = Query(default=50, ge=1, le=100),
+    service: RunService = Depends(get_run_service),
+) -> dict[str, list[dict[str, Any]]]:
+    """Return a bounded, deterministic run-history summary."""
+    async with service.session_factory() as session:
+        statement = (
+            sa.select(QueryRun)
+            .order_by(QueryRun.created_at.desc(), QueryRun.id)
+            .limit(limit)
+        )
+        if status is not None:
+            statement = statement.where(QueryRun.status == status)
+        result = await session.execute(statement)
+        rows = list(result.scalars())
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "status": row.status,
+                "user_request": row.user_request,
+                "retryable": row.status == "retryable",
+            }
+            for row in rows
+        ]
+    }
 
 
 @router.get("/{run_id}")

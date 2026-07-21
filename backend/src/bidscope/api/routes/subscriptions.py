@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 import sqlalchemy as sa
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from bidscope.api.dependencies import RunService
@@ -36,10 +36,15 @@ class CreateSubscriptionBody(BaseModel):
 @router.get("")
 async def list_subscriptions(
     service: SubscriptionService = Depends(_subscription_service),
+    limit: int = Query(default=50, ge=1, le=100),
 ) -> list[dict[str, Any]]:
-    """List all subscriptions."""
+    """List a bounded, deterministic set of subscriptions."""
     async with service.session_factory() as session:
-        result = await session.execute(sa.select(Subscription))
+        result = await session.execute(
+            sa.select(Subscription)
+            .order_by(Subscription.created_at.desc(), Subscription.id)
+            .limit(limit)
+        )
         rows = result.scalars()
     return [
         {

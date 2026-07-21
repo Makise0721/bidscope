@@ -14,7 +14,16 @@ from typing import Any
 from fastapi import FastAPI
 
 from bidscope.api.dependencies import create_run_service
-from bidscope.api.routes import events, reports, runs, subscriptions, test_controls
+from bidscope.api.routes import (
+    evaluations,
+    events,
+    inbox,
+    reports,
+    runs,
+    sources,
+    subscriptions,
+    test_controls,
+)
 from bidscope.config import Settings, get_settings
 
 
@@ -44,6 +53,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(events.router)
     application.include_router(reports.router)
     application.include_router(subscriptions.router)
+    application.include_router(inbox.router)
+    application.include_router(sources.router)
+    application.include_router(evaluations.router)
     # Test-controls routes are registered ONLY in test mode; in every other mode
     # requests to /api/test-controls/* fall through to a 404.
     if resolved_settings.app_mode == "test":

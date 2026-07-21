@@ -22,6 +22,55 @@ export async function getRun(id: string): Promise<RunRecord> {
   return response.json();
 }
 
+async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, init);
+  if (!response.ok) {
+    throw new Error(`request failed: ${response.status}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+export async function getRuns(status?: string): Promise<RunRecord[]> {
+  const query = status ? `?status=${encodeURIComponent(status)}` : "";
+  const response = await requestJson<{ items: RunRecord[] }>(`${API_BASE}/api/runs${query}`);
+  return response.items;
+}
+
+export async function retryRun(id: string): Promise<RunRecord> {
+  return requestJson<RunRecord>(`${API_BASE}/api/runs/${id}/retry`, { method: "POST" });
+}
+
+export async function getSubscriptions(): Promise<SubscriptionRecord[]> {
+  const response = await requestJson<SubscriptionRecord[] | { items: SubscriptionRecord[] }>(
+    `${API_BASE}/api/subscriptions`,
+  );
+  return Array.isArray(response) ? response : response.items;
+}
+
+export async function updateSubscriptionStatus(
+  id: string,
+  action: "pause" | "resume",
+): Promise<SubscriptionRecord> {
+  return requestJson<SubscriptionRecord>(`${API_BASE}/api/subscriptions/${id}/${action}`, {
+    method: "POST",
+  });
+}
+
+export async function getInboxEvents(): Promise<InboxEventRecord[]> {
+  const response = await requestJson<{ items: InboxEventRecord[] }>(`${API_BASE}/api/inbox-events`);
+  return response.items;
+}
+
+export async function getSources(): Promise<SourceRecord[]> {
+  const response = await requestJson<{ items: SourceRecord[] }>(`${API_BASE}/api/sources`);
+  return response.items;
+}
+
+export async function getEvaluations(): Promise<EvaluationRecord[]> {
+  const response = await requestJson<{ items: EvaluationRecord[] }>(`${API_BASE}/api/evaluations`);
+  return response.items;
+}
+
 export async function confirmRun(id: string): Promise<RunRecord> {
   const response = await fetch(`${API_BASE}/api/runs/${id}/confirm`, {
     method: "POST",
@@ -50,6 +99,52 @@ export interface RunRecord {
   id: string;
   status: string;
   user_request: string;
+  retryable?: boolean;
+}
+
+export interface SubscriptionRecord {
+  id: string;
+  status: string;
+  cron_expression: string;
+  next_run_at?: string | null;
+  last_successful_run_at?: string | null;
+}
+
+export interface InboxEventRecord {
+  id: string;
+  event_type: string;
+  title: string | null;
+  read: boolean;
+}
+
+export interface SourceBundleRecord {
+  bundle_id: string;
+  capture_kind: string;
+  retrieved_at: string | null;
+  hash_prefix: string | null;
+  parser_version: string;
+  age_days?: number | null;
+}
+
+export interface SourceRecord {
+  source: string;
+  status: string;
+  latest_valid_bundle: SourceBundleRecord | null;
+  validation_warnings: string[];
+}
+
+export interface EvaluationMetric {
+  measured: number | null;
+  target: number | null;
+}
+
+export interface EvaluationRecord {
+  id: string;
+  dataset_version: string;
+  model: string;
+  environment: string | null;
+  pricing_snapshot_date: string | null;
+  metrics: Record<string, EvaluationMetric>;
 }
 
 export interface ReportItem {

@@ -1,0 +1,168 @@
+"""Bounded snapshot provenance read APIs for operational views."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Any, cast
+
+import sqlalchemy as sa
+from fastapi import APIRouter, Depends, Query, Request
+
+from bidscope.api.dependencies import RunService
+from bidscope.persistence.models import SnapshotBundle, SnapshotImport
+
+router = APIRouter(prefix="/api/sources", tags=["sources"])
+
+# A source older than this window is still usable for audit, but is surfaced as
+# stale so operators do not mistake it for current coverage.
+STALE_AFTER_DAYS = 7
+
+
+def _run_service(request: Request) -> RunService:
+    return cast(RunService, request.app.state.run_service)
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _bundle_hash_prefix(bundle: SnapshotBundle) -> str | None:
+    """Return a short manifest hash without exposing manifest contents."""
+    manifest = bundle.manifest or {}
+    content_hash = manifest.get("content_hash")
+    if isinstance(content_hash, str) and content_hash:
+        return content_hash[:8]
+    files = manifest.get("files")
+    if isinstance(files, dict):
+        for name in sorted(files):
+            value = files[name]
+            if isinstance(value, str) and value:
+                return value[:8]
+    return None
+
+
+def _warnings(import_record: SnapshotImport | None) -> set[str]:
+    if import_record is None:
+        return {"snapshot_integrity_error"}
+    warnings: set[str] = set()
+    if import_record.status in {"failed", "invalid"}:
+        warnings.add(
+            "snapshot_integrity_error"
+            if import_record.status == "invalid"
+            else "snapshot_import_failed"
+        )
+    for payload in (import_record.warnings, import_record.error):
+        if not isinstance(payload, dict):
+            continue
+        values: list[Any] = list(payload.keys()) + list(payload.values())
+        for value in values:
+            if isinstance(value, str) and value.startswith("snapshot_"):
+                warnings.add(value)
+    return warnings
+
+
+def _latest_imports(imports: list[SnapshotImport]) -> dict[str, SnapshotImport]:
+    latest: dict[str, SnapshotImport] = {}
+    for record in imports:
+        key = str(record.snapshot_bundle_id)
+        previous = latest.get(key)
+        previous_time = previous.finished_at if previous else None
+        current_time = record.finished_at or record.started_at
+        if previous is None or current_time > (previous_time or previous.started_at):
+            latest[key] = record
+    return latest
+
+
+def _source_row(
+    source: str,
+    bundles: list[SnapshotBundle],
+    imports_by_bundle: dict[str, SnapshotImport],
+) -> dict[str, Any]:
+    warnings: set[str] = set()
+    valid_bundles: list[SnapshotBundle] = []
+    for bundle in bundles:
+        import_record = imports_by_bundle.get(str(bundle.id))
+        if import_record is not None and import_record.status == "success":
+            valid_bundles.append(bundle)
+        else:
+            warnings.update(_warnings(import_record))
+
+    latest = max(
+        valid_bundles,
+        key=lambda bundle: (
+            bundle.retrieved_at or datetime.min.replace(tzinfo=UTC),
+            bundle.bundle_id,
+        ),
+        default=None,
+    )
+    latest_dto: dict[str, Any] | None = None
+    status = "invalid"
+    if latest is not None:
+        retrieved_at = latest.retrieved_at
+        age_days = (
+            max(0, (datetime.now(UTC) - retrieved_at).days) if retrieved_at is not None else None
+        )
+        status = "stale" if age_days is not None and age_days > STALE_AFTER_DAYS else "valid"
+        if status == "stale":
+            warnings.add("snapshot_stale")
+        latest_dto = {
+            "bundle_id": latest.bundle_id,
+            "capture_kind": latest.capture_kind,
+            "retrieved_at": _iso(retrieved_at),
+            "hash_prefix": _bundle_hash_prefix(latest),
+            "parser_version": latest.parser_version,
+            "age_days": age_days,
+        }
+    else:
+        warnings.add("snapshot_integrity_error")
+
+    return {
+        "source": source,
+        "status": status,
+        "latest_valid_bundle": latest_dto,
+        "validation_warnings": sorted(warnings),
+    }
+
+
+@router.get("")
+async def list_sources(
+    service: RunService = Depends(_run_service),
+    limit: int = Query(default=50, ge=1, le=100),
+) -> dict[str, list[dict[str, Any]]]:
+    """List source health and provenance metadata, never payload content."""
+    async with service.session_factory() as session:
+        result = await session.execute(
+            sa.select(SnapshotBundle)
+            .order_by(
+                SnapshotBundle.source,
+                SnapshotBundle.retrieved_at.desc().nullslast(),
+                SnapshotBundle.bundle_id,
+            )
+            .limit(limit * 3)
+        )
+        bundles = list(result.scalars())
+        bundle_ids = [bundle.id for bundle in bundles]
+        imports: list[SnapshotImport] = []
+        if bundle_ids:
+            import_result = await session.execute(
+                sa.select(SnapshotImport)
+                .where(SnapshotImport.snapshot_bundle_id.in_(bundle_ids))
+                .order_by(SnapshotImport.started_at.desc(), SnapshotImport.id)
+            )
+            imports = list(import_result.scalars())
+
+    latest_imports = _latest_imports(imports)
+    grouped: dict[str, list[SnapshotBundle]] = {}
+    for bundle in bundles:
+        grouped.setdefault(bundle.source, []).append(bundle)
+
+    source_names = {"ccgp", "ggzy", "synthetic_demo"} | set(grouped)
+    items = [
+        _source_row(
+            source,
+            grouped.get(source, []),
+            {str(bundle_id): record for bundle_id, record in latest_imports.items()},
+        )
+        for source in sorted(source_names)
+    ]
+    return {"items": items[:limit]}
