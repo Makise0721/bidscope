@@ -22,13 +22,19 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import re
+from collections.abc import Awaitable
 from datetime import UTC, datetime
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
 from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+)
 
 from bidscope.graph.executor import create_run, execute
 from bidscope.persistence.models import (
@@ -50,7 +56,7 @@ KEY_NEXT_RUN_AT = "__next_run_at"
 KEY_CONSECUTIVE_FAILURES = "__consecutive_failures"
 
 
-async def _drain_task[T](task: asyncio.Task[T]) -> T:
+async def _drain_task[T](task: asyncio.Future[T]) -> T:
     """Wait for a task to finish while preserving cancellation for the caller."""
     while True:
         try:
@@ -60,14 +66,20 @@ async def _drain_task[T](task: asyncio.Task[T]) -> T:
                 return task.result()
 
 
+async def _await_cleanup_safely[T](coroutine: Awaitable[T]) -> T:
+    """Finish a cleanup operation even when its caller is cancelled."""
+    cleanup: asyncio.Future[T] = asyncio.ensure_future(coroutine)
+    return await _drain_task(cleanup)
+
+
 async def _acquire_advisory_lock_safely(
-    session: AsyncSession,
+    connection: AsyncConnection,
     subscription_id: str,
     scheduled_at: datetime,
 ) -> bool:
     """Acquire a lock without losing ownership if the caller is cancelled."""
     acquisition = asyncio.create_task(
-        acquire_advisory_lock(session, subscription_id, scheduled_at),
+        acquire_advisory_lock(connection, subscription_id, scheduled_at),
     )
     try:
         return await asyncio.shield(acquisition)
@@ -77,17 +89,105 @@ async def _acquire_advisory_lock_safely(
         except BaseException as acquisition_error:
             raise cancellation_error from acquisition_error
         if acquired:
-            release = asyncio.create_task(
-                release_advisory_lock(session, subscription_id, scheduled_at),
-            )
             try:
-                await _drain_task(release)
+                await _release_lock_connection_safely(
+                    connection, subscription_id, scheduled_at,
+                )
             except BaseException as release_error:
                 raise cancellation_error from release_error
         raise
-    except BaseException:
-        # Acquisition exceptions do not establish lock ownership.
-        raise
+
+
+def _lock_engine(session_factory: async_sessionmaker[AsyncSession]) -> AsyncEngine:
+    """Return the async engine bound to the service's session factory."""
+    bind = session_factory.kw.get("bind")
+    if not isinstance(bind, AsyncEngine):
+        raise RuntimeError("subscription session factory must be bound to an AsyncEngine")
+    return bind
+
+
+def _cancellation_count() -> int:
+    """Return cancellation requests already active on this task."""
+    task = asyncio.current_task()
+    return task.cancelling() if task is not None else 0
+
+
+async def _release_lock_connection_safely(
+    connection: AsyncConnection,
+    subscription_id: str,
+    scheduled_at: datetime,
+) -> None:
+    """Release, finalize, and retire a pinned advisory-lock connection safely."""
+    cancellation_count = _cancellation_count()
+    error: BaseException | None = None
+    try:
+        released = await _await_cleanup_safely(
+            release_advisory_lock(connection, subscription_id, scheduled_at),
+        )
+        if not released:
+            raise RuntimeError("PostgreSQL advisory lock was not held at release")
+        await _await_cleanup_safely(connection.commit())
+        await _await_cleanup_safely(connection.close())
+    except BaseException as caught:
+        errors = [caught]
+        # A failed or unconfirmed unlock must never return the backend session to
+        # the pool, because it may still own a session-level advisory lock.
+        for cleanup in (connection.invalidate(), connection.close()):
+            try:
+                await _await_cleanup_safely(cleanup)
+            except BaseException as cleanup_error:
+                errors.append(cleanup_error)
+        if len(errors) == 1:
+            error = caught
+        else:
+            error = BaseExceptionGroup(
+                "advisory-lock release and connection cleanup failed", errors,
+            )
+
+    if _cancellation_count() > cancellation_count:
+        cancellation_error = asyncio.CancelledError()
+        if error is not None:
+            raise cancellation_error from error
+        raise cancellation_error
+    if error is not None:
+        raise error
+
+
+def _skipped_outcome() -> dict[str, Any]:
+    """Return the standard nonfailure outcome for a skipped occurrence."""
+    return {
+        "new_notices": 0,
+        "material_changes": 0,
+        "unchanged": 0,
+        "failed": False,
+        "skipped": True,
+    }
+
+
+def _normalize_scheduled_at(value: datetime) -> datetime:
+    """Normalize a requested occurrence timestamp to UTC."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _matches_scheduled_occurrence(
+    subscription: Subscription,
+    scheduled_at: datetime,
+) -> bool:
+    """Whether durable subscription state still names this exact occurrence."""
+    if subscription.status != "active":
+        return False
+    intent = subscription.normalized_intent
+    if not isinstance(intent, dict):
+        return False
+    stored = intent.get(KEY_NEXT_RUN_AT)
+    if not isinstance(stored, str):
+        return False
+    try:
+        return _normalize_scheduled_at(datetime.fromisoformat(stored)) == scheduled_at
+    except ValueError:
+        return False
 
 
 # Project crontab expressions follow the conventional Sunday=0/7, Monday=1
@@ -238,6 +338,10 @@ class SubscriptionService:
         self.session_factory = session_factory
         self.fail_every_run = fail_every_run
 
+    async def _open_lock_connection(self) -> AsyncConnection:
+        """Open the dedicated pinned connection for one advisory-lock lifecycle."""
+        return await _lock_engine(self.session_factory).connect()
+
     # ----------------------------------------------------------- lifecycle
 
     async def create_subscription(
@@ -287,40 +391,76 @@ class SubscriptionService:
         false for direct/manual callers.
         Returns a stats dict with keys ``new_notices``, ``material_changes``,
         ``unchanged``, ``failed``, and ``skipped``. ``skipped`` is true when
-        another worker already holds the advisory lock for this run.
+        another worker holds the lock or a scheduler occurrence was consumed.
         """
-        async with self.session_factory() as session:
-            sub = await session.get(Subscription, subscription_id)
-            if sub is None:
-                raise KeyError(f"subscription not found: {subscription_id}")
+        if scheduled_at is None:
+            scheduled_at = datetime.now(UTC)
+        elif scheduled_at.tzinfo is None:
+            scheduled_at = scheduled_at.replace(tzinfo=UTC)
+        else:
+            scheduled_at = scheduled_at.astimezone(UTC)
 
-            if scheduled_at is None:
-                scheduled_at = datetime.now(UTC)
-            elif scheduled_at.tzinfo is None:
-                scheduled_at = scheduled_at.replace(tzinfo=UTC)
-            else:
-                scheduled_at = scheduled_at.astimezone(UTC)
-            # Advisory lock: a second concurrent worker observes it is already
-            # held and skips, guaranteeing exactly one run per time bucket.
+        lock_connection = await self._open_lock_connection()
+        acquired = False
+        cancellation_count = _cancellation_count()
+        primary_error: BaseException | None = None
+        try:
+            # Advisory locks are session-level. Keep this connection explicitly
+            # pinned, but finish the acquire statement's transaction before
+            # retrieval and graph work begin.
             acquired = await _acquire_advisory_lock_safely(
-                session, subscription_id, scheduled_at,
+                lock_connection, subscription_id, scheduled_at,
             )
             if not acquired:
-                return {
-                    "new_notices": 0,
-                    "material_changes": 0,
-                    "unchanged": 0,
-                    "failed": False,
-                    "skipped": True,
-                }
-            try:
+                await _await_cleanup_safely(lock_connection.commit())
+                return _skipped_outcome()
+            await _await_cleanup_safely(lock_connection.commit())
+            if _cancellation_count() > cancellation_count:
+                raise asyncio.CancelledError()
+
+            async with self.session_factory() as session:
+                sub = await session.get(Subscription, subscription_id)
+                if sub is None:
+                    if advance_schedule:
+                        return _skipped_outcome()
+                    raise KeyError(f"subscription not found: {subscription_id}")
+                if advance_schedule and not _matches_scheduled_occurrence(
+                    sub, scheduled_at,
+                ):
+                    return _skipped_outcome()
+                # Finish the state-read transaction before graph execution. The
+                # pinned lock connection retains advisory-lock ownership.
+                await session.commit()
                 if advance_schedule:
                     return await self._run_locked(
                         session, sub, scheduled_at, advance_schedule=True,
                     )
                 return await self._run_locked(session, sub, scheduled_at)
-            finally:
-                await release_advisory_lock(session, subscription_id, scheduled_at)
+        except BaseException as primary_caught:
+            primary_error = primary_caught
+            raise
+        finally:
+            cleanup_error: BaseException | None = None
+            try:
+                if acquired:
+                    await _release_lock_connection_safely(
+                        lock_connection, subscription_id, scheduled_at,
+                    )
+                else:
+                    await _await_cleanup_safely(lock_connection.close())
+            except BaseException as cleanup_caught:
+                cleanup_error = cleanup_caught
+
+            if primary_error is not None:
+                if cleanup_error is not None:
+                    raise primary_error from cleanup_error
+            elif _cancellation_count() > cancellation_count:
+                cancellation_error = asyncio.CancelledError()
+                if cleanup_error is not None:
+                    raise cancellation_error from cleanup_error
+                raise cancellation_error
+            elif cleanup_error is not None:
+                raise cleanup_error
 
     async def _run_locked(
         self,

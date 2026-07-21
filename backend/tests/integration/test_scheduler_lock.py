@@ -13,6 +13,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -22,7 +23,12 @@ from bidscope.db import create_engine_and_session
 from bidscope.persistence.models import InboxEvent, QueryRun, Subscription
 from bidscope.persistence.repositories import SnapshotRepository
 from bidscope.snapshots.importer import SnapshotImporter
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+)
 
 
 def _next_id(name: str) -> str:
@@ -35,7 +41,9 @@ TEST_CHECKPOINT_URL = "postgresql+psycopg://bidscope:bidscope@localhost:5432/bid
 BATCH_1 = Path("data/demo/batch-1")
 
 
-async def _reset_import_tracking(session_factory: object) -> None:
+async def _reset_import_tracking(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     async with session_factory() as session:
         await session.execute(sa.text(
             "TRUNCATE TABLE snapshot_imports, snapshot_bundles, "
@@ -94,17 +102,19 @@ async def test_two_concurrent_triggers_produce_exactly_one_run(
     original_acquire = service_module.acquire_advisory_lock
 
     async def synchronized_acquire(
-        session: object, subscription_id: str, scheduled_at: datetime,
+        connection: AsyncConnection,
+        subscription_id: str,
+        scheduled_at: datetime,
     ) -> bool:
         await asyncio.wait_for(barrier.wait(), timeout=5)
-        acquired = await original_acquire(session, subscription_id, scheduled_at)
+        acquired = await original_acquire(connection, subscription_id, scheduled_at)
         if acquired:
             try:
                 await asyncio.wait_for(loser_observed.wait(), timeout=5)
             except BaseException as wait_error:
                 try:
                     await service_module.release_advisory_lock(  # type: ignore[attr-defined]
-                        session, subscription_id, scheduled_at,
+                        connection, subscription_id, scheduled_at,
                     )
                 except BaseException as release_error:
                     raise wait_error from release_error
@@ -164,6 +174,178 @@ async def test_two_concurrent_triggers_produce_exactly_one_run(
 
 
 @pytest.mark.asyncio
+async def test_successful_run_releases_lock_before_reusing_data_connection(
+    imported_batch_1: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A released run must not leave its advisory lock on a pooled connection."""
+    from bidscope.subscriptions import service as service_module
+    from bidscope.subscriptions.scheduler import subscription_lock_key
+    from bidscope.subscriptions.service import SubscriptionService
+
+    engine, session_factory = create_engine_and_session()
+    service = SubscriptionService(session_factory=session_factory)
+    sub_id = _next_id("sub-release-connection")
+    sub = _make_subscription(subscription_id=sub_id)
+    async with session_factory() as session:
+        session.add(sub)
+        await session.commit()
+
+    scheduled_at = datetime(2026, 7, 20, 9, tzinfo=UTC)
+    original_acquire = service_module.acquire_advisory_lock
+    original_release = service_module.release_advisory_lock
+    acquire_pids: list[int] = []
+    release_pids: list[int] = []
+
+    async def observing_acquire(
+        connection: AsyncConnection,
+        subscription_id: str,
+        scheduled_at: datetime,
+    ) -> bool:
+        acquire_pids.append(
+            (
+                await connection.execute(sa.text("SELECT pg_backend_pid()"))
+            ).scalar_one()
+        )
+        return await original_acquire(connection, subscription_id, scheduled_at)
+
+    async def observing_release(
+        connection: AsyncConnection,
+        subscription_id: str,
+        scheduled_at: datetime,
+    ) -> bool:
+        release_pids.append(
+            (
+                await connection.execute(sa.text("SELECT pg_backend_pid()"))
+            ).scalar_one()
+        )
+        return await original_release(connection, subscription_id, scheduled_at)
+
+    monkeypatch.setattr(service_module, "acquire_advisory_lock", observing_acquire)
+    monkeypatch.setattr(service_module, "release_advisory_lock", observing_release)
+    try:
+        first = await service.run_subscription(
+            sub_id, scheduled_at=scheduled_at,
+        )
+        second = await service.run_subscription(
+            sub_id, scheduled_at=scheduled_at,
+        )
+
+        assert first["skipped"] is False
+        assert second["skipped"] is False
+        assert len(acquire_pids) == 2
+        assert release_pids == acquire_pids
+
+        key = subscription_lock_key(
+            sub_id, scheduled_at.replace(second=0, microsecond=0).isoformat(),
+        )
+        unsigned_key = key & ((1 << 64) - 1)
+        async with session_factory() as observer:
+            lock_count = (
+                await observer.execute(
+                    sa.text(
+                        "SELECT count(*) FROM pg_locks "
+                        "WHERE locktype = 'advisory' AND pid = ANY(:pids) "
+                        "AND classid = :classid AND objid = :objid "
+                        "AND objsubid = 1"
+                    ),
+                    {
+                        "pids": acquire_pids,
+                        "classid": unsigned_key >> 32,
+                        "objid": unsigned_key & 0xFFFFFFFF,
+                    },
+                )
+            ).scalar_one()
+        assert lock_count == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_final_release_unlocks_for_independent_observer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Final-release cancellation drains the unlock before it propagates."""
+    from bidscope.subscriptions import service as service_module
+    from bidscope.subscriptions.scheduler import (
+        acquire_advisory_lock,
+        release_advisory_lock,
+    )
+    from bidscope.subscriptions.service import SubscriptionService
+
+    engine, session_factory = create_engine_and_session()
+    observer_engine, _observer_factory = create_engine_and_session()
+    service = SubscriptionService(session_factory=session_factory)
+    sub_id = str(uuid.uuid4())
+    scheduled_at = datetime(2026, 7, 20, 9, tzinfo=UTC)
+    release_started = asyncio.Event()
+    allow_release = asyncio.Event()
+    release_finished = asyncio.Event()
+    original_release = service_module.release_advisory_lock
+
+    async def delayed_release(
+        connection: AsyncConnection,
+        subscription_id: str,
+        scheduled_at: datetime,
+    ) -> bool:
+        release_started.set()
+        await asyncio.wait_for(allow_release.wait(), timeout=5)
+        released = await original_release(connection, subscription_id, scheduled_at)
+        release_finished.set()
+        return bool(released)
+
+    async def immediate_run(
+        session: AsyncSession,
+        subscription: Subscription,
+        scheduled_at: datetime,
+    ) -> dict[str, object]:
+        del session, subscription, scheduled_at
+        return {
+            "new_notices": 0,
+            "material_changes": 0,
+            "unchanged": 0,
+            "failed": False,
+            "skipped": False,
+        }
+
+    monkeypatch.setattr(service_module, "release_advisory_lock", delayed_release)
+    monkeypatch.setattr(service, "_run_locked", immediate_run)
+    task: asyncio.Task[dict[str, object]] | None = None
+    try:
+        async with session_factory() as session:
+            session.add(_make_subscription(subscription_id=sub_id))
+            await session.commit()
+
+        task = asyncio.create_task(
+            service.run_subscription(sub_id, scheduled_at=scheduled_at),
+        )
+        await asyncio.wait_for(release_started.wait(), timeout=5)
+        task.cancel()
+        allow_release.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        async with observer_engine.connect() as observer:
+            observer_acquired = await acquire_advisory_lock(
+                observer, sub_id, scheduled_at,
+            )
+            if observer_acquired:
+                assert await release_advisory_lock(observer, sub_id, scheduled_at)
+            await observer.commit()
+
+        assert observer_acquired is True
+        assert release_finished.is_set()
+    finally:
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await observer_engine.dispose()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_run_subscription_releases_lock_when_cancelled_repeatedly_during_acquire(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -197,23 +379,38 @@ async def test_run_subscription_releases_lock_when_cancelled_repeatedly_during_a
         def __call__(self) -> _FakeSession:
             return _FakeSession()
 
+    class _FakeLockConnection:
+        async def commit(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+        async def invalidate(self) -> None:
+            return None
+
     async def delayed_acquire(
-        session: object, subscription_id: str, scheduled_at: datetime,
+        connection: AsyncConnection,
+        subscription_id: str,
+        scheduled_at: datetime,
     ) -> bool:
-        del session, subscription_id, scheduled_at
+        del connection, subscription_id, scheduled_at
         acquisition_started.set()
-        await finish_acquisition.wait()
+        await asyncio.wait_for(finish_acquisition.wait(), timeout=5)
         acquisition_ready_to_return.set()
-        await allow_acquisition_return.wait()
+        await asyncio.wait_for(allow_acquisition_return.wait(), timeout=5)
         acquisition_completed.set()
         return True
 
     async def observing_release(
-        session: object, subscription_id: str, scheduled_at: datetime,
-    ) -> None:
+        connection: AsyncConnection,
+        subscription_id: str,
+        scheduled_at: datetime,
+    ) -> bool:
         nonlocal release_calls
-        del session, subscription_id, scheduled_at
+        del connection, subscription_id, scheduled_at
         release_calls += 1
+        return True
 
     async def unexpected_run_locked(
         session: AsyncSession, subscription: Subscription, scheduled_at: datetime,
@@ -230,26 +427,227 @@ async def test_run_subscription_releases_lock_when_cancelled_repeatedly_during_a
         service_module, "release_advisory_lock", observing_release,
     )
     service = SubscriptionService(_FakeSessionFactory())
+
+    async def open_fake_lock_connection() -> AsyncConnection:
+        return cast(AsyncConnection, _FakeLockConnection())
+
+    monkeypatch.setattr(service, "_open_lock_connection", open_fake_lock_connection)
     monkeypatch.setattr(service, "_run_locked", unexpected_run_locked)
 
-    task = asyncio.create_task(
-        service.run_subscription(
+    task: asyncio.Task[dict[str, object]] | None = None
+    try:
+        task = asyncio.create_task(
+            service.run_subscription(
+                sub_id, scheduled_at=datetime(2026, 7, 20, 9, tzinfo=UTC),
+            )
+        )
+        await asyncio.wait_for(acquisition_started.wait(), timeout=5)
+        task.cancel()
+        finish_acquisition.set()
+        await asyncio.wait_for(acquisition_ready_to_return.wait(), timeout=5)
+        task.cancel()
+        allow_acquisition_return.set()
+        await asyncio.wait_for(acquisition_completed.wait(), timeout=5)
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert release_calls == 1
+        assert run_locked_called is False
+    finally:
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_run_subscription_skips_work_when_cancelled_during_post_acquire_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation drained for the acquire commit prevents subscription work."""
+    from bidscope.subscriptions import service as service_module
+    from bidscope.subscriptions.service import SubscriptionService
+
+    sub_id = _next_id("sub-cancelled-post-acquire-commit")
+    sub = _make_subscription(subscription_id=sub_id)
+    commit_started = asyncio.Event()
+    allow_commit = asyncio.Event()
+    release_calls = 0
+    run_locked_called = False
+
+    class _FakeSession:
+        async def __aenter__(self) -> _FakeSession:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def get(self, model: object, subscription_id: str) -> Subscription:
+            del model
+            assert subscription_id == sub_id
+            return sub
+
+        async def commit(self) -> None:
+            return None
+
+    class _FakeSessionFactory:
+        def __call__(self) -> _FakeSession:
+            return _FakeSession()
+
+    class _FakeLockConnection:
+        async def commit(self) -> None:
+            commit_started.set()
+            await asyncio.wait_for(allow_commit.wait(), timeout=5)
+
+        async def close(self) -> None:
+            return None
+
+        async def invalidate(self) -> None:
+            return None
+
+    async def acquire(
+        connection: AsyncConnection,
+        subscription_id: str,
+        scheduled_at: datetime,
+    ) -> bool:
+        del connection, subscription_id, scheduled_at
+        return True
+
+    async def release(
+        connection: AsyncConnection,
+        subscription_id: str,
+        scheduled_at: datetime,
+    ) -> bool:
+        nonlocal release_calls
+        del connection, subscription_id, scheduled_at
+        release_calls += 1
+        return True
+
+    async def unexpected_run_locked(
+        session: AsyncSession, subscription: Subscription, scheduled_at: datetime,
+    ) -> dict[str, object]:
+        nonlocal run_locked_called
+        del session, subscription, scheduled_at
+        run_locked_called = True
+        return {}
+
+    monkeypatch.setattr(service_module, "acquire_advisory_lock", acquire)
+    monkeypatch.setattr(service_module, "release_advisory_lock", release)
+    service = SubscriptionService(_FakeSessionFactory())
+
+    async def open_fake_lock_connection() -> AsyncConnection:
+        return cast(AsyncConnection, _FakeLockConnection())
+
+    monkeypatch.setattr(service, "_open_lock_connection", open_fake_lock_connection)
+    monkeypatch.setattr(service, "_run_locked", unexpected_run_locked)
+
+    task: asyncio.Task[dict[str, object]] | None = None
+    try:
+        task = asyncio.create_task(
+            service.run_subscription(
+                sub_id, scheduled_at=datetime(2026, 7, 20, 9, tzinfo=UTC),
+            )
+        )
+        await asyncio.wait_for(commit_started.wait(), timeout=5)
+        task.cancel()
+        allow_commit.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert run_locked_called is False
+        assert release_calls == 1
+    finally:
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_run_subscription_preserves_operation_error_when_release_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lock-release failures are chained without replacing the run failure."""
+    from bidscope.subscriptions import service as service_module
+    from bidscope.subscriptions.service import SubscriptionService
+
+    class _RunFailure(Exception):
+        pass
+
+    class _ReleaseFailure(Exception):
+        pass
+
+    sub_id = _next_id("sub-run-error-release-failure")
+    sub = _make_subscription(subscription_id=sub_id)
+    run_error = _RunFailure("run failed")
+    release_error = _ReleaseFailure("release failed")
+
+    class _FakeSession:
+        async def __aenter__(self) -> _FakeSession:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def get(self, model: object, subscription_id: str) -> Subscription:
+            del model
+            assert subscription_id == sub_id
+            return sub
+
+        async def commit(self) -> None:
+            return None
+
+    class _FakeSessionFactory:
+        def __call__(self) -> _FakeSession:
+            return _FakeSession()
+
+    class _FakeLockConnection:
+        async def commit(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+        async def invalidate(self) -> None:
+            return None
+
+    async def raise_run_error(
+        session: AsyncSession, subscription: Subscription, scheduled_at: datetime,
+    ) -> dict[str, object]:
+        del session, subscription, scheduled_at
+        raise run_error
+
+    async def raise_release_error(
+        connection: AsyncConnection,
+        subscription_id: str,
+        scheduled_at: datetime,
+    ) -> None:
+        del connection, subscription_id, scheduled_at
+        raise release_error
+
+    service = SubscriptionService(_FakeSessionFactory())
+
+    async def open_fake_lock_connection() -> AsyncConnection:
+        return cast(AsyncConnection, _FakeLockConnection())
+
+    monkeypatch.setattr(
+        service_module, "acquire_advisory_lock", AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(service, "_open_lock_connection", open_fake_lock_connection)
+    monkeypatch.setattr(service, "_run_locked", raise_run_error)
+    monkeypatch.setattr(
+        service_module, "_release_lock_connection_safely", raise_release_error,
+    )
+
+    with pytest.raises(_RunFailure) as caught:
+        await service.run_subscription(
             sub_id, scheduled_at=datetime(2026, 7, 20, 9, tzinfo=UTC),
         )
-    )
-    await acquisition_started.wait()
-    task.cancel()
-    finish_acquisition.set()
-    await acquisition_ready_to_return.wait()
-    task.cancel()
-    allow_acquisition_return.set()
-    await acquisition_completed.wait()
 
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert release_calls == 1
-    assert run_locked_called is False
+    assert caught.value is run_error
+    assert caught.value.__cause__ is release_error
 
 
 @pytest.mark.asyncio
@@ -279,16 +677,20 @@ async def test_run_subscription_normalizes_naive_scheduled_at(
     original_run_locked = service._run_locked
 
     async def observing_acquire(
-        session: object, subscription_id: str, scheduled_at: datetime,
+        connection: AsyncConnection,
+        subscription_id: str,
+        scheduled_at: datetime,
     ) -> bool:
         observed["acquire"] = scheduled_at
-        return await original_acquire(session, subscription_id, scheduled_at)
+        return await original_acquire(connection, subscription_id, scheduled_at)
 
     async def observing_release(
-        session: object, subscription_id: str, scheduled_at: datetime,
-    ) -> None:
+        connection: AsyncConnection,
+        subscription_id: str,
+        scheduled_at: datetime,
+    ) -> bool:
         observed["release"] = scheduled_at
-        await original_release(session, subscription_id, scheduled_at)
+        return await original_release(connection, subscription_id, scheduled_at)
 
     async def observing_run_locked(
         session: AsyncSession, subscription: Subscription, scheduled_at: datetime,
@@ -317,6 +719,86 @@ async def test_run_subscription_normalizes_naive_scheduled_at(
         persisted_sub = await session.get(Subscription, sub_id)
     assert persisted_sub is not None
     assert persisted_sub.last_successful_run_at == normalized_scheduled_at
+
+
+@pytest.mark.asyncio
+async def test_direct_run_ignores_stale_scheduled_occurrence_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Manual runs bypass the scheduler-only occurrence freshness guard."""
+    from bidscope.subscriptions import service as service_module
+    from bidscope.subscriptions.service import KEY_NEXT_RUN_AT, SubscriptionService
+
+    sub_id = _next_id("sub-direct-stale-next-run")
+    stale_next_run = datetime(2025, 7, 20, 9, tzinfo=UTC)
+    scheduled_at = datetime(2026, 7, 20, 9, tzinfo=UTC)
+    sub = _make_subscription(subscription_id=sub_id)
+    sub.normalized_intent[KEY_NEXT_RUN_AT] = stale_next_run.isoformat()
+    run_result: dict[str, object] = {
+        "new_notices": 0,
+        "material_changes": 0,
+        "unchanged": 0,
+        "failed": False,
+        "skipped": False,
+    }
+
+    class _FakeSession:
+        async def __aenter__(self) -> _FakeSession:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def get(self, model: object, subscription_id: str) -> Subscription:
+            del model
+            assert subscription_id == sub_id
+            return sub
+
+        async def commit(self) -> None:
+            return None
+
+    class _FakeSessionFactory:
+        def __call__(self) -> _FakeSession:
+            return session
+
+    class _FakeLockConnection:
+        async def commit(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+        async def invalidate(self) -> None:
+            return None
+
+    session = _FakeSession()
+    acquire = AsyncMock(return_value=True)
+    release = AsyncMock(return_value=True)
+    guard = Mock(
+        side_effect=AssertionError("direct runs must not check scheduler state"),
+    )
+    run_locked = AsyncMock(return_value=run_result)
+    service = SubscriptionService(
+        cast(async_sessionmaker[AsyncSession], _FakeSessionFactory()),
+    )
+
+    async def open_fake_lock_connection() -> AsyncConnection:
+        return cast(AsyncConnection, _FakeLockConnection())
+
+    monkeypatch.setattr(service_module, "acquire_advisory_lock", acquire)
+    monkeypatch.setattr(service_module, "release_advisory_lock", release)
+    monkeypatch.setattr(service_module, "_matches_scheduled_occurrence", guard)
+    monkeypatch.setattr(service, "_open_lock_connection", open_fake_lock_connection)
+    monkeypatch.setattr(service, "_run_locked", run_locked)
+
+    result = await service.run_subscription(
+        sub_id, scheduled_at=scheduled_at, advance_schedule=False,
+    )
+
+    assert result is run_result
+    guard.assert_not_called()
+    run_locked.assert_awaited_once_with(session, sub, scheduled_at)
+    assert sub.normalized_intent[KEY_NEXT_RUN_AT] == stale_next_run.isoformat()
 
 
 @pytest.mark.asyncio
@@ -355,22 +837,37 @@ async def test_run_subscription_advances_schedule_before_releasing_lock(
         def __call__(self) -> _FakeSession:
             return _FakeSession()
 
+    class _FakeLockConnection:
+        async def commit(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+        async def invalidate(self) -> None:
+            return None
+
     async def acquire(
-        session: object, subscription_id: str, scheduled_at: datetime,
+        connection: AsyncConnection,
+        subscription_id: str,
+        scheduled_at: datetime,
     ) -> bool:
-        del session, subscription_id, scheduled_at
+        del connection, subscription_id, scheduled_at
         nonlocal lock_held
         events.append("acquire")
         lock_held = True
         return True
 
     async def release(
-        session: object, subscription_id: str, scheduled_at: datetime,
-    ) -> None:
-        del session, subscription_id, scheduled_at
+        connection: AsyncConnection,
+        subscription_id: str,
+        scheduled_at: datetime,
+    ) -> bool:
+        del connection, subscription_id, scheduled_at
         nonlocal lock_held
         events.append(("release", lock_held))
         lock_held = False
+        return True
 
     monkeypatch.setattr(service_module, "acquire_advisory_lock", acquire)
     monkeypatch.setattr(service_module, "release_advisory_lock", release)
@@ -380,6 +877,11 @@ async def test_run_subscription_advances_schedule_before_releasing_lock(
         service_module, "_compute_next_run", Mock(return_value=next_run),
     )
     service = SubscriptionService(_FakeSessionFactory())
+
+    async def open_fake_lock_connection() -> AsyncConnection:
+        return cast(AsyncConnection, _FakeLockConnection())
+
+    monkeypatch.setattr(service, "_open_lock_connection", open_fake_lock_connection)
     monkeypatch.setattr(service, "_retrieve_notices", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         service,
@@ -400,7 +902,12 @@ async def test_run_subscription_advances_schedule_before_releasing_lock(
 
     assert result["failed"] is False
     assert sub.normalized_intent[KEY_NEXT_RUN_AT] == next_run.isoformat()
-    assert events == ["acquire", ("commit", True, next_run.isoformat()), ("release", True)]
+    assert events == [
+        "acquire",
+        ("commit", True, initial_next_run),
+        ("commit", True, next_run.isoformat()),
+        ("release", True),
+    ]
 
 
 @pytest.mark.asyncio
@@ -431,11 +938,26 @@ async def test_run_subscription_failure_does_not_advance_schedule(
         def __call__(self) -> _FakeSessionContext:
             return _FakeSessionContext()
 
+    class _FakeLockConnection:
+        async def commit(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+        async def invalidate(self) -> None:
+            return None
+
     monkeypatch.setattr(service_module, "acquire_advisory_lock", AsyncMock(return_value=True))
-    monkeypatch.setattr(service_module, "release_advisory_lock", AsyncMock())
+    monkeypatch.setattr(service_module, "release_advisory_lock", AsyncMock(return_value=True))
     compute = Mock(side_effect=AssertionError("failed runs must not compute next run"))
     monkeypatch.setattr(service_module, "_compute_next_run", compute)
     service = SubscriptionService(_FakeSessionFactory(), fail_every_run=True)
+
+    async def open_fake_lock_connection() -> AsyncConnection:
+        return cast(AsyncConnection, _FakeLockConnection())
+
+    monkeypatch.setattr(service, "_open_lock_connection", open_fake_lock_connection)
 
     result = await service.run_subscription(
         sub_id, scheduled_at=scheduled_at, advance_schedule=True,
@@ -444,7 +966,7 @@ async def test_run_subscription_failure_does_not_advance_schedule(
     assert result["failed"] is True
     assert sub.normalized_intent[KEY_NEXT_RUN_AT] == initial_next_run
     compute.assert_not_called()
-    session.commit.assert_awaited_once()
+    assert session.commit.await_count == 2
 
 
 def test_compute_next_run_normalizes_naive_reference_to_utc() -> None:
@@ -561,3 +1083,84 @@ async def test_advisory_lock_key_derives_from_subscription_and_time() -> None:
     assert key1 != key3, "different time buckets must yield different keys"
     assert key1 != key4, "different subscriptions must yield different keys"
     assert isinstance(key1, int), "advisory lock keys must be integers"
+
+
+@pytest.mark.asyncio
+async def test_serial_workers_skip_a_consumed_scheduled_occurrence(
+    imported_batch_1: None,
+) -> None:
+    """A later worker must not replay an occurrence consumed by an earlier one."""
+    from bidscope.subscriptions.service import KEY_NEXT_RUN_AT, SubscriptionService
+
+    engine_a: AsyncEngine
+    session_factory_a: async_sessionmaker[AsyncSession]
+    engine_a, session_factory_a = create_engine_and_session()
+    engine_b: AsyncEngine
+    session_factory_b: async_sessionmaker[AsyncSession]
+    engine_b, session_factory_b = create_engine_and_session()
+    service_a = SubscriptionService(session_factory=session_factory_a)
+    service_b = SubscriptionService(session_factory=session_factory_b)
+    sub_id = _next_id("sub-serial-scheduled-occurrence")
+    scheduled_at = datetime(2026, 7, 20, 9, tzinfo=UTC)
+    sub = _make_subscription(subscription_id=sub_id)
+    sub.normalized_intent[KEY_NEXT_RUN_AT] = scheduled_at.isoformat()
+
+    try:
+        async with session_factory_a() as session:
+            session.add(sub)
+            await session.commit()
+
+        first = await service_a.run_subscription(
+            sub_id, scheduled_at=scheduled_at, advance_schedule=True,
+        )
+
+        assert first["failed"] is False
+        assert first["skipped"] is False
+
+        async with session_factory_b() as observer:
+            persisted_sub = await observer.get(Subscription, sub_id)
+            assert persisted_sub is not None
+            next_run_after_a = persisted_sub.normalized_intent[KEY_NEXT_RUN_AT]
+            assert next_run_after_a != scheduled_at.isoformat()
+            run_count_after_a = (
+                await observer.execute(
+                    sa.select(sa.func.count()).select_from(QueryRun)
+                )
+            ).scalar_one()
+            inbox_count_after_a = (
+                await observer.execute(
+                    sa.select(sa.func.count()).where(
+                        InboxEvent.subscription_id == sub_id
+                    )
+                )
+            ).scalar_one()
+
+        second = await service_b.run_subscription(
+            sub_id, scheduled_at=scheduled_at, advance_schedule=True,
+        )
+
+        assert second["failed"] is False
+
+        async with session_factory_b() as observer:
+            persisted_sub = await observer.get(Subscription, sub_id)
+            assert persisted_sub is not None
+            assert persisted_sub.normalized_intent[KEY_NEXT_RUN_AT] == next_run_after_a
+            run_count_after_b = (
+                await observer.execute(
+                    sa.select(sa.func.count()).select_from(QueryRun)
+                )
+            ).scalar_one()
+            inbox_count_after_b = (
+                await observer.execute(
+                    sa.select(sa.func.count()).where(
+                        InboxEvent.subscription_id == sub_id
+                    )
+                )
+            ).scalar_one()
+
+        assert run_count_after_b == run_count_after_a
+        assert inbox_count_after_b == inbox_count_after_a
+        assert second["skipped"] is True
+    finally:
+        await engine_a.dispose()
+        await engine_b.dispose()

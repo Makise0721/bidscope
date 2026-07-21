@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from bidscope.config import Settings, get_settings
 from bidscope.db import create_engine_and_session
@@ -92,7 +93,9 @@ def _bucket(scheduled_at: datetime) -> str:
 
 
 async def acquire_advisory_lock(
-    session: Any, subscription_id: str, scheduled_at: datetime,
+    connection: AsyncConnection,
+    subscription_id: str,
+    scheduled_at: datetime,
 ) -> bool:
     """Try to acquire a session-level advisory lock; return True if held.
 
@@ -100,16 +103,23 @@ async def acquire_advisory_lock(
     was not already held, so a second concurrent worker observes False and skips.
     """
     key = subscription_lock_key(subscription_id, _bucket(scheduled_at))
-    result = await session.execute(sa.text("SELECT pg_try_advisory_lock(:k)"), {"k": key})
+    result = await connection.execute(
+        sa.text("SELECT pg_try_advisory_lock(:k)"), {"k": key},
+    )
     return bool(result.scalar_one())
 
 
 async def release_advisory_lock(
-    session: Any, subscription_id: str, scheduled_at: datetime,
-) -> None:
+    connection: AsyncConnection,
+    subscription_id: str,
+    scheduled_at: datetime,
+) -> bool:
     """Release a previously acquired session-level advisory lock."""
     key = subscription_lock_key(subscription_id, _bucket(scheduled_at))
-    await session.execute(sa.text("SELECT pg_advisory_unlock(:k)"), {"k": key})
+    result = await connection.execute(
+        sa.text("SELECT pg_advisory_unlock(:k)"), {"k": key},
+    )
+    return bool(result.scalar_one())
 
 
 async def list_due_subscriptions(
