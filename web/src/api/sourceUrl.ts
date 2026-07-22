@@ -11,8 +11,18 @@ export function isAllowedSourceUrl(source: string, value: string): boolean {
   }
 
   try {
+    const authority = value.match(/^[a-z][a-z\d+.-]*:\/\/([^/?#]*)/i)?.[1] ?? "";
+    if (authority.includes("@")) {
+      return false;
+    }
     const url = new URL(value);
-    return url.protocol === "https:" && url.port === "" && hosts.has(url.hostname);
+    return (
+      url.protocol === "https:" &&
+      url.port === "" &&
+      url.username === "" &&
+      url.password === "" &&
+      hosts.has(url.hostname)
+    );
   } catch {
     return false;
   }

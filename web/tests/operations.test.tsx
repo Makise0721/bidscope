@@ -135,6 +135,7 @@ describe("BidScope operational views", () => {
                 retrieved_at: "2026-07-18T00:00:00+00:00",
                 hash_prefix: "abc12345",
                 parser_version: "ccgp-v1",
+                source_urls: ["https://:@www.ccgp.gov.cn/path"],
               },
               validation_warnings: [],
             },
@@ -176,11 +177,18 @@ describe("BidScope operational views", () => {
     const syntheticUrl = screen.getByText("https://example.invalid/demo-001");
     expect(syntheticUrl.tagName).toBe("SPAN");
     expect(syntheticUrl).not.toHaveAttribute("href");
+
+    const credentialUrl = screen.getByText("https://:@www.ccgp.gov.cn/path");
+    expect(credentialUrl.tagName).toBe("SPAN");
+    expect(credentialUrl).not.toHaveAttribute("href");
   });
 
   it.each([
     ["synthetic URL", "https://example.invalid/demo-001"],
     ["official lookalike URL", "https://www.ccgp.gov.cn.evil.test/foo"],
+    ["credential-bearing URL", "https://user:secret@www.ccgp.gov.cn/path"],
+    ["empty-userinfo URL", "https://@www.ccgp.gov.cn/path"],
+    ["empty-password URL", "https://:@www.ccgp.gov.cn/path"],
   ])("renders a %s as plain text for ccgp report items", async (_label, url) => {
     server.use(
       http.get("/api/reports/:id", () =>
