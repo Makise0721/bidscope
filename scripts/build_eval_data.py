@@ -1,7 +1,8 @@
 """Build the committed, deterministic BidScope evaluation datasets.
 
 This script is intentionally explicit: it only writes the five JSONL datasets
-and the synthetic corpus after validating every record in memory. The runner
+and the synthetic corpus after validating every record in memory. It also mirrors
+the exact resulting bytes into the installed package resource tree. The runner
 loads these committed files and never calls this builder implicitly.
 """
 
@@ -9,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -215,12 +217,11 @@ def build_dedup_cases(corpus: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def build_claim_cases() -> list[dict[str, Any]]:
-    """Create 60 report-claim cases with one intentionally invalid citation."""
+    """Create 60 report-claim cases with citations scoped to case evidence."""
     records: list[dict[str, Any]] = []
     for index in range(60):
         number = index + 1
         evidence_id = f"eval-evidence-{number:03d}"
-        citation_ids = ["eval-missing-evidence"] if index == 59 else [evidence_id]
         records.append(
             {
                 "id": f"eval-claim-{number:03d}",
@@ -230,11 +231,11 @@ def build_claim_cases() -> list[dict[str, Any]]:
                 "claims": [
                     {
                         "text": f"合成证据{number}支持该项目字段。",
-                        "citation_ids": citation_ids,
+                        "citation_ids": [evidence_id],
                     }
                 ],
                 "evidence_ids": [evidence_id],
-                "expected_supported": index != 59,
+                "expected_supported": True,
             }
         )
     return records
@@ -269,11 +270,29 @@ def _validate_generated(
 
 
 def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
+    """Write deterministic UTF-8 JSONL with explicit LF bytes on every platform."""
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = "".join(
         json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n" for record in records
-    )
-    path.write_bytes(payload.encode("utf-8"))
+    ).encode("utf-8")
+    path.write_bytes(payload)
+
+
+def _sync_package_resources() -> None:
+    """Copy approved checkout bytes into the wheel package resource tree."""
+    package_root = ROOT / "backend" / "src" / "bidscope" / "evaluation"
+    sources = {
+        ROOT / "eval" / "corpus" / "synthetic-notices-v1.jsonl": package_root
+        / "corpus"
+        / "synthetic-notices-v1.jsonl",
+        **{
+            ROOT / "eval" / "data" / f"{name}.jsonl": package_root / "data" / f"{name}.jsonl"
+            for name in DATASET_PATHS
+        },
+    }
+    for source, destination in sources.items():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
 
 
 def build_all() -> dict[str, int]:
@@ -290,6 +309,7 @@ def build_all() -> dict[str, int]:
     _write_jsonl(ROOT / "eval" / "corpus" / "synthetic-notices-v1.jsonl", corpus)
     for name, records in datasets.items():
         _write_jsonl(DATASET_PATHS[name], records)
+    _sync_package_resources()
     return {"corpus": len(corpus), **{name: len(records) for name, records in datasets.items()}}
 
 

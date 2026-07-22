@@ -120,6 +120,44 @@ def test_validator_rejects_non_string_e2e_notice_ids(tmp_path: Path) -> None:
     _assert_bundle_rejected(tmp_path, mutate)
 
 
+def test_validator_rejects_claims_notice_id_outside_corpus(tmp_path: Path) -> None:
+    def mutate(datasets: dict[str, list[dict[str, Any]]]) -> None:
+        datasets["claims-v1"][0]["notice_id"] = "eval-unknown-claim-notice"
+
+    _assert_bundle_rejected(tmp_path, mutate)
+
+
+def test_validator_rejects_e2e_expected_notice_id_outside_corpus(tmp_path: Path) -> None:
+    def mutate(datasets: dict[str, list[dict[str, Any]]]) -> None:
+        datasets["e2e-v1"][0]["expected_notice_ids"] = ["eval-unknown-e2e-notice"]
+
+    _assert_bundle_rejected(tmp_path, mutate)
+
+
+def test_validator_rejects_synthetic_url_userinfo(tmp_path: Path) -> None:
+    def mutate(datasets: dict[str, list[dict[str, Any]]]) -> None:
+        datasets["claims-v1"][0]["source_url"] = "https://user:password@example.invalid/claim/1"
+
+    _assert_bundle_rejected(tmp_path, mutate)
+
+
+def test_evaluation_result_discloses_metric_measurement_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    datasets = copy.deepcopy(load_datasets())
+    monkeypatch.setattr(runner, "load_datasets", lambda: datasets)
+    monkeypatch.setattr(runner, "dataset_hashes", lambda: {})
+    monkeypatch.setattr(runner, "_git_value", lambda *_args: "test-provenance")
+
+    result = runner.run_deterministic()
+
+    required_metrics = {"claims", "e2e", "latency", "tokens", "cost"}
+    provenance = result.get("measurement_mode", result.get("metric_provenance"))
+    assert isinstance(provenance, dict)
+    assert required_metrics <= set(provenance)
+    assert all(value in {"execution", "fixture_consistency"} for value in provenance.values())
+
+
 def test_runner_does_not_count_stale_usage_after_failed_intent_parse() -> None:
     from bidscope.evaluation.runner import _run_intent_cases
 

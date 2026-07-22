@@ -41,6 +41,13 @@ DATABASE_FIXTURE_VERSION = "synthetic-notices-v1"
 MODEL_NAME = "fake-deterministic"
 MODEL_PROVIDER = "offline"
 PRICING_CNY_PER_MILLION = {"prompt": 0.0, "completion": 0.0}
+MEASUREMENT_MODE = {
+    "claims": "fixture_consistency",
+    "e2e": "fixture_consistency",
+    "latency": "fixture_consistency",
+    "tokens": "fixture_consistency",
+    "cost": "fixture_consistency",
+}
 TARGETS = {
     "intent_macro_f1": 0.90,
     "retrieval_recall_at_10": 0.85,
@@ -59,14 +66,18 @@ class EvaluationExecutionError(RuntimeError):
 
 
 def _git_value(*args: str) -> str:
+    """Return git provenance when available, or a bounded unavailable marker."""
+    if PROJECT_ROOT is None:
+        return "unavailable"
     try:
-        return subprocess.check_output(
+        value = subprocess.check_output(
             ["git", "-C", str(PROJECT_ROOT), *args],
             text=True,
             stderr=subprocess.DEVNULL,
         ).strip()
-    except (OSError, subprocess.CalledProcessError) as error:
-        raise EvaluationExecutionError("unable to capture git provenance") from error
+    except (OSError, subprocess.CalledProcessError):
+        return "unavailable"
+    return value or "unavailable"
 
 
 def _intent_projection(value: Any) -> dict[str, Any]:
@@ -299,11 +310,9 @@ def run_deterministic(*, output: Path | None = None) -> dict[str, Any]:
     except Exception as error:  # noqa: BLE001 — normalize execution failures for CLI
         raise EvaluationExecutionError(str(error)) from error
 
-    try:
-        commit = _git_value("rev-parse", "HEAD")
-        dirty = bool(_git_value("status", "--porcelain"))
-    except EvaluationExecutionError:
-        raise
+    commit = _git_value("rev-parse", "HEAD")
+    dirty_status = _git_value("status", "--porcelain")
+    dirty = dirty_status != "unavailable" and bool(dirty_status)
     result: dict[str, Any] = {
         "schema_version": "evaluation-result-v1",
         "mode": "deterministic",
@@ -331,6 +340,7 @@ def run_deterministic(*, output: Path | None = None) -> dict[str, Any]:
             "network": "disabled",
         },
         "metrics": metrics,
+        "measurement_mode": MEASUREMENT_MODE,
         "latency_ms": latency,
         "tokens": tokens,
         "cost_cny": cost,
@@ -339,7 +349,11 @@ def run_deterministic(*, output: Path | None = None) -> dict[str, Any]:
         "target_pass": all(item["passed"] for item in target_results.values()),
     }
     if output is not None:
-        output_path = output if output.is_absolute() else PROJECT_ROOT / output
+        output_path = (
+            output
+            if output.is_absolute() or PROJECT_ROOT is None
+            else PROJECT_ROOT / output
+        )
         output_path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         output_path.write_bytes(payload.encode("utf-8"))

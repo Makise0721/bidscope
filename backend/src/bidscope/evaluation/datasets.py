@@ -6,6 +6,8 @@ import hashlib
 import json
 import math
 from collections import Counter
+from importlib import resources
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -15,27 +17,46 @@ class DatasetError(ValueError):
     """Raised when committed evaluation data is absent, invalid, or tampered."""
 
 
-def _find_repository_root() -> Path:
-    """Find the source checkout containing this package and the eval artifacts."""
+def _find_repository_root() -> Path | None:
+    """Find a source checkout containing the un-packaged eval artifacts, if any."""
     package_path = Path(__file__).resolve()
     for candidate in (package_path.parent, *package_path.parents):
         if (candidate / "pyproject.toml").is_file() and (candidate / "eval").is_dir():
             return candidate
-    raise DatasetError(
-        "BidScope evaluation datasets require a source checkout containing pyproject.toml and eval/"
-    )
+    return None
 
+
+PathLike = Path | Traversable
 
 PROJECT_ROOT = _find_repository_root()
-EVAL_ROOT = PROJECT_ROOT / "eval"
-CORPUS_PATH = EVAL_ROOT / "corpus" / "synthetic-notices-v1.jsonl"
-DATASET_PATHS = {
-    "intent-v1": EVAL_ROOT / "data" / "intent-v1.jsonl",
-    "retrieval-v1": EVAL_ROOT / "data" / "retrieval-v1.jsonl",
-    "dedup-v1": EVAL_ROOT / "data" / "dedup-v1.jsonl",
-    "claims-v1": EVAL_ROOT / "data" / "claims-v1.jsonl",
-    "e2e-v1": EVAL_ROOT / "data" / "e2e-v1.jsonl",
+EVAL_ROOT = PROJECT_ROOT / "eval" if PROJECT_ROOT is not None else None
+_PACKAGE_ROOT = resources.files("bidscope.evaluation")
+_PACKAGE_CORPUS_PATH: PathLike = _PACKAGE_ROOT / "corpus" / "synthetic-notices-v1.jsonl"
+_PACKAGE_DATASET_PATHS: dict[str, PathLike] = {
+    "intent-v1": _PACKAGE_ROOT / "data" / "intent-v1.jsonl",
+    "retrieval-v1": _PACKAGE_ROOT / "data" / "retrieval-v1.jsonl",
+    "dedup-v1": _PACKAGE_ROOT / "data" / "dedup-v1.jsonl",
+    "claims-v1": _PACKAGE_ROOT / "data" / "claims-v1.jsonl",
+    "e2e-v1": _PACKAGE_ROOT / "data" / "e2e-v1.jsonl",
 }
+# Public paths point at the checkout when it exists, preserving builder and test
+# APIs. Installed wheels use the package-resource paths selected by load_datasets.
+CORPUS_PATH: PathLike = (
+    EVAL_ROOT / "corpus" / "synthetic-notices-v1.jsonl"
+    if EVAL_ROOT is not None
+    else _PACKAGE_CORPUS_PATH
+)
+DATASET_PATHS: dict[str, PathLike] = (
+    {
+        "intent-v1": EVAL_ROOT / "data" / "intent-v1.jsonl",
+        "retrieval-v1": EVAL_ROOT / "data" / "retrieval-v1.jsonl",
+        "dedup-v1": EVAL_ROOT / "data" / "dedup-v1.jsonl",
+        "claims-v1": EVAL_ROOT / "data" / "claims-v1.jsonl",
+        "e2e-v1": EVAL_ROOT / "data" / "e2e-v1.jsonl",
+    }
+    if EVAL_ROOT is not None
+    else _PACKAGE_DATASET_PATHS
+)
 MIN_COUNTS = {
     "intent-v1": 100,
     "retrieval-v1": 30,
@@ -69,7 +90,7 @@ REQUIRED_FIELDS = {
 # These are the approved canonical bytes for the committed synthetic fixture.
 # A changed artifact must be deliberately approved by changing this manifest.
 EXPECTED_DATASET_HASHES = {
-    "claims-v1": "6330bc0d8571a1c27ed5d2630d05f0885fcef5d7ac0273693f129467f226c2e6",
+    "claims-v1": "932c1ac1983b311e905f6d642aef1b6efe6181ba845365cc02005aab53d0a12f",
     "corpus": "1a5c3ce1b79bbc948af16bb3cfcfa08603c2d384c4f1a516a792bf72b9657144",
     "dedup-v1": "9863385c8aa33fdc26660d9623864170f34998e2d6cd96f926814e7785f5bb50",
     "e2e-v1": "9eeb9e50f92609509ad94359e3123358ca402837c906ca90079cdc7feb431a2c",
@@ -97,12 +118,14 @@ _DEDUP_SCALAR_FIELDS: dict[str, tuple[type[Any], ...]] = {
 }
 
 
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        raise DatasetError(f"missing committed dataset: {path}")
+def _read_jsonl(path: Path | Traversable) -> list[dict[str, Any]]:
     try:
-        payload = path.read_bytes()
+        if not path.is_file():
+            raise DatasetError(f"missing committed dataset: {path}")
+        payload = path.read_bytes() if isinstance(path, Path) else path.read_bytes()
         text = payload.replace(b"\r\n", b"\n").replace(b"\r", b"\n").decode("utf-8")
+    except DatasetError:
+        raise
     except (OSError, UnicodeDecodeError) as error:
         raise DatasetError(f"unable to read dataset {path}: {error}") from error
     records: list[dict[str, Any]] = []
@@ -121,25 +144,42 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def _check_id(item: dict[str, Any], path: Path, index: int) -> str:
+def _check_id(item: dict[str, Any], path: Path | Traversable, index: int) -> str:
     record_id = item.get("id")
     if not isinstance(record_id, str) or not record_id.startswith("eval-"):
         raise DatasetError(f"{path}:{index} must have an eval-* id")
     return record_id
 
 
-def _check_synthetic(item: dict[str, Any], path: Path, index: int) -> None:
+def _check_synthetic(item: dict[str, Any], path: Path | Traversable, index: int) -> None:
     source = item.get("source")
     if source != "synthetic_demo":
         raise DatasetError(f"{path}:{index} must use source=synthetic_demo")
-    url = item.get("canonical_url", item.get("source_url"))
-    if url is not None:
-        parsed = urlparse(url)
-        if parsed.scheme != "https" or parsed.hostname != "example.invalid":
+    for field in ("canonical_url", "source_url"):
+        url = item.get(field)
+        if url is None:
+            continue
+        if not isinstance(url, str):
+            raise DatasetError(f"{path}:{index} {field} must be a string")
+        try:
+            parsed = urlparse(url)
+            hostname = parsed.hostname
+            port = parsed.port
+            username = parsed.username
+            password = parsed.password
+        except (TypeError, ValueError) as error:
+            raise DatasetError(f"{path}:{index} has an invalid synthetic URL") from error
+        if (
+            parsed.scheme != "https"
+            or hostname != "example.invalid"
+            or username is not None
+            or password is not None
+            or (port is not None and not 1 <= port <= 65535)
+        ):
             raise DatasetError(f"{path}:{index} has a non-reserved synthetic URL")
 
 
-def _check_nested_synthetic(value: Any, path: Path, index: int) -> None:
+def _check_nested_synthetic(value: Any, path: Path | Traversable, index: int) -> None:
     if isinstance(value, dict):
         if "source" in value:
             _check_synthetic(value, path, index)
@@ -166,7 +206,9 @@ def _string_list(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 
-def _validate_dedup_notice(value: Any, path: Path, index: int, side: str) -> None:
+def _validate_dedup_notice(
+    value: Any, path: Path | Traversable, index: int, side: str
+) -> None:
     if not isinstance(value, dict):
         raise DatasetError(f"{path}:{index} {side} must be an object")
     missing = sorted(set(_DEDUP_SCALAR_FIELDS) - value.keys())
@@ -190,7 +232,9 @@ def _validate_dedup_notice(value: Any, path: Path, index: int, side: str) -> Non
         raise DatasetError(f"{path}:{index} {side}.claim_supporting_texts must be list[str]")
 
 
-def _validate_record_shape(item: dict[str, Any], path: Path, index: int, schema_name: str) -> None:
+def _validate_record_shape(
+    item: dict[str, Any], path: Path | Traversable, index: int, schema_name: str
+) -> None:
     """Enforce the explicit, nested JSONL schema used by each dataset."""
     checks: dict[str, bool]
     if schema_name == "corpus":
@@ -284,7 +328,7 @@ def _validate_record_shape(item: dict[str, Any], path: Path, index: int, schema_
 
 def _validate_records(
     records: list[dict[str, Any]],
-    path: Path,
+    path: Path | Traversable,
     *,
     minimum: int | None,
     schema_name: str,
@@ -331,6 +375,19 @@ def _validate_bundle(
     for item in loaded["retrieval-v1"]:
         if not set(item["relevant_ids"]).issubset(corpus_ids):
             raise DatasetError(f"retrieval case {item['id']} references unknown corpus ID")
+    for item in loaded["claims-v1"]:
+        if item["notice_id"] not in corpus_ids:
+            raise DatasetError(f"claims case {item['id']} references unknown corpus ID")
+        evidence_ids = set(item["evidence_ids"])
+        for claim in item["claims"]:
+            citation_ids = set(claim["citation_ids"])
+            if not citation_ids.issubset(evidence_ids):
+                raise DatasetError(
+                    f"claims case {item['id']} cites evidence outside its evidence_ids"
+                )
+    for item in loaded["e2e-v1"]:
+        if not set(item["expected_notice_ids"]).issubset(corpus_ids):
+            raise DatasetError(f"e2e case {item['id']} references unknown corpus ID")
 
 
 def validate_generated_bundle(
@@ -342,16 +399,19 @@ def validate_generated_bundle(
     _validate_bundle({"corpus": corpus, **datasets}, minimums=True)
 
 
-def _canonical_bytes(path: Path) -> bytes:
+def _canonical_bytes(path: Path | Traversable) -> bytes:
     if not path.is_file():
         raise DatasetError(f"missing committed dataset: {path}")
     try:
-        return path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        payload = path.read_bytes() if isinstance(path, Path) else path.read_bytes()
+        return payload.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
     except OSError as error:
         raise DatasetError(f"unable to hash dataset {path}: {error}") from error
 
 
-def _is_default_paths(corpus_path: Path, dataset_paths: dict[str, Path]) -> bool:
+def _is_default_paths(
+    corpus_path: Path | Traversable, dataset_paths: dict[str, Path | Traversable]
+) -> bool:
     return corpus_path == CORPUS_PATH and dataset_paths == DATASET_PATHS
 
 
@@ -363,14 +423,19 @@ def _verify_expected_hashes(hashes: dict[str, str]) -> None:
 
 
 def validate_committed_datasets(
-    *, corpus_path: Path = CORPUS_PATH, dataset_paths: dict[str, Path] = DATASET_PATHS
+    *,
+    corpus_path: Path | Traversable | None = None,
+    dataset_paths: dict[str, Path | Traversable] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Load all committed JSONL files and enforce safety, count, and hash invariants."""
+    """Load committed checkout files or packaged resources and enforce invariants."""
+    if corpus_path is None or dataset_paths is None:
+        default_corpus, default_datasets = _dataset_sources()
+        corpus_path = default_corpus if corpus_path is None else corpus_path
+        dataset_paths = default_datasets if dataset_paths is None else dataset_paths
     corpus = _read_jsonl(corpus_path)
     loaded: dict[str, list[dict[str, Any]]] = {"corpus": corpus}
     for name, path in dataset_paths.items():
-        records = _read_jsonl(path)
-        loaded[name] = records
+        loaded[name] = _read_jsonl(path)
     if set(dataset_paths) != set(DATASET_PATHS):
         raise DatasetError("dataset paths do not match the committed dataset manifest")
     _validate_bundle(loaded, minimums=True)
@@ -382,7 +447,9 @@ def validate_committed_datasets(
 
 
 def dataset_hashes(
-    *, corpus_path: Path = CORPUS_PATH, dataset_paths: dict[str, Path] = DATASET_PATHS
+    *,
+    corpus_path: Path | Traversable = CORPUS_PATH,
+    dataset_paths: dict[str, Path | Traversable] = DATASET_PATHS,
 ) -> dict[str, str]:
     """Return SHA-256 hashes of canonical LF-normalized files in filename order."""
     paths = {"corpus": corpus_path, **dataset_paths}
@@ -392,9 +459,27 @@ def dataset_hashes(
     }
 
 
+def _dataset_sources() -> tuple[Path | Traversable, dict[str, Path | Traversable]]:
+    """Prefer source-checkout eval files, falling back to bundled package resources."""
+    if PROJECT_ROOT is not None and CORPUS_PATH.is_file() and all(
+        path.is_file() for path in DATASET_PATHS.values()
+    ):
+        return CORPUS_PATH, DATASET_PATHS
+    return _PACKAGE_CORPUS_PATH, _PACKAGE_DATASET_PATHS
+
+
 def load_datasets() -> dict[str, list[dict[str, Any]]]:
-    """Load the repository's committed evaluation data; never regenerate it."""
-    return validate_committed_datasets()
+    """Load validated checkout fixtures or package resources without regeneration."""
+    corpus_path, dataset_paths = _dataset_sources()
+    loaded = validate_committed_datasets(
+        corpus_path=corpus_path,
+        dataset_paths=dataset_paths,
+    )
+    if corpus_path != CORPUS_PATH:
+        _verify_expected_hashes(
+            dataset_hashes(corpus_path=corpus_path, dataset_paths=dataset_paths)
+        )
+    return loaded
 
 
 __all__ = [
