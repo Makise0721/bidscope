@@ -1,7 +1,7 @@
 # BidScope Tasks 19–20 Handoff
 
-**Date:** 2026-07-22  
-**Purpose:** hand off the clean final-task worktree after completing Task 17 and Task 18.  
+**Date:** 2026-07-22
+**Purpose:** hand off the clean final-task worktree after completing Task 17 and Task 18.
 **Status:** Task 17 and Task 18 complete on this branch; Task 19 and Task 20 have not started.
 
 ## 1. Repository and worktree
