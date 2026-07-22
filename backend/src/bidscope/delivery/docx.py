@@ -178,6 +178,7 @@ class ReportDelivery:
             self.store.put_bytes(object_key, data)
 
             row = ReportModel(
+                run_id=report.run_id,
                 export_key=export_key,
                 conditions=report.query_conditions,
                 freshness_window=report.freshness_window,

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation } from "@tanstack/react-query";
-import { createRun } from "../../api/client";
+import { confirmRun, createRun } from "../../api/client";
 import { IntentConfirmation } from "./IntentConfirmation";
 import { StatusBadge } from "./StatusBadge";
 
@@ -28,6 +28,23 @@ export function Workbench() {
     onError: () => setPhase("failed"),
   });
 
+  const confirmationMutation = useMutation({
+    mutationFn: confirmRun,
+    onSuccess: (run) => {
+      const nextPhase: RunPhase =
+        run.status === "completed"
+          ? "completed"
+          : run.status === "failed"
+            ? "failed"
+            : "running";
+      setPhase(nextPhase);
+      if (nextPhase === "completed") {
+        navigate(`/runs/${run.id}`);
+      }
+    },
+    onError: () => setPhase("failed"),
+  });
+
   const handleSubmit = () => {
     if (!query.trim()) return;
     setPhase("loading");
@@ -37,10 +54,7 @@ export function Workbench() {
   const handleApprove = () => {
     if (runId) {
       setPhase("running");
-      // In the full build this confirms via the API; here we mark complete
-      // and navigate to the report.
-      setPhase("completed");
-      navigate(`/runs/${runId}`);
+      confirmationMutation.mutate(runId);
     }
   };
 
@@ -71,6 +85,11 @@ export function Workbench() {
       </div>
 
       <StatusBadge phase={phase} />
+      {confirmationMutation.isError && (
+        <p className="status status-error" role="alert">
+          Unable to confirm this run. Please try again.
+        </p>
+      )}
 
       {phase === "awaiting_confirmation" && runId && (
         <IntentConfirmation runId={runId} onApprove={handleApprove} />

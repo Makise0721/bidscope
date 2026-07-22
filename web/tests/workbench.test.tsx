@@ -1,10 +1,11 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
+import { http, HttpResponse } from "msw";
 import { App } from "../src/app/App";
-import { server, REPRESENTATIVE_QUERY } from "../src/test/mockServer";
+import { RUN_ID, server, REPRESENTATIVE_QUERY } from "../src/test/mockServer";
 
 function renderApp(route = "/") {
   const queryClient = new QueryClient({
@@ -41,9 +42,20 @@ describe("BidScope evidence workbench - main flow", () => {
     expect(await screen.findByText(/智算中心/i)).toBeTruthy();
     expect(await screen.findByText(/四川/i)).toBeTruthy();
 
-    // Approve the confirmation.
+    // Approve the confirmation and verify the runtime confirmation request.
+    const confirmRequest = vi.fn();
+    server.use(
+      http.post("/api/runs/:id/confirm", async ({ params, request }) => {
+        confirmRequest({ id: params.id, method: request.method });
+        return HttpResponse.json({ id: RUN_ID, status: "completed" });
+      }),
+    );
     const approveButton = await screen.findByRole("button", { name: /approve/i });
     await user.click(approveButton);
+
+    await waitFor(() =>
+      expect(confirmRequest).toHaveBeenCalledWith({ id: RUN_ID, method: "POST" }),
+    );
 
     // After completion the report is available.
     await waitFor(() => expect(screen.getByText(/report/i)).toBeInTheDocument());
