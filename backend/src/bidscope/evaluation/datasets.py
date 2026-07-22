@@ -444,13 +444,16 @@ def _validate_record_shape(
                 and _eval_string_list(claim.get("citation_ids"))
                 for claim in claims
             )
-            if checks["claims.items"] and checks["evidence_ids"] and isinstance(
-                expected_supported, bool
-            ):
-                evidence_id_set = set(evidence_ids) if isinstance(evidence_ids, list) else set()
-                checks["claims.references"] = not expected_supported or all(
-                    set(claim["citation_ids"]).issubset(evidence_id_set) for claim in claims
-                )
+            if expected_supported is True:
+                checks["claims.nonempty"] = bool(claims)
+                checks["evidence_ids.nonempty"] = bool(evidence_ids)
+                if checks["claims.items"] and isinstance(evidence_ids, list):
+                    evidence_id_set = set(evidence_ids)
+                    checks["claims.references"] = all(
+                        bool(claim["citation_ids"])
+                        and set(claim["citation_ids"]).issubset(evidence_id_set)
+                        for claim in claims
+                    )
     elif schema_name == "e2e-v1":
         usage = item.get("usage")
         checks = {

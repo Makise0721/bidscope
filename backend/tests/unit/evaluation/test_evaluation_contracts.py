@@ -315,6 +315,30 @@ def test_validator_rejects_supported_claim_citing_unknown_evidence(
     _assert_bundle_rejected(tmp_path, mutate)
 
 
+def test_validator_rejects_supported_claim_with_empty_evidence_and_citations(
+    tmp_path: Path,
+) -> None:
+    def mutate(datasets: dict[str, list[dict[str, Any]]]) -> None:
+        claim_case = datasets["claims-v1"][0]
+        claim_case["expected_supported"] = True
+        claim_case["evidence_ids"] = []
+        claim_case["claims"][0]["citation_ids"] = []
+
+    _assert_bundle_rejected(tmp_path, mutate)
+
+
+def test_validator_rejects_supported_claim_case_without_claims_or_evidence(
+    tmp_path: Path,
+) -> None:
+    def mutate(datasets: dict[str, list[dict[str, Any]]]) -> None:
+        claim_case = datasets["claims-v1"][0]
+        claim_case["expected_supported"] = True
+        claim_case["claims"] = []
+        claim_case["evidence_ids"] = []
+
+    _assert_bundle_rejected(tmp_path, mutate)
+
+
 @pytest.mark.parametrize(
     "metadata",
     [{}, {"case_type": ["bad"]}],
