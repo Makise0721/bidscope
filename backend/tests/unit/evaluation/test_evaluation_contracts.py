@@ -6,6 +6,7 @@ import asyncio
 import copy
 import importlib.util
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -144,6 +145,37 @@ def test_validator_rejects_non_numeric_corpus_budget(tmp_path: Path) -> None:
     _assert_bundle_rejected(tmp_path, mutate)
 
 
+def test_validator_normalizes_huge_json_integer_to_dataset_error(tmp_path: Path) -> None:
+    datasets = copy.deepcopy(load_datasets())
+    corpus_path, dataset_paths = _write_bundle(tmp_path, datasets)
+    corpus_payload = corpus_path.read_text(encoding="utf-8")
+    huge_integer = "9" * 5000
+    corpus_path.write_text(
+        corpus_payload.replace(
+            '"budget_minor_units": 100000',
+            f'"budget_minor_units": {huge_integer}',
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DatasetError):
+        validate_committed_datasets(
+            corpus_path=corpus_path,
+            dataset_paths=dataset_paths,
+        )
+
+
+def test_generated_bundle_normalizes_huge_numeric_budget_to_dataset_error() -> None:
+    datasets = copy.deepcopy(load_datasets())
+    datasets["corpus"][0]["budget_minor_units"] = 10**5000
+
+    with pytest.raises(DatasetError):
+        dataset_module.validate_generated_bundle(datasets["corpus"], {
+            name: datasets[name] for name in DATASET_PATHS
+        })
+
+
 def test_validator_rejects_unknown_top_level_intent_field(tmp_path: Path) -> None:
     def mutate(datasets: dict[str, list[dict[str, Any]]]) -> None:
         datasets["intent-v1"][0]["unexpected"] = "reject me"
@@ -279,11 +311,43 @@ def test_evaluation_result_discloses_metric_measurement_provenance(
 
     result = runner.run_deterministic()
 
-    required_metrics = {"claims", "e2e", "latency", "tokens", "cost"}
+    required_metrics = {
+        "intent",
+        "retrieval",
+        "dedup",
+        "claims",
+        "e2e",
+        "latency",
+        "tokens",
+        "cost",
+    }
     provenance = result.get("measurement_mode", result.get("metric_provenance"))
     assert isinstance(provenance, dict)
     assert required_metrics <= set(provenance)
     assert all(value in {"execution", "fixture_consistency"} for value in provenance.values())
+
+
+def test_started_at_is_captured_before_evaluation_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    datasets = copy.deepcopy(load_datasets())
+    entry_time = datetime(2026, 7, 22, 10, 0, tzinfo=UTC)
+    after_delay = datetime(2026, 7, 22, 10, 5, tzinfo=UTC)
+    clock_reads = iter([entry_time, after_delay])
+    monkeypatch.setattr(runner, "load_datasets", lambda: datasets)
+    monkeypatch.setattr(runner, "dataset_hashes", lambda: {})
+    monkeypatch.setattr(runner, "_git_value", lambda *_args: "test-provenance")
+    monkeypatch.setattr(runner, "_utc_now", lambda: next(clock_reads), raising=False)
+
+    original_run = runner.asyncio.run
+
+    def delayed_run(awaitable: Any) -> Any:
+        result = original_run(awaitable)
+        return result
+
+    monkeypatch.setattr(runner.asyncio, "run", delayed_run)
+    result = runner.run_deterministic()
+
+    assert result["started_at"] == entry_time.isoformat()
+    assert result["started_at"] != after_delay.isoformat()
 
 
 def test_runner_does_not_count_stale_usage_after_failed_intent_parse() -> None:
