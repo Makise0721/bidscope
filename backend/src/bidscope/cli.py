@@ -26,6 +26,8 @@ from bidscope.clock import SystemClock
 from bidscope.config import get_settings
 from bidscope.db import create_engine_and_session
 from bidscope.delivery.objects import LocalObjectStore
+from bidscope.evaluation.datasets import DatasetError
+from bidscope.evaluation.runner import EvaluationExecutionError, run_deterministic
 from bidscope.graph.executor import run_setup_checkpoints
 from bidscope.persistence.repositories import SnapshotRepository
 from bidscope.snapshots.importer import SnapshotImporter, SnapshotImportError
@@ -53,6 +55,12 @@ scheduler_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(scheduler_app, name="scheduler")
+
+eval_app = typer.Typer(
+    help="Offline evaluation commands.",
+    no_args_is_help=True,
+)
+app.add_typer(eval_app, name="eval")
 
 
 def _build_importer() -> SnapshotImporter:
@@ -165,6 +173,28 @@ def checkpoints_setup() -> None:
     """Create the LangGraph checkpoint tables in the configured database."""
     run_setup_checkpoints(get_settings())
     typer.echo("checkpoint tables ready")
+
+
+# --- evaluation --------------------------------------------------------------
+
+
+@eval_app.command("run")
+def evaluation_run(
+    mode: Annotated[str, typer.Option("--mode", help="Evaluation mode.")] = "deterministic",
+    output: Annotated[Path, typer.Option("--output", help="Machine-readable result path.")] = Path(
+        "eval/results/deterministic.json"
+    ),
+) -> None:
+    """Run an offline evaluation over committed versioned datasets."""
+    if mode != "deterministic":
+        typer.echo(f"unsupported evaluation mode: {mode}", err=True)
+        raise typer.Exit(code=1)
+    try:
+        result = run_deterministic(output=output)
+    except (DatasetError, EvaluationExecutionError, OSError) as error:
+        typer.echo(f"evaluation failed: {error}", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(_json_payload(result))
 
 
 # --- scheduler ---------------------------------------------------------------

@@ -25,6 +25,10 @@ htmlcov/
 .minio/
 .postgres/
 
+# Evaluation outputs are generated locally and contain the current Git commit.
+eval/results/*.json
+!eval/results/.gitkeep
+
 # Node tooling
 node_modules/
 .npm/
