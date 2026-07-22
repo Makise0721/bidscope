@@ -10,6 +10,7 @@ import platform
 import subprocess
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -190,21 +191,36 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def _run_intent_cases_in_worker(
+    cases: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[Any]]:
+    """Run intent cases on a thread with its own event loop."""
+    return asyncio.run(_run_intent_cases(cases))
+
+
 def _run_intent_cases_sync(cases: list[dict[str, Any]]) -> tuple[
     list[dict[str, Any]], list[dict[str, Any]], list[Any]
 ]:
-    """Run intent cases without clearing an existing thread event loop."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        try:
-            previous_loop = asyncio.get_event_loop()
-        except RuntimeError:
-            previous_loop = None
+    """Run intent cases synchronously while preserving the caller's event loop."""
     try:
-        return asyncio.run(_run_intent_cases(cases))
-    finally:
-        if previous_loop is not None and not previous_loop.is_closed():
-            asyncio.set_event_loop(previous_loop)
+        asyncio.get_running_loop()
+    except RuntimeError:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            try:
+                previous_loop = asyncio.get_event_loop()
+            except RuntimeError:
+                previous_loop = None
+        try:
+            return asyncio.run(_run_intent_cases(cases))
+        finally:
+            if previous_loop is not None and not previous_loop.is_closed():
+                asyncio.set_event_loop(previous_loop)
+
+    # ``asyncio.run`` cannot be called in the caller's running loop.  Construct
+    # the coroutine only in the worker, so a failed loop check cannot leak it.
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="bidscope-evaluation") as executor:
+        return executor.submit(_run_intent_cases_in_worker, cases).result()
 
 
 def _hash_selected_sources(

@@ -66,6 +66,7 @@ DATASET_PATHS: dict[str, PathLike] = (
     if EVAL_ROOT is not None
     else _PACKAGE_DATASET_PATHS
 )
+MAX_EVALUATION_INTEGER = 10**12
 MIN_COUNTS = {
     "intent-v1": 100,
     "retrieval-v1": 30,
@@ -234,7 +235,15 @@ def _is_finite_number(value: Any, *, nonnegative: bool = False) -> bool:
 
 
 def _is_nonnegative_int(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    """Return whether a value is a nonnegative integer within the eval bound."""
+    try:
+        return (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and 0 <= value <= MAX_EVALUATION_INTEGER
+        )
+    except (OverflowError, ValueError):
+        return False
 
 
 def _is_bounded_nonnegative_int(value: Any) -> bool:
@@ -620,6 +629,7 @@ __all__ = [
     "DatasetError",
     "EVAL_ROOT",
     "EXPECTED_DATASET_HASHES",
+    "MAX_EVALUATION_INTEGER",
     "MIN_COUNTS",
     "PROJECT_ROOT",
     "dataset_hashes",

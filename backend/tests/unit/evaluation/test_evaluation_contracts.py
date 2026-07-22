@@ -213,6 +213,13 @@ def test_generated_bundle_normalizes_huge_numeric_budget_to_dataset_error() -> N
         })
 
 
+def test_validator_rejects_huge_e2e_usage_integer(tmp_path: Path) -> None:
+    def mutate(datasets: dict[str, list[dict[str, Any]]]) -> None:
+        datasets["e2e-v1"][0]["usage"]["prompt"] = 10**400
+
+    _assert_bundle_rejected(tmp_path, mutate)
+
+
 def test_validator_rejects_unknown_top_level_intent_field(tmp_path: Path) -> None:
     def mutate(datasets: dict[str, list[dict[str, Any]]]) -> None:
         datasets["intent-v1"][0]["unexpected"] = "reject me"
@@ -390,6 +397,25 @@ def test_evaluation_result_discloses_metric_measurement_provenance(
     assert provenance["intent"] == "fixture_consistency"
     assert provenance["retrieval"] == "fixture_consistency"
     assert provenance["dedup"] == "fixture_consistency"
+
+
+@pytest.mark.asyncio
+async def test_runner_completes_when_called_from_running_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    datasets = copy.deepcopy(load_datasets())
+    monkeypatch.setattr(runner, "load_datasets", lambda: datasets)
+    monkeypatch.setattr(runner, "dataset_hashes", lambda: {})
+    monkeypatch.setattr(runner, "_git_value", lambda *_args: "test-provenance")
+    monkeypatch.setattr(
+        runner,
+        "_utc_now",
+        lambda: datetime(2026, 7, 22, 10, 0, tzinfo=UTC),
+    )
+
+    result = runner.run_deterministic()
+
+    assert result["status"] == "completed"
 
 
 def test_started_at_is_captured_before_evaluation_delay(monkeypatch: pytest.MonkeyPatch) -> None:
