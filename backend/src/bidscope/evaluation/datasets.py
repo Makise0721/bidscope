@@ -99,7 +99,7 @@ REQUIRED_FIELDS = {
 # These are the approved canonical bytes for the committed synthetic fixture.
 # A changed artifact must be deliberately approved by changing this manifest.
 EXPECTED_DATASET_HASHES = {
-    "claims-v1": "932c1ac1983b311e905f6d642aef1b6efe6181ba845365cc02005aab53d0a12f",
+    "claims-v1": "e40ff066c43d1f74e6c9bc79e0a89f637179403495c2b8b9e01e708fa22af37a",
     "corpus": "1a5c3ce1b79bbc948af16bb3cfcfa08603c2d384c4f1a516a792bf72b9657144",
     "dedup-v1": "9863385c8aa33fdc26660d9623864170f34998e2d6cd96f926814e7785f5bb50",
     "e2e-v1": "9eeb9e50f92609509ad94359e3123358ca402837c906ca90079cdc7feb431a2c",
@@ -119,7 +119,7 @@ _DEDUP_SCALAR_FIELDS: dict[str, tuple[type[Any], ...]] = {
     "title": (str, type(None)),
     "purchaser": (str, type(None)),
     "region": (str, type(None)),
-    "budget_minor_units": (int, float, type(None)),
+    "budget_minor_units": (int, type(None)),
     "budget_currency": (str, type(None)),
     "deadline": (str, type(None)),
     "procurement_scope": (str, type(None)),
@@ -237,12 +237,28 @@ def _is_nonnegative_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
+def _is_bounded_nonnegative_int(value: Any) -> bool:
+    """Return whether a value is a bounded nonnegative integer."""
+    return _is_nonnegative_int(value) and _is_finite_number(value, nonnegative=True)
+
+
+def _is_nonnegative_minor_units(value: Any) -> bool:
+    """Return whether a minor-unit amount is null or a bounded nonnegative integer."""
+    return value is None or _is_bounded_nonnegative_int(value)
+
+
 def _is_nonnegative_int_or_none(value: Any) -> bool:
     return value is None or _is_nonnegative_int(value)
 
 
 def _string_list(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _eval_string_list(value: Any) -> bool:
+    return isinstance(value, list) and all(
+        isinstance(item, str) and item.startswith("eval-") for item in value
+    )
 
 
 def _nullable_string(value: Any) -> bool:
@@ -289,9 +305,13 @@ def _validate_dedup_notice(
     ]
     if invalid:
         raise DatasetError(f"{path}:{index} {side} has invalid fields: {', '.join(invalid)}")
-    if not _is_finite_number(value["budget_minor_units"], nonnegative=True):
+    if not _is_nonnegative_minor_units(value["budget_minor_units"]):
         raise DatasetError(
-            f"{path}:{index} {side}.budget_minor_units must be nonnegative finite numeric"
+            f"{path}:{index} {side}.budget_minor_units must be a nonnegative integer or null"
+        )
+    if not _timezone_aware_datetime(value["deadline"]):
+        raise DatasetError(
+            f"{path}:{index} {side}.deadline must be a timezone-aware ISO-8601 datetime or null"
         )
     supporting = value.get("claim_supporting_texts")
     if not isinstance(supporting, (list, tuple)) or not all(
@@ -314,10 +334,9 @@ def _validate_record_shape(
             "title": isinstance(item.get("title"), str),
             "region": isinstance(item.get("region"), str),
             "purchaser": isinstance(item.get("purchaser"), str),
-            "budget_minor_units": _is_finite_number(
-                item.get("budget_minor_units"), nonnegative=True
-            ),
-            "deadline": isinstance(item.get("deadline"), str),
+            "budget_minor_units": _is_bounded_nonnegative_int(item.get("budget_minor_units")),
+            "deadline": isinstance(item.get("deadline"), str)
+            and _timezone_aware_datetime(item.get("deadline")),
             "project_number": isinstance(item.get("project_number"), str),
             "content_hash": isinstance(item.get("content_hash"), str),
             "content": isinstance(item.get("content"), str),
@@ -398,7 +417,7 @@ def _validate_record_shape(
             "source_url": isinstance(item.get("source_url"), str),
             "notice_id": isinstance(item.get("notice_id"), str),
             "claims": isinstance(claims, list),
-            "evidence_ids": _string_list(item.get("evidence_ids")),
+            "evidence_ids": _eval_string_list(item.get("evidence_ids")),
             "expected_supported": isinstance(item.get("expected_supported"), bool),
         }
         if isinstance(claims, list):
@@ -408,7 +427,7 @@ def _validate_record_shape(
             checks["claims.items"] = all(
                 isinstance(claim, dict)
                 and isinstance(claim.get("text"), str)
-                and _string_list(claim.get("citation_ids"))
+                and _eval_string_list(claim.get("citation_ids"))
                 for claim in claims
             )
     elif schema_name == "e2e-v1":
@@ -486,13 +505,6 @@ def _validate_bundle(
     for item in loaded["claims-v1"]:
         if item["notice_id"] not in corpus_ids:
             raise DatasetError(f"claims case {item['id']} references unknown corpus ID")
-        evidence_ids = set(item["evidence_ids"])
-        for claim in item["claims"]:
-            citation_ids = set(claim["citation_ids"])
-            if not citation_ids.issubset(evidence_ids):
-                raise DatasetError(
-                    f"claims case {item['id']} cites evidence outside its evidence_ids"
-                )
     for item in loaded["e2e-v1"]:
         if not set(item["expected_notice_ids"]).issubset(corpus_ids):
             raise DatasetError(f"e2e case {item['id']} references unknown corpus ID")

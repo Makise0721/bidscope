@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from bidscope.clock import FixedClock
+from bidscope.clock import FixedClock, SystemClock
 from bidscope.evaluation.datasets import (
     PROJECT_ROOT,
     DatasetError,
@@ -44,9 +44,9 @@ MODEL_NAME = "fake-deterministic"
 MODEL_PROVIDER = "offline"
 PRICING_CNY_PER_MILLION = {"prompt": 0.0, "completion": 0.0}
 MEASUREMENT_MODE = {
-    "intent": "execution",
-    "retrieval": "execution",
-    "dedup": "execution",
+    "intent": "fixture_consistency",
+    "retrieval": "fixture_consistency",
+    "dedup": "fixture_consistency",
     "claims": "fixture_consistency",
     "e2e": "fixture_consistency",
     "latency": "fixture_consistency",
@@ -85,9 +85,12 @@ def _git_value(*args: str) -> str:
     return value or "unavailable"
 
 
+_CLOCK = SystemClock()
+
+
 def _utc_now() -> datetime:
-    """Return the current timezone-aware UTC time."""
-    return datetime.now(UTC)
+    """Return the current timezone-aware UTC time through the Clock boundary."""
+    return _CLOCK.now()
 
 
 def _intent_projection(value: Any) -> dict[str, Any]:

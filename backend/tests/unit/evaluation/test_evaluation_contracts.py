@@ -145,6 +145,44 @@ def test_validator_rejects_non_numeric_corpus_budget(tmp_path: Path) -> None:
     _assert_bundle_rejected(tmp_path, mutate)
 
 
+@pytest.mark.parametrize(
+    ("dataset_name", "record_path"),
+    [
+        ("corpus", ("budget_minor_units",)),
+        ("dedup-v1", ("left", "budget_minor_units")),
+    ],
+)
+def test_validator_rejects_fractional_budget_minor_units(
+    tmp_path: Path, dataset_name: str, record_path: tuple[str, ...]
+) -> None:
+    def mutate(datasets: dict[str, list[dict[str, Any]]]) -> None:
+        value: Any = datasets[dataset_name][0]
+        for field in record_path[:-1]:
+            value = value[field]
+        value[record_path[-1]] = 1.5
+
+    _assert_bundle_rejected(tmp_path, mutate)
+
+
+@pytest.mark.parametrize(
+    ("dataset_name", "record_path", "deadline"),
+    [
+        ("corpus", ("deadline",), "not-a-time"),
+        ("dedup-v1", ("left", "deadline"), "2026-01-01T00:00:00"),
+    ],
+)
+def test_validator_rejects_invalid_or_naive_deadlines(
+    tmp_path: Path, dataset_name: str, record_path: tuple[str, ...], deadline: str
+) -> None:
+    def mutate(datasets: dict[str, list[dict[str, Any]]]) -> None:
+        value: Any = datasets[dataset_name][0]
+        for field in record_path[:-1]:
+            value = value[field]
+        value[record_path[-1]] = deadline
+
+    _assert_bundle_rejected(tmp_path, mutate)
+
+
 def test_validator_normalizes_huge_json_integer_to_dataset_error(tmp_path: Path) -> None:
     datasets = copy.deepcopy(load_datasets())
     corpus_path, dataset_paths = _write_bundle(tmp_path, datasets)
@@ -324,7 +362,9 @@ def test_evaluation_result_discloses_metric_measurement_provenance(
     provenance = result.get("measurement_mode", result.get("metric_provenance"))
     assert isinstance(provenance, dict)
     assert required_metrics <= set(provenance)
-    assert all(value in {"execution", "fixture_consistency"} for value in provenance.values())
+    assert provenance["intent"] == "fixture_consistency"
+    assert provenance["retrieval"] == "fixture_consistency"
+    assert provenance["dedup"] == "fixture_consistency"
 
 
 def test_started_at_is_captured_before_evaluation_delay(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -401,6 +441,23 @@ def test_citation_correctness_is_scoped_to_each_case(monkeypatch: pytest.MonkeyP
     result = runner.run_deterministic()
 
     assert result["metrics"]["citation_correctness"] == pytest.approx(0.5)
+    assert result["metrics"]["citation_support_accuracy"] == pytest.approx(1.0)
+
+
+def test_runner_scores_prefixed_absent_claim_citation_as_incorrect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    datasets = copy.deepcopy(load_datasets())
+    claim_case = datasets["claims-v1"][0]
+    claim_case["claims"][0]["citation_ids"] = ["eval-evidence-absent"]
+    monkeypatch.setattr(runner, "load_datasets", lambda: datasets)
+    monkeypatch.setattr(runner, "dataset_hashes", lambda: {})
+    monkeypatch.setattr(runner, "_git_value", lambda *_args: "test-provenance")
+
+    result = runner.run_deterministic()
+
+    assert result["metrics"]["citation_correctness"] < 1.0
+    assert result["metrics"]["citation_support_accuracy"] < 1.0
 
 
 def test_ndcg_does_not_exceed_one_for_duplicate_ranked_ids() -> None:

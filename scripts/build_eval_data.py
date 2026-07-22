@@ -222,6 +222,7 @@ def build_claim_cases() -> list[dict[str, Any]]:
     for index in range(60):
         number = index + 1
         evidence_id = f"eval-evidence-{number:03d}"
+        citation_id = "eval-evidence-missing" if index == 59 else evidence_id
         records.append(
             {
                 "id": f"eval-claim-{number:03d}",
@@ -231,11 +232,11 @@ def build_claim_cases() -> list[dict[str, Any]]:
                 "claims": [
                     {
                         "text": f"合成证据{number}支持该项目字段。",
-                        "citation_ids": [evidence_id],
+                        "citation_ids": [citation_id],
                     }
                 ],
                 "evidence_ids": [evidence_id],
-                "expected_supported": True,
+                "expected_supported": index != 59,
             }
         )
     return records
