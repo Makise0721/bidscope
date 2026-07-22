@@ -161,7 +161,7 @@ def _read_jsonl(path: Path | Traversable) -> list[dict[str, Any]]:
             continue
         try:
             item = json.loads(line)
-        except json.JSONDecodeError as error:
+        except (ValueError, OverflowError) as error:
             raise DatasetError(f"invalid JSON in {path}:{line_number}: {error}") from error
         if not isinstance(item, dict):
             raise DatasetError(f"dataset record is not an object: {path}:{line_number}")
@@ -224,7 +224,11 @@ def _check_nested_synthetic(value: Any, path: Path | Traversable, index: int) ->
 def _is_finite_number(value: Any, *, nonnegative: bool = False) -> bool:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
-    if not math.isfinite(float(value)):
+    try:
+        finite = math.isfinite(float(value))
+    except (OverflowError, ValueError):
+        return False
+    if not finite:
         return False
     return not nonnegative or value >= 0
 

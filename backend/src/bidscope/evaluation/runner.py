@@ -44,6 +44,9 @@ MODEL_NAME = "fake-deterministic"
 MODEL_PROVIDER = "offline"
 PRICING_CNY_PER_MILLION = {"prompt": 0.0, "completion": 0.0}
 MEASUREMENT_MODE = {
+    "intent": "execution",
+    "retrieval": "execution",
+    "dedup": "execution",
     "claims": "fixture_consistency",
     "e2e": "fixture_consistency",
     "latency": "fixture_consistency",
@@ -80,6 +83,11 @@ def _git_value(*args: str) -> str:
     except (OSError, subprocess.CalledProcessError):
         return "unavailable"
     return value or "unavailable"
+
+
+def _utc_now() -> datetime:
+    """Return the current timezone-aware UTC time."""
+    return datetime.now(UTC)
 
 
 def _intent_projection(value: Any) -> dict[str, Any]:
@@ -195,6 +203,7 @@ def _hash_selected_sources(
 
 def run_deterministic(*, output: Path | None = None) -> dict[str, Any]:
     """Run deterministic evaluation without regenerating or mutating datasets."""
+    started_at = _utc_now()
     started = time.perf_counter()
     try:
         corpus_path, dataset_paths = _dataset_sources()
@@ -335,7 +344,7 @@ def run_deterministic(*, output: Path | None = None) -> dict[str, Any]:
         "schema_version": "evaluation-result-v1",
         "mode": "deterministic",
         "status": "completed",
-        "started_at": datetime.now(UTC).isoformat(),
+        "started_at": started_at.isoformat(),
         "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
         "git_commit": commit,
         "working_tree_dirty": dirty,
