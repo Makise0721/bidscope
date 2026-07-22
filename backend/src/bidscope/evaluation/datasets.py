@@ -16,6 +16,14 @@ from urllib.parse import urlparse
 class DatasetError(ValueError):
     """Raised when committed evaluation data is absent, invalid, or tampered."""
 
+    _MAX_MESSAGE_LENGTH = 512
+
+    def __init__(self, message: str) -> None:
+        bounded = str(message)
+        if len(bounded) > self._MAX_MESSAGE_LENGTH:
+            bounded = bounded[: self._MAX_MESSAGE_LENGTH - 3] + "..."
+        super().__init__(bounded)
+
 
 def _find_repository_root() -> Path | None:
     """Find a source checkout containing the un-packaged eval artifacts, if any."""
@@ -116,6 +124,25 @@ _DEDUP_SCALAR_FIELDS: dict[str, tuple[type[Any], ...]] = {
     "procurement_scope": (str, type(None)),
     "cancellation": (bool,),
 }
+_DEDUP_ALLOWED_FIELDS = set(_DEDUP_SCALAR_FIELDS) | {"claim_supporting_texts"}
+_INTENT_EXPECTED_FIELDS = {
+    "error",
+    "expanded_terms",
+    "max_budget_minor_units",
+    "message",
+    "min_budget_minor_units",
+    "published_from",
+    "published_to",
+    "regions",
+    "schedule_cron",
+    "schedule_timezone",
+    "topics",
+}
+_INTENT_METADATA_FIELDS = {"case_type", "clock"}
+_RETRIEVAL_FILTER_FIELDS = {"regions"}
+_DEDUP_METADATA_FIELDS = {"case_type"}
+_CLAIM_FIELDS = {"text", "citation_ids"}
+_E2E_USAGE_FIELDS = {"prompt", "completion"}
 
 
 def _read_jsonl(path: Path | Traversable) -> list[dict[str, Any]]:
@@ -206,11 +233,26 @@ def _string_list(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 
+def _check_allowed_fields(
+    value: dict[str, Any],
+    allowed: set[str],
+    path: Path | Traversable,
+    index: int,
+    location: str,
+) -> None:
+    unknown = sorted(str(field) for field in value if field not in allowed)
+    if unknown:
+        raise DatasetError(
+            f"{path}:{index} {location} has unknown fields: {', '.join(unknown)}"
+        )
+
+
 def _validate_dedup_notice(
     value: Any, path: Path | Traversable, index: int, side: str
 ) -> None:
     if not isinstance(value, dict):
         raise DatasetError(f"{path}:{index} {side} must be an object")
+    _check_allowed_fields(value, _DEDUP_ALLOWED_FIELDS, path, index, side)
     missing = sorted(set(_DEDUP_SCALAR_FIELDS) - value.keys())
     if missing:
         raise DatasetError(f"{path}:{index} {side} missing required fields: {', '.join(missing)}")
@@ -236,6 +278,7 @@ def _validate_record_shape(
     item: dict[str, Any], path: Path | Traversable, index: int, schema_name: str
 ) -> None:
     """Enforce the explicit, nested JSONL schema used by each dataset."""
+    _check_allowed_fields(item, REQUIRED_FIELDS[schema_name], path, index, schema_name)
     checks: dict[str, bool]
     if schema_name == "corpus":
         checks = {
@@ -255,12 +298,17 @@ def _validate_record_shape(
         }
     elif schema_name == "intent-v1":
         expected = item.get("expected")
+        metadata = item.get("metadata")
         checks = {
             "source_url": isinstance(item.get("source_url"), str),
             "request": isinstance(item.get("request"), str),
             "expected": isinstance(expected, dict),
-            "metadata": isinstance(item.get("metadata"), dict),
+            "metadata": isinstance(metadata, dict),
         }
+        if isinstance(expected, dict):
+            _check_allowed_fields(expected, _INTENT_EXPECTED_FIELDS, path, index, "expected")
+        if isinstance(metadata, dict):
+            _check_allowed_fields(metadata, _INTENT_METADATA_FIELDS, path, index, "metadata")
         if isinstance(expected, dict) and "error" not in expected:
             checks.update({
                 "expected.topics": _string_list(expected.get("topics")),
@@ -279,6 +327,7 @@ def _validate_record_shape(
             and item.get("expected_top_k", 0) > 0,
         }
         if isinstance(filters, dict):
+            _check_allowed_fields(filters, _RETRIEVAL_FILTER_FIELDS, path, index, "filters")
             checks["filters.regions"] = _string_list(filters.get("regions"))
     elif schema_name == "dedup-v1":
         _validate_dedup_notice(item.get("left"), path, index, "left")
@@ -289,6 +338,9 @@ def _validate_record_shape(
             in {"exact", "ambiguous", "distinct"},
             "metadata": isinstance(item.get("metadata"), dict),
         }
+        metadata = item.get("metadata")
+        if isinstance(metadata, dict):
+            _check_allowed_fields(metadata, _DEDUP_METADATA_FIELDS, path, index, "metadata")
     elif schema_name == "claims-v1":
         claims = item.get("claims")
         checks = {
@@ -299,6 +351,9 @@ def _validate_record_shape(
             "expected_supported": isinstance(item.get("expected_supported"), bool),
         }
         if isinstance(claims, list):
+            for claim in claims:
+                if isinstance(claim, dict):
+                    _check_allowed_fields(claim, _CLAIM_FIELDS, path, index, "claims item")
             checks["claims.items"] = all(
                 isinstance(claim, dict)
                 and isinstance(claim.get("text"), str)
@@ -319,6 +374,8 @@ def _validate_record_shape(
             and _is_nonnegative_int(usage.get("prompt"))
             and _is_nonnegative_int(usage.get("completion")),
         }
+        if isinstance(usage, dict):
+            _check_allowed_fields(usage, _E2E_USAGE_FIELDS, path, index, "usage")
     else:  # pragma: no cover - guarded by the constant schema map
         checks = {}
     invalid = sorted(field for field, valid in checks.items() if not valid)

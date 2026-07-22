@@ -10,10 +10,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from bidscope.evaluation import datasets as dataset_module
 from bidscope.evaluation import runner
 from bidscope.evaluation.datasets import (
+    _PACKAGE_CORPUS_PATH,
+    _PACKAGE_DATASET_PATHS,
     DATASET_PATHS,
     DatasetError,
+    _dataset_sources,
     dataset_hashes,
     load_datasets,
     validate_committed_datasets,
@@ -85,9 +89,71 @@ def test_builder_writes_jsonl_with_lf_bytes(tmp_path: Path) -> None:
     assert payload.endswith(b"\n")
 
 
+def test_loader_and_runner_hash_share_package_fallback_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_root = tmp_path / "source-checkout"
+    source_corpus = source_root / "eval" / "corpus" / "synthetic-notices-v1.jsonl"
+    source_dataset_paths = {
+        name: source_root / "eval" / "data" / f"{name}.jsonl" for name in DATASET_PATHS
+    }
+    source_corpus.parent.mkdir(parents=True)
+    source_corpus.write_bytes(_PACKAGE_CORPUS_PATH.read_bytes())
+    for name, path in source_dataset_paths.items():
+        if name != "intent-v1":
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(_PACKAGE_DATASET_PATHS[name].read_bytes())
+
+    monkeypatch.setattr(dataset_module, "PROJECT_ROOT", source_root)
+    monkeypatch.setattr(dataset_module, "CORPUS_PATH", source_corpus)
+    monkeypatch.setattr(dataset_module, "DATASET_PATHS", source_dataset_paths)
+
+    selected_corpus, selected_datasets = _dataset_sources()
+    assert selected_corpus == _PACKAGE_CORPUS_PATH
+    assert selected_datasets == _PACKAGE_DATASET_PATHS
+    loaded = load_datasets()
+    assert loaded["intent-v1"]
+
+    hash_calls: list[tuple[Any, dict[str, Any]]] = []
+
+    def hash_selected_sources(
+        *,
+        corpus_path: Any | None = None,
+        dataset_paths: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
+        if corpus_path is None or dataset_paths is None:
+            corpus_path = source_corpus
+            dataset_paths = source_dataset_paths
+        hash_calls.append((corpus_path, dataset_paths))
+        return dataset_hashes(corpus_path=corpus_path, dataset_paths=dataset_paths)
+
+    monkeypatch.setattr(runner, "dataset_hashes", hash_selected_sources)
+    result = runner.run_deterministic()
+
+    assert hash_calls == [(selected_corpus, selected_datasets)]
+    assert result["dataset_hashes"] == dataset_hashes(
+        corpus_path=selected_corpus,
+        dataset_paths=selected_datasets,
+    )
+
+
 def test_validator_rejects_non_numeric_corpus_budget(tmp_path: Path) -> None:
     def mutate(datasets: dict[str, list[dict[str, Any]]]) -> None:
         datasets["corpus"][0]["budget_minor_units"] = "not-a-number"
+
+    _assert_bundle_rejected(tmp_path, mutate)
+
+
+def test_validator_rejects_unknown_top_level_intent_field(tmp_path: Path) -> None:
+    def mutate(datasets: dict[str, list[dict[str, Any]]]) -> None:
+        datasets["intent-v1"][0]["unexpected"] = "reject me"
+
+    _assert_bundle_rejected(tmp_path, mutate)
+
+
+def test_validator_rejects_unknown_nested_intent_field(tmp_path: Path) -> None:
+    def mutate(datasets: dict[str, list[dict[str, Any]]]) -> None:
+        datasets["intent-v1"][0]["expected"]["unexpected"] = "reject me"
 
     _assert_bundle_rejected(tmp_path, mutate)
 

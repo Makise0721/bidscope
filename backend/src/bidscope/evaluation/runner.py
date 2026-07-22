@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import platform
@@ -16,6 +17,7 @@ from bidscope.clock import FixedClock
 from bidscope.evaluation.datasets import (
     PROJECT_ROOT,
     DatasetError,
+    _dataset_sources,
     dataset_hashes,
     load_datasets,
 )
@@ -176,12 +178,28 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def _hash_selected_sources(
+    corpus_path: Any, dataset_paths: dict[str, Any]
+) -> dict[str, str]:
+    """Hash the same selected resources as loading, while supporting test doubles."""
+    parameters = inspect.signature(dataset_hashes).parameters
+    accepts_keywords = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    accepts_sources = accepts_keywords or {"corpus_path", "dataset_paths"}.issubset(parameters)
+    if accepts_sources:
+        return dataset_hashes(corpus_path=corpus_path, dataset_paths=dataset_paths)
+    return dataset_hashes()
+
+
 def run_deterministic(*, output: Path | None = None) -> dict[str, Any]:
     """Run deterministic evaluation without regenerating or mutating datasets."""
     started = time.perf_counter()
     try:
+        corpus_path, dataset_paths = _dataset_sources()
         datasets = load_datasets()
-        hashes = dataset_hashes()
+        hashes = _hash_selected_sources(corpus_path, dataset_paths)
         intent_expected, intent_predicted, intent_usages = asyncio.run(
             _run_intent_cases(datasets["intent-v1"])
         )
