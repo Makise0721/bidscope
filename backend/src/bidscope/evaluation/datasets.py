@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 from collections import Counter
+from datetime import datetime
 from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path
@@ -125,19 +126,18 @@ _DEDUP_SCALAR_FIELDS: dict[str, tuple[type[Any], ...]] = {
     "cancellation": (bool,),
 }
 _DEDUP_ALLOWED_FIELDS = set(_DEDUP_SCALAR_FIELDS) | {"claim_supporting_texts"}
-_INTENT_EXPECTED_FIELDS = {
-    "error",
+_INTENT_NORMAL_EXPECTED_FIELDS = {
+    "topics",
     "expanded_terms",
-    "max_budget_minor_units",
-    "message",
-    "min_budget_minor_units",
+    "regions",
     "published_from",
     "published_to",
-    "regions",
+    "min_budget_minor_units",
+    "max_budget_minor_units",
     "schedule_cron",
     "schedule_timezone",
-    "topics",
 }
+_INTENT_ERROR_EXPECTED_FIELDS = {"error", "message"}
 _INTENT_METADATA_FIELDS = {"case_type", "clock"}
 _RETRIEVAL_FILTER_FIELDS = {"regions"}
 _DEDUP_METADATA_FIELDS = {"case_type"}
@@ -182,6 +182,10 @@ def _check_synthetic(item: dict[str, Any], path: Path | Traversable, index: int)
     source = item.get("source")
     if source != "synthetic_demo":
         raise DatasetError(f"{path}:{index} must use source=synthetic_demo")
+    if "external_id" in item:
+        external_id = item["external_id"]
+        if not isinstance(external_id, str) or not external_id.startswith("eval-"):
+            raise DatasetError(f"{path}:{index} external_id must start with eval-")
     for field in ("canonical_url", "source_url"):
         url = item.get(field)
         if url is None:
@@ -229,8 +233,26 @@ def _is_nonnegative_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
+def _is_nonnegative_int_or_none(value: Any) -> bool:
+    return value is None or _is_nonnegative_int(value)
+
+
 def _string_list(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _nullable_string(value: Any) -> bool:
+    return value is None or isinstance(value, str)
+
+
+def _timezone_aware_datetime(value: Any) -> bool:
+    if value is None or not isinstance(value, str):
+        return value is None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
 
 
 def _check_allowed_fields(
@@ -306,15 +328,40 @@ def _validate_record_shape(
             "metadata": isinstance(metadata, dict),
         }
         if isinstance(expected, dict):
-            _check_allowed_fields(expected, _INTENT_EXPECTED_FIELDS, path, index, "expected")
+            is_error = "error" in expected
+            expected_fields = (
+                _INTENT_ERROR_EXPECTED_FIELDS if is_error else _INTENT_NORMAL_EXPECTED_FIELDS
+            )
+            _check_allowed_fields(expected, expected_fields, path, index, "expected")
+            checks.update(
+                {
+                    "expected.error/message": is_error
+                    and isinstance(expected.get("error"), str)
+                    and isinstance(expected.get("message"), str)
+                    if is_error
+                    else True,
+                    "expected.normal_fields": is_error
+                    or (
+                        set(expected) == _INTENT_NORMAL_EXPECTED_FIELDS
+                        and _string_list(expected.get("topics"))
+                        and _string_list(expected.get("expanded_terms"))
+                        and _string_list(expected.get("regions"))
+                        and _timezone_aware_datetime(expected.get("published_from"))
+                        and _timezone_aware_datetime(expected.get("published_to"))
+                        and _is_nonnegative_int_or_none(expected.get("min_budget_minor_units"))
+                        and _is_nonnegative_int_or_none(expected.get("max_budget_minor_units"))
+                        and _nullable_string(expected.get("schedule_cron"))
+                        and _nullable_string(expected.get("schedule_timezone"))
+                    ),
+                    "expected.error_fields": not is_error
+                    or set(expected) == _INTENT_ERROR_EXPECTED_FIELDS,
+                }
+            )
         if isinstance(metadata, dict):
             _check_allowed_fields(metadata, _INTENT_METADATA_FIELDS, path, index, "metadata")
-        if isinstance(expected, dict) and "error" not in expected:
-            checks.update({
-                "expected.topics": _string_list(expected.get("topics")),
-                "expected.expanded_terms": _string_list(expected.get("expanded_terms")),
-                "expected.regions": _string_list(expected.get("regions")),
-            })
+            checks["metadata.fields"] = set(metadata) == _INTENT_METADATA_FIELDS and all(
+                isinstance(metadata.get(field), str) for field in _INTENT_METADATA_FIELDS
+            )
     elif schema_name == "retrieval-v1":
         filters = item.get("filters")
         checks = {
@@ -324,7 +371,7 @@ def _validate_record_shape(
             "relevant_ids": _string_list(item.get("relevant_ids")),
             "expected_top_k": isinstance(item.get("expected_top_k"), int)
             and not isinstance(item.get("expected_top_k"), bool)
-            and item.get("expected_top_k", 0) > 0,
+            and item.get("expected_top_k") == 10,
         }
         if isinstance(filters, dict):
             _check_allowed_fields(filters, _RETRIEVAL_FILTER_FIELDS, path, index, "filters")

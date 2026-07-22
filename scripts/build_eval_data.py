@@ -308,7 +308,7 @@ def build_all() -> dict[str, int]:
     _validate_generated(corpus, datasets)
     _write_jsonl(ROOT / "eval" / "corpus" / "synthetic-notices-v1.jsonl", corpus)
     for name, records in datasets.items():
-        _write_jsonl(DATASET_PATHS[name], records)
+        _write_jsonl(ROOT / "eval" / "data" / f"{name}.jsonl", records)
     _sync_package_resources()
     return {"corpus": len(corpus), **{name: len(records) for name, records in datasets.items()}}
 

@@ -158,6 +158,68 @@ def test_validator_rejects_unknown_nested_intent_field(tmp_path: Path) -> None:
     _assert_bundle_rejected(tmp_path, mutate)
 
 
+@pytest.mark.parametrize(
+    ("field", "malformed_value"),
+    [
+        ("error", {"type": "ValueError"}),
+        ("message", ["not-a-message"]),
+        ("published_from", {"date": "2026-07-17T00:00:00+00:00"}),
+        ("published_to", ["2026-07-18T00:00:00+00:00"]),
+        ("min_budget_minor_units", "not-a-budget"),
+        ("max_budget_minor_units", {"minor_units": 10_000}),
+        ("schedule_cron", {"expression": "0 9 * * 1"}),
+        ("schedule_timezone", ["Asia/Shanghai"]),
+    ],
+)
+def test_validator_rejects_malformed_intent_expected_scalar_fields(
+    tmp_path: Path, field: str, malformed_value: Any
+) -> None:
+    def mutate(datasets: dict[str, list[dict[str, Any]]]) -> None:
+        datasets["intent-v1"][0]["expected"][field] = malformed_value
+
+    _assert_bundle_rejected(tmp_path, mutate)
+
+
+@pytest.mark.parametrize(
+    ("field", "malformed_value"),
+    [("case_type", {"kind": "template"}), ("clock", ["2026-07-18T09:00:00+00:00"])],
+)
+def test_validator_rejects_malformed_intent_metadata_scalar_type(
+    tmp_path: Path, field: str, malformed_value: Any
+) -> None:
+    def mutate(datasets: dict[str, list[dict[str, Any]]]) -> None:
+        datasets["intent-v1"][0]["metadata"][field] = malformed_value
+
+    _assert_bundle_rejected(tmp_path, mutate)
+
+
+def test_validator_requires_retrieval_expected_top_k_of_ten(tmp_path: Path) -> None:
+    def mutate(datasets: dict[str, list[dict[str, Any]]]) -> None:
+        datasets["retrieval-v1"][0]["expected_top_k"] = 5
+
+    _assert_bundle_rejected(tmp_path, mutate)
+
+
+@pytest.mark.parametrize(
+    ("dataset_name", "record_path"),
+    [
+        ("corpus", ("external_id",)),
+        ("dedup-v1", ("left", "external_id")),
+        ("dedup-v1", ("right", "external_id")),
+    ],
+)
+def test_validator_requires_eval_prefix_for_external_ids(
+    tmp_path: Path, dataset_name: str, record_path: tuple[str, ...]
+) -> None:
+    def mutate(datasets: dict[str, list[dict[str, Any]]]) -> None:
+        value: Any = datasets[dataset_name][0]
+        for field in record_path[:-1]:
+            value = value[field]
+        value[record_path[-1]] = "official-001"
+
+    _assert_bundle_rejected(tmp_path, mutate)
+
+
 def test_validator_rejects_string_claim_citation_ids(tmp_path: Path) -> None:
     def mutate(datasets: dict[str, list[dict[str, Any]]]) -> None:
         datasets["claims-v1"][0]["claims"][0]["citation_ids"] = "eval-evidence-001"

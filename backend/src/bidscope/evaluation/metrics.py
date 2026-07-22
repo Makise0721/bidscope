@@ -92,18 +92,23 @@ def field_macro_f1(
     return scores
 
 
+def _unique_ranked(ranked: Sequence[str]) -> list[str]:
+    """Keep the first occurrence of each ranked ID for cutoff-based metrics."""
+    return list(dict.fromkeys(ranked))
+
+
 def recall_at_k(relevant: set[str], ranked: Sequence[str], *, k: int = 10) -> float:
     """Return the fraction of relevant IDs found in the first ``k`` results."""
     if not relevant or k <= 0:
         return 0.0
-    return len(relevant.intersection(ranked[:k])) / len(relevant)
+    return len(relevant.intersection(_unique_ranked(ranked)[:k])) / len(relevant)
 
 
 def ndcg_at_k(relevant: set[str], ranked: Sequence[str], *, k: int = 10) -> float:
     """Return binary-relevance normalized discounted cumulative gain."""
     if not relevant or k <= 0:
         return 0.0
-    unique_ranked = list(dict.fromkeys(ranked))
+    unique_ranked = _unique_ranked(ranked)
     dcg = sum(
         1.0 / math.log2(index + 2)
         for index, item_id in enumerate(unique_ranked[:k])

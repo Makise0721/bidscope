@@ -81,6 +81,18 @@ def test_ndcg_at_10_uses_binary_relevance_and_handles_empty_results() -> None:
     assert ndcg_at_k({"n-1"}, [], k=10) == 0.0
 
 
+def test_recall_and_ndcg_deduplicate_ranked_ids_before_cutoff() -> None:
+    relevant = {"a", "b"}
+    ranked = ["a", "a", "b"]
+
+    recall = recall_at_k(relevant, ranked, k=2)
+    ndcg = ndcg_at_k(relevant, ranked, k=2)
+
+    assert recall == pytest.approx(1.0)
+    assert ndcg == pytest.approx(1.0)
+    assert recall == ndcg
+
+
 def test_binary_classification_metrics_include_zero_positive_case() -> None:
     actual = [True, True, False, False]
     predicted = [True, False, True, False]
