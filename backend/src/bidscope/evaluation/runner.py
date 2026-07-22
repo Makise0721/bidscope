@@ -9,6 +9,7 @@ import os
 import platform
 import subprocess
 import time
+import warnings
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -189,6 +190,23 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def _run_intent_cases_sync(cases: list[dict[str, Any]]) -> tuple[
+    list[dict[str, Any]], list[dict[str, Any]], list[Any]
+]:
+    """Run intent cases without clearing an existing thread event loop."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        try:
+            previous_loop = asyncio.get_event_loop()
+        except RuntimeError:
+            previous_loop = None
+    try:
+        return asyncio.run(_run_intent_cases(cases))
+    finally:
+        if previous_loop is not None and not previous_loop.is_closed():
+            asyncio.set_event_loop(previous_loop)
+
+
 def _hash_selected_sources(
     corpus_path: Any, dataset_paths: dict[str, Any]
 ) -> dict[str, str]:
@@ -212,8 +230,8 @@ def run_deterministic(*, output: Path | None = None) -> dict[str, Any]:
         corpus_path, dataset_paths = _dataset_sources()
         datasets = load_datasets()
         hashes = _hash_selected_sources(corpus_path, dataset_paths)
-        intent_expected, intent_predicted, intent_usages = asyncio.run(
-            _run_intent_cases(datasets["intent-v1"])
+        intent_expected, intent_predicted, intent_usages = _run_intent_cases_sync(
+            datasets["intent-v1"]
         )
 
         valid_expected = [item for item in intent_expected if "error" not in item]
@@ -266,11 +284,12 @@ def run_deterministic(*, output: Path | None = None) -> dict[str, Any]:
 
         claims = [claim for case in datasets["claims-v1"] for claim in case["claims"]]
         coverage = citation_coverage(claims)
-        case_correctness = [
-            citation_correctness(case["claims"], set(case["evidence_ids"]))
+        claim_correctness = [
+            citation_correctness([claim], set(case["evidence_ids"]))
             for case in datasets["claims-v1"]
+            for claim in case["claims"]
         ]
-        correctness = _mean(case_correctness)
+        correctness = _mean(claim_correctness)
         support_accuracy = _mean(
             [
                 all(

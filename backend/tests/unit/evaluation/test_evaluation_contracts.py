@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import importlib.util
 from collections.abc import Callable
@@ -297,6 +296,32 @@ def test_validator_rejects_string_claim_citation_ids(tmp_path: Path) -> None:
     _assert_bundle_rejected(tmp_path, mutate)
 
 
+def test_validator_rejects_supported_claim_citing_unknown_evidence(
+    tmp_path: Path,
+) -> None:
+    def mutate(datasets: dict[str, list[dict[str, Any]]]) -> None:
+        claim_case = datasets["claims-v1"][0]
+        claim_case["expected_supported"] = True
+        claim_case["claims"][0]["citation_ids"] = ["eval-evidence-does-not-exist"]
+        assert claim_case["evidence_ids"] == ["eval-evidence-001"]
+
+    _assert_bundle_rejected(tmp_path, mutate)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [{}, {"case_type": ["bad"]}],
+    ids=["missing-case-type", "invalid-case-type-type"],
+)
+def test_validator_rejects_invalid_dedup_metadata(
+    tmp_path: Path, metadata: dict[str, Any]
+) -> None:
+    def mutate(datasets: dict[str, list[dict[str, Any]]]) -> None:
+        datasets["dedup-v1"][0]["metadata"] = metadata
+
+    _assert_bundle_rejected(tmp_path, mutate)
+
+
 def test_validator_rejects_list_dedup_content_hash(tmp_path: Path) -> None:
     def mutate(datasets: dict[str, list[dict[str, Any]]]) -> None:
         datasets["dedup-v1"][0]["left"]["content_hash"] = ["not-a-hash"]
@@ -390,7 +415,8 @@ def test_started_at_is_captured_before_evaluation_delay(monkeypatch: pytest.Monk
     assert result["started_at"] != after_delay.isoformat()
 
 
-def test_runner_does_not_count_stale_usage_after_failed_intent_parse() -> None:
+@pytest.mark.asyncio
+async def test_runner_does_not_count_stale_usage_after_failed_intent_parse() -> None:
     from bidscope.evaluation.runner import _run_intent_cases
 
     cases = [
@@ -406,7 +432,7 @@ def test_runner_does_not_count_stale_usage_after_failed_intent_parse() -> None:
         },
     ]
 
-    _, _, usages = asyncio.run(_run_intent_cases(cases))
+    _, _, usages = await _run_intent_cases(cases)
 
     assert len(usages) == 1
     assert usages[0].prompt_tokens == len(cases[0]["request"])

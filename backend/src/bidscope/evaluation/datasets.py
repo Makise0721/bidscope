@@ -411,14 +411,19 @@ def _validate_record_shape(
         metadata = item.get("metadata")
         if isinstance(metadata, dict):
             _check_allowed_fields(metadata, _DEDUP_METADATA_FIELDS, path, index, "metadata")
+            checks["metadata.fields"] = set(metadata) == _DEDUP_METADATA_FIELDS and isinstance(
+                metadata.get("case_type"), str
+            )
     elif schema_name == "claims-v1":
         claims = item.get("claims")
+        evidence_ids = item.get("evidence_ids")
+        expected_supported = item.get("expected_supported")
         checks = {
             "source_url": isinstance(item.get("source_url"), str),
             "notice_id": isinstance(item.get("notice_id"), str),
             "claims": isinstance(claims, list),
-            "evidence_ids": _eval_string_list(item.get("evidence_ids")),
-            "expected_supported": isinstance(item.get("expected_supported"), bool),
+            "evidence_ids": _eval_string_list(evidence_ids),
+            "expected_supported": isinstance(expected_supported, bool),
         }
         if isinstance(claims, list):
             for claim in claims:
@@ -430,6 +435,13 @@ def _validate_record_shape(
                 and _eval_string_list(claim.get("citation_ids"))
                 for claim in claims
             )
+            if checks["claims.items"] and checks["evidence_ids"] and isinstance(
+                expected_supported, bool
+            ):
+                evidence_id_set = set(evidence_ids) if isinstance(evidence_ids, list) else set()
+                checks["claims.references"] = not expected_supported or all(
+                    set(claim["citation_ids"]).issubset(evidence_id_set) for claim in claims
+                )
     elif schema_name == "e2e-v1":
         usage = item.get("usage")
         checks = {
