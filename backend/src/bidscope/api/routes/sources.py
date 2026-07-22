@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import sqlalchemy as sa
@@ -17,6 +17,9 @@ router = APIRouter(prefix="/api/sources", tags=["sources"])
 # A source older than this window is still usable for audit, but is surfaced as
 # stale so operators do not mistake it for current coverage.
 STALE_AFTER_DAYS = 7
+_MAX_WARNING_COUNT = 20
+_WARNING_TEXT_LIMIT = 100
+_DIAGNOSTIC_FIELDS = frozenset({"code", "message"})
 
 
 def _run_service(request: Request) -> RunService:
@@ -42,6 +45,23 @@ def _bundle_hash_prefix(bundle: SnapshotBundle) -> str | None:
     return None
 
 
+def _diagnostic_values(payload: Any) -> set[str]:
+    values: set[str] = set()
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if isinstance(key, str) and key.startswith("snapshot_"):
+                values.add(key[:_WARNING_TEXT_LIMIT])
+            if key in _DIAGNOSTIC_FIELDS and isinstance(value, str) and value:
+                values.add(value[:_WARNING_TEXT_LIMIT])
+            values.update(_diagnostic_values(value))
+    elif isinstance(payload, (list, tuple)):
+        for value in payload:
+            values.update(_diagnostic_values(value))
+    elif isinstance(payload, str) and payload.startswith("snapshot_"):
+        values.add(payload[:_WARNING_TEXT_LIMIT])
+    return values
+
+
 def _warnings(import_record: SnapshotImport | None) -> set[str]:
     if import_record is None:
         return {"snapshot_integrity_error"}
@@ -53,12 +73,7 @@ def _warnings(import_record: SnapshotImport | None) -> set[str]:
             else "snapshot_import_failed"
         )
     for payload in (import_record.warnings, import_record.error):
-        if not isinstance(payload, dict):
-            continue
-        values: list[Any] = list(payload.keys()) + list(payload.values())
-        for value in values:
-            if isinstance(value, str) and value.startswith("snapshot_"):
-                warnings.add(value)
+        warnings.update(_diagnostic_values(payload))
     return warnings
 
 
@@ -84,10 +99,9 @@ def _source_row(
     valid_bundles: list[SnapshotBundle] = []
     for bundle in bundles:
         import_record = imports_by_bundle.get(str(bundle.id))
+        warnings.update(_warnings(import_record))
         if import_record is not None and import_record.status == "success":
             valid_bundles.append(bundle)
-        else:
-            warnings.update(_warnings(import_record))
 
     latest = max(
         valid_bundles,
@@ -102,10 +116,13 @@ def _source_row(
     if latest is not None:
         retrieved_at = latest.retrieved_at
         reference_time = (clock or SystemClock()).now()
-        age_days = (
-            max(0, (reference_time - retrieved_at).days) if retrieved_at is not None else None
+        age_delta = reference_time - retrieved_at if retrieved_at is not None else None
+        age_days = max(0, age_delta.days) if age_delta is not None else None
+        status = (
+            "stale"
+            if age_delta is not None and age_delta > timedelta(days=STALE_AFTER_DAYS)
+            else "valid"
         )
-        status = "stale" if age_days is not None and age_days > STALE_AFTER_DAYS else "valid"
         if status == "stale":
             warnings.add("snapshot_stale")
         hash_prefix = _bundle_hash_prefix(latest)
@@ -126,7 +143,7 @@ def _source_row(
         "source": source,
         "status": status,
         "latest_valid_bundle": latest_dto,
-        "validation_warnings": sorted(warnings),
+        "validation_warnings": sorted(warnings)[:_MAX_WARNING_COUNT],
     }
 
 

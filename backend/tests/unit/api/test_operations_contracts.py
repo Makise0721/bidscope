@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -10,11 +10,12 @@ import pytest
 from bidscope.api.routes.evaluations import _evaluation_row
 from bidscope.api.routes.inbox import list_inbox_events
 from bidscope.api.routes.reports import _serialize_report
-from bidscope.api.routes.runs import list_runs
+from bidscope.api.routes.runs import CreateRunBody, list_runs
 from bidscope.api.routes.sources import _source_row
 from bidscope.api.routes.subscriptions import pause_subscription, resume_subscription
 from bidscope.clock import FixedClock
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 
 class _ScalarResult:
@@ -132,6 +133,36 @@ def test_source_row_status_uses_injected_clock_for_deterministic_result(
 
     assert row["status"] == expected_status
     assert row["latest_valid_bundle"]["age_days"] == expected_age_days
+
+
+def test_source_row_marks_bundle_stale_at_seven_days_and_twenty_three_hours() -> None:
+    retrieved_at = datetime(2026, 7, 10, tzinfo=UTC)
+    row = _source_row(
+        "ccgp",
+        [_bundle(retrieved_at)],
+        {"bundle-db-id": _successful_import()},
+        clock=FixedClock(retrieved_at + timedelta(days=7, hours=23)),
+    )
+
+    assert row["status"] == "stale"
+
+
+def test_source_row_includes_import_warning_code_in_validation_warnings() -> None:
+    retrieved_at = datetime(2026, 7, 18, tzinfo=UTC)
+    import_record = SimpleNamespace(
+        status="success",
+        warnings={"code": "parse_drift"},
+        error=None,
+    )
+
+    row = _source_row("ccgp", [_bundle(retrieved_at)], {"bundle-db-id": import_record})
+
+    assert "parse_drift" in row["validation_warnings"]
+
+
+def test_create_run_body_rejects_user_request_longer_than_4000_characters() -> None:
+    with pytest.raises(ValidationError):
+        CreateRunBody(user_request="x" * 4001)
 
 
 def test_source_row_exposes_provenance_metadata_for_display() -> None:

@@ -2,6 +2,7 @@ import { useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Download } from "lucide-react";
 import { getReport, docxUrl } from "../../api/client";
+import { isAllowedSourceUrl } from "../../api/sourceUrl";
 
 export function RunReport() {
   const { runId } = useParams<{ runId: string }>();
@@ -57,13 +58,12 @@ function OpportunityItem({ item }: { item: { title: string; source: string; url:
       {item.freshness_days !== undefined && (
         <p>Freshness: {item.freshness_days} day(s)</p>
       )}
-      {/* Synthetic URLs are shown as plain text, never as clickable links. */}
-      {isSynthetic ? (
-        <span className="plain-url">{item.url}</span>
-      ) : (
+      {isAllowedSourceUrl(item.source, item.url) ? (
         <a href={item.url} rel="noreferrer">
           {item.url}
         </a>
+      ) : (
+        <span className="plain-url">{item.url}</span>
       )}
     </div>
   );

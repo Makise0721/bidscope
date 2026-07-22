@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { http, HttpResponse } from "msw";
 import { App } from "../src/app/App";
-import { server } from "../src/test/mockServer";
+import { RUN_ID, server } from "../src/test/mockServer";
 
 function renderApp(route: string) {
   const queryClient = new QueryClient({
@@ -176,6 +176,34 @@ describe("BidScope operational views", () => {
     const syntheticUrl = screen.getByText("https://example.invalid/demo-001");
     expect(syntheticUrl.tagName).toBe("SPAN");
     expect(syntheticUrl).not.toHaveAttribute("href");
+  });
+
+  it.each([
+    ["synthetic URL", "https://example.invalid/demo-001"],
+    ["official lookalike URL", "https://www.ccgp.gov.cn.evil.test/foo"],
+  ])("renders a %s as plain text for ccgp report items", async (_label, url) => {
+    server.use(
+      http.get("/api/reports/:id", () =>
+        HttpResponse.json({
+          id: RUN_ID,
+          run_id: RUN_ID,
+          conditions: {},
+          items: [
+            {
+              title: "CCGP report item",
+              source: "ccgp",
+              url,
+            },
+          ],
+        }),
+      ),
+    );
+
+    renderApp(`/runs/${RUN_ID}`);
+
+    const reportUrl = await screen.findByText(url);
+    expect(reportUrl.tagName).toBe("SPAN");
+    expect(reportUrl).not.toHaveAttribute("href");
   });
 
   it("renders evaluation cards with measured values separate from targets", async () => {

@@ -35,7 +35,7 @@ def get_run_service(request: Request) -> RunService:
 
 
 class CreateRunBody(BaseModel):
-    user_request: str = Field(..., min_length=1)
+    user_request: str = Field(..., min_length=1, max_length=4000)
 
 
 class ConfirmBody(BaseModel):

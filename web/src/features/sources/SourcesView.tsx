@@ -1,12 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { getSources } from "../../api/client";
+import { isAllowedSourceUrl } from "../../api/sourceUrl";
 
 function displayLabel(value: string): string {
   return value.replaceAll("_", " ");
-}
-
-function isSyntheticUrl(source: string, url: string): boolean {
-  return source === "synthetic_demo" || url.startsWith("https://example.invalid/");
 }
 
 export function SourcesView() {
@@ -53,10 +50,10 @@ export function SourcesView() {
                         <span>Identity {source.latest_valid_bundle.file_identity ?? source.latest_valid_bundle.bundle_id}</span>
                         <span>{source.latest_valid_bundle.hash_prefix ?? "No hash"}</span>
                         {source.latest_valid_bundle.source_urls?.map((url) => (
-                          isSyntheticUrl(source.source, url) ? (
-                            <span className="plain-url" key={url}>{url}</span>
-                          ) : (
+                          isAllowedSourceUrl(source.source, url) ? (
                             <a href={url} key={url} rel="noreferrer">{url}</a>
+                          ) : (
+                            <span className="plain-url" key={url}>{url}</span>
                           )
                         ))}
                       </div>
