@@ -13,7 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from bidscope.clock import FixedClock
-from bidscope.evaluation.datasets import DatasetError, dataset_hashes, load_datasets
+from bidscope.evaluation.datasets import (
+    PROJECT_ROOT,
+    DatasetError,
+    dataset_hashes,
+    load_datasets,
+)
 from bidscope.evaluation.metrics import (
     binary_classification_metrics,
     citation_correctness,
@@ -21,6 +26,7 @@ from bidscope.evaluation.metrics import (
     cny_cost,
     field_exact_match,
     field_macro_f1,
+    multiclass_classification_metrics,
     ndcg_at_k,
     percentile_latency,
     recall_at_k,
@@ -54,7 +60,11 @@ class EvaluationExecutionError(RuntimeError):
 
 def _git_value(*args: str) -> str:
     try:
-        return subprocess.check_output(["git", *args], text=True, stderr=subprocess.DEVNULL).strip()
+        return subprocess.check_output(
+            ["git", "-C", str(PROJECT_ROOT), *args],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
     except (OSError, subprocess.CalledProcessError) as error:
         raise EvaluationExecutionError("unable to capture git provenance") from error
 
@@ -81,6 +91,8 @@ async def _run_intent_cases(
     predicted: list[dict[str, Any]] = []
     usages: list[Any] = []
     for case in cases:
+        # A failed invocation must not inherit the previous successful receipt.
+        model._last_usage = None
         expected_value = case["expected"]
         if "error" in expected_value:
             expected.append({"error": expected_value["error"]})
@@ -99,8 +111,8 @@ async def _run_intent_cases(
             except ValueError as error:  # pragma: no cover - dataset/model contract violation
                 raise EvaluationExecutionError(f"intent case failed: {case['id']}") from error
             predicted.append(_intent_projection(value))
-        if model.last_usage is not None:
-            usages.append(model.last_usage)
+            if model.last_usage is not None:
+                usages.append(model.last_usage)
     return expected, predicted, usages
 
 
@@ -171,13 +183,16 @@ def run_deterministic(*, output: Path | None = None) -> dict[str, Any]:
         ]
         exact = field_exact_match(valid_expected, valid_predicted)
         macro = field_macro_f1(valid_expected, valid_predicted)
+        error_cases = [expected for expected in intent_expected if "error" in expected]
         intent_error_accuracy = (
             sum(
                 expected.get("error") == predicted.get("error")
                 for expected, predicted in zip(intent_expected, intent_predicted, strict=True)
                 if "error" in expected
             )
-            / sum("error" in expected for expected in intent_expected)
+            / len(error_cases)
+            if error_cases
+            else 0.0
         )
 
         corpus = datasets["corpus"]
@@ -186,27 +201,46 @@ def run_deterministic(*, output: Path | None = None) -> dict[str, Any]:
         for case in datasets["retrieval-v1"]:
             ranked = _rank_retrieval(case["query"], case["filters"].get("regions", []), corpus)
             relevant = set(case["relevant_ids"])
-            retrieval_recalls.append(recall_at_k(relevant, ranked, k=10))
-            retrieval_ndcgs.append(ndcg_at_k(relevant, ranked, k=10))
+            top_k = case["expected_top_k"]
+            retrieval_recalls.append(recall_at_k(relevant, ranked, k=top_k))
+            retrieval_ndcgs.append(ndcg_at_k(relevant, ranked, k=top_k))
 
         dedup_actual: list[bool] = []
         dedup_predicted: list[bool] = []
+        dedup_labels_actual: list[str] = []
+        dedup_labels_predicted: list[str] = []
         for case in datasets["dedup-v1"]:
             decision = classify_duplicate(
                 _notice_view(case["left"]), _notice_view(case["right"])
             ).decision
-            dedup_actual.append(case["expected_decision"] == "exact")
+            expected_decision = case["expected_decision"]
+            dedup_labels_actual.append(expected_decision)
+            dedup_labels_predicted.append(decision)
+            dedup_actual.append(expected_decision == "exact")
             dedup_predicted.append(decision == "exact")
         dedup = binary_classification_metrics(dedup_actual, dedup_predicted)
+        dedup_multiclass = multiclass_classification_metrics(
+            dedup_labels_actual, dedup_labels_predicted
+        )
 
         claims = [claim for case in datasets["claims-v1"] for claim in case["claims"]]
-        evidence_ids = {
-            evidence_id
-            for case in datasets["claims-v1"]
-            for evidence_id in case["evidence_ids"]
-        }
         coverage = citation_coverage(claims)
-        correctness = citation_correctness(claims, evidence_ids)
+        case_correctness = [
+            citation_correctness(case["claims"], set(case["evidence_ids"]))
+            for case in datasets["claims-v1"]
+        ]
+        correctness = _mean(case_correctness)
+        support_accuracy = _mean(
+            [
+                all(
+                    bool(claim.get("citation_ids"))
+                    and set(claim.get("citation_ids", ())).issubset(set(case["evidence_ids"]))
+                    for claim in case["claims"]
+                )
+                == case["expected_supported"]
+                for case in datasets["claims-v1"]
+            ]
+        )
 
         scenarios = datasets["e2e-v1"]
         success = task_success_rate(scenarios)
@@ -235,8 +269,13 @@ def run_deterministic(*, output: Path | None = None) -> dict[str, Any]:
             "dedup_precision": dedup["precision"],
             "dedup_recall": dedup["recall"],
             "dedup_f1": dedup["f1"],
+            "dedup_label_accuracy": dedup_multiclass["accuracy"],
+            "dedup_macro_precision": dedup_multiclass["macro"]["precision"],
+            "dedup_macro_recall": dedup_multiclass["macro"]["recall"],
+            "dedup_macro_f1": dedup_multiclass["macro"]["f1"],
             "citation_coverage": coverage,
             "citation_correctness": correctness,
+            "citation_support_accuracy": support_accuracy,
             "task_success_rate": success,
             "latency_p50_ms": latency["p50"],
             "latency_p95_ms": latency["p95"],
@@ -300,11 +339,10 @@ def run_deterministic(*, output: Path | None = None) -> dict[str, Any]:
         "target_pass": all(item["passed"] for item in target_results.values()),
     }
     if output is not None:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(
-            json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        output_path = output if output.is_absolute() else PROJECT_ROOT / output
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        output_path.write_bytes(payload.encode("utf-8"))
     return result
 
 

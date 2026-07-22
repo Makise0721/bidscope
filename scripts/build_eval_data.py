@@ -20,7 +20,10 @@ if str(ROOT / "backend" / "src") not in sys.path:
 
 from bidscope.clock import FixedClock  # noqa: E402
 from bidscope.domain.intents import SearchIntent  # noqa: E402
-from bidscope.evaluation.datasets import DATASET_PATHS, MIN_COUNTS  # noqa: E402
+from bidscope.evaluation.datasets import (  # noqa: E402
+    DATASET_PATHS,
+    validate_generated_bundle,
+)
 from bidscope.llm.fake import FakeIntentModel  # noqa: E402
 from bidscope.retrieval.deduplication import DuplicateDecision  # noqa: E402
 
@@ -262,40 +265,15 @@ def build_e2e_cases(corpus: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _validate_generated(
     corpus: list[dict[str, Any]], datasets: dict[str, list[dict[str, Any]]]
 ) -> None:
-    all_ids: list[str] = [record["id"] for record in corpus]
-    all_ids.extend(record["id"] for records in datasets.values() for record in records)
-    if len(all_ids) != len(set(all_ids)):
-        raise ValueError("generated IDs are not globally unique")
-    if any(not record_id.startswith("eval-") for record_id in all_ids):
-        raise ValueError("generated IDs must use eval-* namespace")
-    for record in corpus:
-        if record["source"] != "synthetic_demo" or not record["canonical_url"].startswith(
-            "https://example.invalid/"
-        ):
-            raise ValueError("corpus provenance is outside the synthetic boundary")
-    for name, records in datasets.items():
-        minimum = MIN_COUNTS[name]
-        if len(records) < minimum:
-            raise ValueError(f"{name} has {len(records)} records; minimum is {minimum}")
-        for record in records:
-            if record["source"] != "synthetic_demo" or not record["source_url"].startswith(
-                "https://example.invalid/"
-            ):
-                raise ValueError(f"{name} contains a non-synthetic record")
-    for record in datasets["retrieval-v1"]:
-        corpus_ids = {item["id"] for item in corpus}
-        if not set(record["relevant_ids"]).issubset(corpus_ids):
-            raise ValueError(f"{record['id']} references an unknown notice")
+    validate_generated_bundle(corpus, datasets)
 
 
 def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "".join(
-            json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n" for record in records
-        ),
-        encoding="utf-8",
+    payload = "".join(
+        json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n" for record in records
     )
+    path.write_bytes(payload.encode("utf-8"))
 
 
 def build_all() -> dict[str, int]:
