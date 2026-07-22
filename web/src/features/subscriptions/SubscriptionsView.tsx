@@ -24,6 +24,9 @@ export function SubscriptionsView() {
         </div>
       </div>
 
+      {statusMutation.isError && (
+        <p className="status status-error">Unable to update subscription: {statusMutation.error.message}</p>
+      )}
       <div className="operations-grid">
         <section className="operations-section" aria-labelledby="schedules-heading">
           <h2 id="schedules-heading">Schedules</h2>
@@ -65,6 +68,7 @@ export function SubscriptionsView() {
                 <span className="inbox-dot" aria-hidden="true" />
                 <div>
                   <strong>{event.title ?? event.event_type}</strong>
+                  {event.message && <span>{event.message}</span>}
                   <span>{event.read ? "Read" : "Unread"}</span>
                 </div>
               </li>

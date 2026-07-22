@@ -24,6 +24,7 @@ from bidscope.api.routes import (
     subscriptions,
     test_controls,
 )
+from bidscope.clock import SystemClock
 from bidscope.config import Settings, get_settings
 
 
@@ -31,7 +32,9 @@ from bidscope.config import Settings, get_settings
 async def lifespan(app: FastAPI) -> Any:
     """Initialize shared resources on startup and tear them down on shutdown."""
     settings: Settings = app.state.settings
-    service, engine = create_run_service(settings)
+    clock = SystemClock()
+    service, engine = create_run_service(settings, clock=clock)
+    app.state.clock = clock
     app.state.run_service = service
     app.state.engine = engine
     app.state.fail_next_node = False

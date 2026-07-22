@@ -39,7 +39,13 @@ export function SourcesView() {
                       <div className="provenance-detail">
                         <strong>{displayLabel(source.latest_valid_bundle.capture_kind)}</strong>
                         <span>{source.latest_valid_bundle.parser_version}</span>
+                        <span>Retrieved {source.latest_valid_bundle.retrieved_at ?? "Unknown"}</span>
+                        <span>Age {source.latest_valid_bundle.age_days ?? "Unknown"} day(s)</span>
+                        <span>Identity {source.latest_valid_bundle.file_identity ?? source.latest_valid_bundle.bundle_id}</span>
                         <span>{source.latest_valid_bundle.hash_prefix ?? "No hash"}</span>
+                        {source.latest_valid_bundle.source_urls?.map((url) => (
+                          <a href={url} key={url} rel="noreferrer">{url}</a>
+                        ))}
                       </div>
                     ) : <span className="muted">None</span>}
                   </td>

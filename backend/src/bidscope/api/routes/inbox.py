@@ -13,6 +13,13 @@ from bidscope.persistence.models import InboxEvent
 router = APIRouter(tags=["inbox"])
 
 
+def _message_preview(value: str, max_length: int = 240) -> str:
+    """Keep inbox responses useful without returning unbounded messages."""
+    if len(value) <= max_length:
+        return value
+    return f"{value[: max_length - 3]}..."
+
+
 def _run_service(request: Request) -> RunService:
     return cast(RunService, request.app.state.run_service)
 
@@ -36,6 +43,7 @@ async def list_inbox_events(
                 "id": row.id,
                 "event_type": row.event_type,
                 "title": row.title,
+                "message": _message_preview(row.message),
                 "read": row.read,
             }
             for row in rows

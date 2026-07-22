@@ -16,6 +16,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session, sessionmaker
 
+from bidscope.clock import Clock, SystemClock
 from bidscope.config import Settings
 from bidscope.db import create_engine_and_session
 from bidscope.delivery.objects import LocalObjectStore, ObjectStore
@@ -74,6 +75,7 @@ def build_demo_graph(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
     sync_session_factory: sessionmaker[Session] | None = None,
+    clock: Clock | None = None,
 ) -> Any:
     """Compile the demo query workflow: fake model + hash embeddings + InMemorySaver."""
     searcher = HybridSearcher(
@@ -87,19 +89,10 @@ def build_demo_graph(
         duplicate_model=FakeDuplicateModel(),
         report_model=FakeReportModel(),
         searcher=searcher,
-        clock=_DemoClock(),
+        clock=clock or SystemClock(),
         load_notice_views=lambda ids: _load_notice_views(notice_factory, ids),
     )
     return build_graph(deps, checkpointer=InMemorySaver())
-
-
-class _DemoClock:
-    """A clock returning timezone-aware now(); used only by the demo graph."""
-
-    def now(self) -> Any:  # noqa: ANN401 - returns datetime for the graph's typing
-        from datetime import UTC, datetime
-
-        return datetime.now(UTC)
 
 
 @dataclass
@@ -124,11 +117,13 @@ class RunService:
         graph: Any,
         object_store: ObjectStore,
         settings: Settings,
+        clock: Clock | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.graph = graph
         self.object_store = object_store
         self.settings = settings
+        self.clock = clock or SystemClock()
 
     async def create_run(self, user_request: str) -> str:
         """Persist a ``pending`` run and return its id."""
@@ -193,10 +188,11 @@ class _RunError(Exception):
         self.detail = detail
 
 
-def create_run_service(settings: Settings) -> tuple[RunService, Any]:
+def create_run_service(settings: Settings, clock: Clock | None = None) -> tuple[RunService, Any]:
     """Build the engine, session factory, demo graph, object store and service."""
     engine, session_factory = create_engine_and_session()
-    graph = build_demo_graph(session_factory, settings)
+    resolved_clock = clock or SystemClock()
+    graph = build_demo_graph(session_factory, settings, clock=resolved_clock)
     object_store = LocalObjectStore(root=settings.object_store_root)
-    service = RunService(session_factory, graph, object_store, settings)
+    service = RunService(session_factory, graph, object_store, settings, clock=resolved_clock)
     return service, engine

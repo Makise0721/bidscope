@@ -98,7 +98,8 @@ export function docxUrl(id: string): string {
 export interface RunRecord {
   id: string;
   status: string;
-  user_request: string;
+  request_preview?: string;
+  user_request?: string;
   retryable?: boolean;
 }
 
@@ -114,12 +115,15 @@ export interface InboxEventRecord {
   id: string;
   event_type: string;
   title: string | null;
+  message?: string;
   read: boolean;
 }
 
 export interface SourceBundleRecord {
   bundle_id: string;
+  file_identity?: string;
   capture_kind: string;
+  source_urls?: string[];
   retrieved_at: string | null;
   hash_prefix: string | null;
   parser_version: string;
@@ -142,6 +146,7 @@ export interface EvaluationRecord {
   id: string;
   dataset_version: string;
   model: string;
+  status?: string;
   environment: string | null;
   pricing_snapshot_date: string | null;
   metrics: Record<string, EvaluationMetric>;

@@ -26,11 +26,14 @@ export function EvaluationView() {
                 <h2>{evaluation.dataset_version}</h2>
                 <p>{evaluation.model}</p>
               </div>
-              <span className="status-label">{evaluation.environment ?? "Unknown environment"}</span>
+              <span className={`status-label status-${evaluation.status ?? "unknown"}`}>
+                {evaluation.status ?? evaluation.environment ?? "Unknown status"}
+              </span>
             </div>
-            {evaluation.pricing_snapshot_date && (
-              <p className="muted">Pricing snapshot {evaluation.pricing_snapshot_date}</p>
-            )}
+            <p className="muted">
+              Environment {evaluation.environment ?? "Unknown"}
+              {evaluation.pricing_snapshot_date ? ` · Pricing snapshot ${evaluation.pricing_snapshot_date}` : ""}
+            </p>
             <div className="metric-grid">
               {Object.entries(evaluation.metrics).map(([name, metric]) => (
                 <div className="metric-card" key={name}>

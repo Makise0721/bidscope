@@ -9,6 +9,7 @@ import sqlalchemy as sa
 from fastapi import APIRouter, Depends, Query, Request
 
 from bidscope.api.dependencies import RunService
+from bidscope.clock import Clock, SystemClock
 from bidscope.persistence.models import SnapshotBundle, SnapshotImport
 
 router = APIRouter(prefix="/api/sources", tags=["sources"])
@@ -77,6 +78,7 @@ def _source_row(
     source: str,
     bundles: list[SnapshotBundle],
     imports_by_bundle: dict[str, SnapshotImport],
+    clock: Clock | None = None,
 ) -> dict[str, Any]:
     warnings: set[str] = set()
     valid_bundles: list[SnapshotBundle] = []
@@ -99,17 +101,21 @@ def _source_row(
     status = "invalid"
     if latest is not None:
         retrieved_at = latest.retrieved_at
+        reference_time = (clock or SystemClock()).now()
         age_days = (
-            max(0, (datetime.now(UTC) - retrieved_at).days) if retrieved_at is not None else None
+            max(0, (reference_time - retrieved_at).days) if retrieved_at is not None else None
         )
         status = "stale" if age_days is not None and age_days > STALE_AFTER_DAYS else "valid"
         if status == "stale":
             warnings.add("snapshot_stale")
+        hash_prefix = _bundle_hash_prefix(latest)
         latest_dto = {
             "bundle_id": latest.bundle_id,
+            "file_identity": latest.bundle_id,
             "capture_kind": latest.capture_kind,
+            "source_urls": list(latest.source_urls or [])[:20],
             "retrieved_at": _iso(retrieved_at),
-            "hash_prefix": _bundle_hash_prefix(latest),
+            "hash_prefix": hash_prefix,
             "parser_version": latest.parser_version,
             "age_days": age_days,
         }
@@ -131,38 +137,43 @@ async def list_sources(
 ) -> dict[str, list[dict[str, Any]]]:
     """List source health and provenance metadata, never payload content."""
     async with service.session_factory() as session:
-        result = await session.execute(
-            sa.select(SnapshotBundle)
-            .order_by(
-                SnapshotBundle.source,
-                SnapshotBundle.retrieved_at.desc().nullslast(),
-                SnapshotBundle.bundle_id,
-            )
-            .limit(limit * 3)
+        source_result = await session.execute(
+            sa.select(SnapshotBundle.source).distinct().order_by(SnapshotBundle.source)
         )
-        bundles = list(result.scalars())
-        bundle_ids = [bundle.id for bundle in bundles]
+        source_names = {
+            "ccgp",
+            "ggzy",
+            "synthetic_demo",
+            *(str(source) for source in source_result.scalars()),
+        }
+        source_names = set(sorted(source_names)[:limit])
+        grouped: dict[str, list[SnapshotBundle]] = {}
         imports: list[SnapshotImport] = []
-        if bundle_ids:
-            import_result = await session.execute(
-                sa.select(SnapshotImport)
-                .where(SnapshotImport.snapshot_bundle_id.in_(bundle_ids))
-                .order_by(SnapshotImport.started_at.desc(), SnapshotImport.id)
+        for source in sorted(source_names):
+            bundle_result = await session.execute(
+                sa.select(SnapshotBundle)
+                .where(SnapshotBundle.source == source)
+                .order_by(
+                    SnapshotBundle.retrieved_at.desc().nullslast(),
+                    SnapshotBundle.bundle_id,
+                )
+                .limit(100)
             )
-            imports = list(import_result.scalars())
+            source_bundles = list(bundle_result.scalars())
+            grouped[source] = source_bundles
+            bundle_ids = [bundle.id for bundle in source_bundles]
+            if bundle_ids:
+                import_result = await session.execute(
+                    sa.select(SnapshotImport)
+                    .where(SnapshotImport.snapshot_bundle_id.in_(bundle_ids))
+                    .order_by(SnapshotImport.started_at.desc(), SnapshotImport.id)
+                )
+                imports.extend(import_result.scalars())
 
     latest_imports = _latest_imports(imports)
-    grouped: dict[str, list[SnapshotBundle]] = {}
-    for bundle in bundles:
-        grouped.setdefault(bundle.source, []).append(bundle)
-
-    source_names = {"ccgp", "ggzy", "synthetic_demo"} | set(grouped)
+    import_by_bundle = {str(bundle_id): record for bundle_id, record in latest_imports.items()}
     items = [
-        _source_row(
-            source,
-            grouped.get(source, []),
-            {str(bundle_id): record for bundle_id, record in latest_imports.items()},
-        )
+        _source_row(source, grouped[source], import_by_bundle, clock=service.clock)
         for source in sorted(source_names)
     ]
-    return {"items": items[:limit]}
+    return {"items": items}

@@ -42,6 +42,13 @@ class ConfirmBody(BaseModel):
     action: str = "approve"
 
 
+def _request_preview(value: str, max_length: int = 240) -> str:
+    """Return a bounded list-view preview without exposing the full request."""
+    if len(value) <= max_length:
+        return value
+    return f"{value[: max_length - 3]}..."
+
+
 @router.post("", status_code=201)
 async def create_run(
     body: CreateRunBody,
@@ -84,7 +91,7 @@ async def list_runs(
             {
                 "id": row.id,
                 "status": row.status,
-                "user_request": row.user_request,
+                "request_preview": _request_preview(row.user_request),
                 "retryable": row.status == "retryable",
             }
             for row in rows

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { getRuns, retryRun } from "../../api/client";
 
@@ -6,8 +7,8 @@ export function RunHistory() {
   const [status, setStatus] = useState("");
   const queryClient = useQueryClient();
   const runs = useQuery({
-    queryKey: ["runs"],
-    queryFn: () => getRuns(),
+    queryKey: ["runs", status],
+    queryFn: () => getRuns(status || undefined),
   });
   const visibleRuns = runs.data?.filter((run) => !status || run.status === status) ?? [];
   const retry = useMutation({
@@ -35,6 +36,7 @@ export function RunHistory() {
 
       {runs.isLoading && <p className="status">Loading runs...</p>}
       {runs.isError && <p className="status status-error">Unable to load runs.</p>}
+      {retry.isError && <p className="status status-error">Unable to retry run: {retry.error.message}</p>}
       {runs.data && (
         <div className="table-wrap">
           <table className="operations-table">
@@ -48,7 +50,7 @@ export function RunHistory() {
             <tbody>
               {visibleRuns.map((run) => (
                 <tr key={run.id}>
-                  <td>{run.user_request}</td>
+                  <td><Link to={`/runs/${run.id}`}>{run.request_preview ?? run.user_request ?? "Untitled run"}</Link></td>
                   <td><span className={`status-label status-${run.status}`}>{run.status}</span></td>
                   <td className="table-action">
                     <button

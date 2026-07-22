@@ -84,6 +84,8 @@ async def pause_subscription(
         sub = await session.get(Subscription, subscription_id)
         if sub is None:
             raise HTTPException(status_code=404, detail="subscription not found")
+        if sub.status != "active":
+            raise HTTPException(status_code=409, detail="subscription is not active")
         sub.status = "paused"
         await session.commit()
     return {"id": sub.id, "status": sub.status}
@@ -99,6 +101,8 @@ async def resume_subscription(
         sub = await session.get(Subscription, subscription_id)
         if sub is None:
             raise HTTPException(status_code=404, detail="subscription not found")
+        if sub.status != "paused":
+            raise HTTPException(status_code=409, detail="subscription is not paused")
         sub.status = "active"
         await session.commit()
     return {"id": sub.id, "status": sub.status}

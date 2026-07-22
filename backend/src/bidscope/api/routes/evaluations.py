@@ -49,6 +49,7 @@ def _evaluation_row(row: EvalRun) -> dict[str, Any]:
         "id": row.id,
         "dataset_version": row.dataset_version,
         "model": row.model,
+        "status": row.status,
         "environment": row.environment,
         "pricing_snapshot_date": _pricing_date(row.pricing_snapshot),
         "metrics": {
