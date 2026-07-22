@@ -5,6 +5,10 @@ function displayLabel(value: string): string {
   return value.replaceAll("_", " ");
 }
 
+function isSyntheticUrl(source: string, url: string): boolean {
+  return source === "synthetic_demo" || url.startsWith("https://example.invalid/");
+}
+
 export function SourcesView() {
   const sources = useQuery({ queryKey: ["sources"], queryFn: getSources });
 
@@ -32,7 +36,12 @@ export function SourcesView() {
             <tbody>
               {sources.data.map((source) => (
                 <tr key={source.source}>
-                  <th scope="row">{source.source}</th>
+                  <th scope="row">
+                    {source.source}
+                    {source.source === "synthetic_demo" && (
+                      <span className="synthetic-label">合成演示数据 (synthetic demo)</span>
+                    )}
+                  </th>
                   <td><span className={`status-label status-${source.status}`}>{source.status === "stale" ? "outdated" : source.status}</span></td>
                   <td>
                     {source.latest_valid_bundle ? (
@@ -44,7 +53,11 @@ export function SourcesView() {
                         <span>Identity {source.latest_valid_bundle.file_identity ?? source.latest_valid_bundle.bundle_id}</span>
                         <span>{source.latest_valid_bundle.hash_prefix ?? "No hash"}</span>
                         {source.latest_valid_bundle.source_urls?.map((url) => (
-                          <a href={url} key={url} rel="noreferrer">{url}</a>
+                          isSyntheticUrl(source.source, url) ? (
+                            <span className="plain-url" key={url}>{url}</span>
+                          ) : (
+                            <a href={url} key={url} rel="noreferrer">{url}</a>
+                          )
                         ))}
                       </div>
                     ) : <span className="muted">None</span>}

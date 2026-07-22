@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from bidscope.api.routes.evaluations import _evaluation_row
 from bidscope.api.routes.inbox import list_inbox_events
+from bidscope.api.routes.reports import _serialize_report
 from bidscope.api.routes.runs import list_runs
 from bidscope.api.routes.sources import _source_row
 from bidscope.api.routes.subscriptions import pause_subscription, resume_subscription
@@ -56,6 +57,36 @@ def _bundle(retrieved_at: datetime) -> SimpleNamespace:
 
 def _successful_import() -> SimpleNamespace:
     return SimpleNamespace(status="success", warnings={}, error=None)
+
+
+def test_report_serializer_includes_items_for_run_history_reports() -> None:
+    report = SimpleNamespace(
+        id="report-1",
+        run_id="run-1",
+        export_key="reports/run-1",
+        conditions={"region": "四川"},
+        freshness_window="7d",
+        completeness_warning=None,
+        generated_at=datetime(2026, 7, 18, tzinfo=UTC),
+        items=[
+            SimpleNamespace(
+                title="四川智算中心服务器采购招标公告",
+                source="synthetic_demo",
+                url="https://example.invalid/demo-001",
+            ),
+        ],
+    )
+
+    serialized = _serialize_report(report)  # type: ignore[arg-type]
+
+    assert isinstance(serialized["items"], list)
+    assert serialized["items"] == [
+        {
+            "title": "四川智算中心服务器采购招标公告",
+            "source": "synthetic_demo",
+            "url": "https://example.invalid/demo-001",
+        },
+    ]
 
 
 @pytest.mark.asyncio

@@ -147,7 +147,14 @@ describe("BidScope operational views", () => {
             {
               source: "synthetic_demo",
               status: "invalid",
-              latest_valid_bundle: null,
+              latest_valid_bundle: {
+                bundle_id: "synthetic-demo-20260718",
+                capture_kind: "synthetic_fixture",
+                retrieved_at: "2026-07-18T00:00:00+00:00",
+                hash_prefix: "demo1234",
+                parser_version: "synthetic-demo-v1",
+                source_urls: ["https://example.invalid/demo-001"],
+              },
               validation_warnings: ["snapshot_integrity_error"],
             },
           ],
@@ -163,8 +170,12 @@ describe("BidScope operational views", () => {
     expect(screen.getByText("abc12345")).toBeInTheDocument();
     expect(screen.getByText(/stale/i)).toBeInTheDocument();
     expect(screen.getByText(/snapshot_stale/i)).toBeInTheDocument();
-    expect(screen.getByText(/invalid/i)).toBeInTheDocument();
+    expect(screen.getByText("invalid", { exact: true })).toBeInTheDocument();
     expect(screen.getByText(/snapshot_integrity_error/i)).toBeInTheDocument();
+
+    const syntheticUrl = screen.getByText("https://example.invalid/demo-001");
+    expect(syntheticUrl.tagName).toBe("SPAN");
+    expect(syntheticUrl).not.toHaveAttribute("href");
   });
 
   it("renders evaluation cards with measured values separate from targets", async () => {
