@@ -129,9 +129,13 @@ class RunService:
         #: once by ``execute_run``.
         self.fail_next_node: str | None = None
 
-    async def create_run(self, user_request: str) -> str:
-        """Persist a ``pending`` run and return its id."""
-        return await create_run(user_request, session_factory=self.session_factory)
+    async def create_run(
+        self, user_request: str, *, run_key: str | None = None
+    ) -> tuple[str, bool]:
+        """Persist or load a ``pending`` run by its idempotency key."""
+        return await create_run(
+            user_request, run_key=run_key, session_factory=self.session_factory
+        )
 
     async def execute_run(self, run_id: str, input: Any) -> dict[str, Any]:  # noqa: ANN401
         """Drive the graph from ``input`` and sync the final status back to the DB.
@@ -216,7 +220,7 @@ class _RunError(Exception):
 
 def create_run_service(settings: Settings, clock: Clock | None = None) -> tuple[RunService, Any]:
     """Build the engine, session factory, demo graph, object store and service."""
-    engine, session_factory = create_engine_and_session()
+    engine, session_factory = create_engine_and_session(settings)
     resolved_clock = clock or SystemClock()
     graph = build_demo_graph(session_factory, settings, clock=resolved_clock)
     object_store = LocalObjectStore(root=settings.object_store_root)

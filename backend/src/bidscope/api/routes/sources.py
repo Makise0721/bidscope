@@ -8,11 +8,16 @@ from typing import Any, cast
 import sqlalchemy as sa
 from fastapi import APIRouter, Depends, Query, Request
 
+from bidscope.api.auth import require_admin_token
 from bidscope.api.dependencies import RunService
 from bidscope.clock import Clock, SystemClock
 from bidscope.persistence.models import SnapshotBundle, SnapshotImport
 
-router = APIRouter(prefix="/api/sources", tags=["sources"])
+router = APIRouter(
+    prefix="/api/sources",
+    tags=["sources"],
+    dependencies=[Depends(require_admin_token)],
+)
 
 # A source older than this window is still usable for audit, but is surfaced as
 # stale so operators do not mistake it for current coverage.

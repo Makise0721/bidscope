@@ -484,7 +484,7 @@ class SubscriptionService:
 
         # 1. Create a query run (reuses the executor's run lifecycle so a
         #    ``QueryRun`` row exists for the dual-worker assertion).
-        run_id = await create_run(
+        run_id, _created = await create_run(
             f"subscription {sub.id}", session_factory=self.session_factory,
         )
         await execute(

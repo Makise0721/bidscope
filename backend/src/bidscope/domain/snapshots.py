@@ -38,6 +38,10 @@ class SnapshotManifest(BaseModel):
         for url in value:
             if url.scheme != "https":
                 raise ValueError("source_urls must use HTTPS scheme")
+            if url.username is not None or url.password is not None:
+                raise ValueError("source_urls must not include URL credentials")
+            if url.port not in (None, 443):
+                raise ValueError("source_urls must use the default HTTPS port")
         return value
 
     @field_validator("files")

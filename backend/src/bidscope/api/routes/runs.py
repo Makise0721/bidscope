@@ -15,16 +15,20 @@ The state-machine contract:
 from __future__ import annotations
 
 import asyncio
+import uuid
 from typing import Any
 
 import sqlalchemy as sa
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
+from bidscope.api.auth import require_admin_token
 from bidscope.api.dependencies import RunQueryResult, RunService
 from bidscope.persistence.models import QueryRun
 
-router = APIRouter(prefix="/api/runs", tags=["runs"])
+router = APIRouter(
+    prefix="/api/runs", tags=["runs"], dependencies=[Depends(require_admin_token)]
+)
 
 
 def get_run_service(request: Request) -> RunService:
@@ -52,21 +56,32 @@ def _request_preview(value: str, max_length: int = 240) -> str:
 @router.post("", status_code=201)
 async def create_run(
     body: CreateRunBody,
+    response: Response,
+    request: Request,
     service: RunService = Depends(get_run_service),
 ) -> dict[str, Any]:
-    """Create a run (stored as pending) and schedule its execution."""
+    """Create or replay a run and schedule new work exactly once."""
     user_request = body.user_request.strip()
     if not user_request:
         raise HTTPException(status_code=422, detail="user_request must not be empty")
 
-    run_id = await service.create_run(user_request)
-    # Schedule the executor after persisting pending, so a crash between the two
-    # never leaves an un-executed run that the API already acknowledged.
-    asyncio.create_task(
-        service.execute_run(run_id, {"user_request": user_request})
-    )
+    supplied_key = request.headers.get("Idempotency-Key")
+    if supplied_key is not None and not supplied_key.strip():
+        raise HTTPException(status_code=422, detail="Idempotency-Key must not be blank")
+    run_key = supplied_key.strip() if supplied_key is not None else str(uuid.uuid4())
+
+    run_id, created = await service.create_run(user_request, run_key=run_key)
+    if created:
+        # Schedule only after the pending row commits, so acknowledged work is durable.
+        asyncio.create_task(
+            service.execute_run(run_id, {"user_request": user_request})
+        )
+    else:
+        response.status_code = 200
     run = await service.get_run(run_id)
-    return RunQueryResult.from_row(run).__dict__ if run else {"id": run_id, "status": "pending"}
+    return RunQueryResult.from_row(run).__dict__ if run else {
+        "id": run_id, "status": "pending", "user_request": user_request
+    }
 
 
 @router.get("")

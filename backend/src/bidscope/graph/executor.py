@@ -36,6 +36,7 @@ import sqlalchemy as sa
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.types import Command
+from sqlalchemy.exc import IntegrityError
 
 from bidscope.config import Settings, get_settings
 from bidscope.persistence.models import QueryRun, RunEvent
@@ -173,38 +174,58 @@ async def _append_events(
 async def create_run(
     user_request: str,
     *,
+    run_key: str | None = None,
     session_factory: Any,
-) -> str:
-    """Create a ``QueryRun`` row and return its id (used as the thread_id)."""
+) -> tuple[str, bool]:
+    """Create or load a run keyed by ``run_key``.
+
+    The unique ``run_key`` constraint is the concurrency boundary: if another
+    caller wins the insert race, this function rolls back and loads that row.
+    """
     import uuid
-    # ``QueryRun.id`` is a UUID column: use a dashed UUID string, not ``hex``.
-    run_id = str(uuid.uuid4())
+
+    resolved_key = run_key or str(uuid.uuid4())
     async with session_factory() as session:
+        existing = await session.scalar(
+            sa.select(QueryRun).where(QueryRun.run_key == resolved_key)
+        )
+        if existing is not None:
+            return str(existing.id), False
+
+        run_id = str(uuid.uuid4())
         session.add(QueryRun(
             id=run_id,
-            run_key=run_id,
+            run_key=resolved_key,
             status="pending",
             user_request=user_request,
             checkpoint_thread_id=_thread_id(run_id),
         ))
-        await session.commit()
-    return run_id
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            existing = await session.scalar(
+                sa.select(QueryRun).where(QueryRun.run_key == resolved_key)
+            )
+            if existing is None:
+                raise
+            return str(existing.id), False
+    return run_id, True
 
 
 async def mark_stale_runs_retryable(
     *,
     session_factory: Any,
 ) -> int:
-    """Mark ``running`` rows that never finished as ``retryable``.
+    """Mark stale ``pending`` and ``running`` rows as ``retryable``.
 
-    A process crash leaves rows stuck in ``running``; on startup we flip them to
-    ``retryable`` so they can be explicitly restarted. Their checkpoints are
-    left intact in Postgres for an explicit resume.
+    A process crash can leave rows stuck before or during execution; on startup
+    we flip both states to ``retryable``. Their checkpoints remain intact.
     """
     async with session_factory() as session:
         result = await session.execute(
             sa.update(QueryRun)
-            .where(QueryRun.status == "running")
+            .where(QueryRun.status.in_(("pending", "running")))
             .values(status="retryable")
             .returning(QueryRun.id)
         )

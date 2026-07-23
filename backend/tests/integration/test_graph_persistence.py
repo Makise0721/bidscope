@@ -61,7 +61,10 @@ async def test_cross_instance_resume_does_not_duplicate_upstream_events(
     session_factory: Any,
 ) -> None:
     """Graph A runs to interrupt; graph B resumes; upstream events are not doubled."""
-    run_id = await create_run("weekly sichuan servers", session_factory=session_factory)
+    run_id, created = await create_run(
+        "weekly sichuan servers", session_factory=session_factory
+    )
+    assert created is True
     deps = _build_deps()
     request = "每周一上午 9 点，汇总近 7 天四川省的服务器招标"
     user_request = {"user_request": request}

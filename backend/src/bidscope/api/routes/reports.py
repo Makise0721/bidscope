@@ -16,10 +16,15 @@ import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 
+from bidscope.api.auth import require_admin_token
 from bidscope.api.dependencies import RunService
 from bidscope.persistence.models import NoticeVersion, Report, ReportItem, SourceNotice
 
-router = APIRouter(prefix="/api/reports", tags=["reports"])
+router = APIRouter(
+    prefix="/api/reports",
+    tags=["reports"],
+    dependencies=[Depends(require_admin_token)],
+)
 
 _REPORT_ITEMS_LIMIT = 100
 _ITEM_TEXT_LIMIT = 240

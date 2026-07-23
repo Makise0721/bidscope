@@ -8,10 +8,15 @@ from typing import Any, cast
 import sqlalchemy as sa
 from fastapi import APIRouter, Depends, Query, Request
 
+from bidscope.api.auth import require_admin_token
 from bidscope.api.dependencies import RunService
 from bidscope.persistence.models import EvalRun
 
-router = APIRouter(prefix="/api/evaluations", tags=["evaluations"])
+router = APIRouter(
+    prefix="/api/evaluations",
+    tags=["evaluations"],
+    dependencies=[Depends(require_admin_token)],
+)
 
 
 def _run_service(request: Request) -> RunService:

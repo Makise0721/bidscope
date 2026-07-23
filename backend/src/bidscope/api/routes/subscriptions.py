@@ -14,11 +14,16 @@ import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from bidscope.api.auth import require_admin_token
 from bidscope.api.dependencies import RunService
 from bidscope.persistence.models import Subscription
 from bidscope.subscriptions.service import SubscriptionService
 
-router = APIRouter(prefix="/api/subscriptions", tags=["subscriptions"])
+router = APIRouter(
+    prefix="/api/subscriptions",
+    tags=["subscriptions"],
+    dependencies=[Depends(require_admin_token)],
+)
 
 
 def _subscription_service(request: Request) -> SubscriptionService:

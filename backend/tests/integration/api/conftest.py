@@ -8,6 +8,7 @@ freshly created app. Per-test data isolation is provided by the integration
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,13 @@ def test_settings(tmp_path: Path) -> Settings:
 def production_settings(tmp_path: Path) -> Settings:
     """Production-mode tests-controls routes are NOT registered."""
     return _settings(mode="production", tmp_path=tmp_path)
+
+
+@pytest.fixture()
+def production_client(production_settings: Settings) -> Iterator[TestClient]:
+    """Production-mode client for admin-authentication coverage."""
+    with TestClient(create_app(settings=production_settings)) as client:
+        yield client
 
 
 @pytest.fixture(scope="session")

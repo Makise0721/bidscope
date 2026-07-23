@@ -7,10 +7,13 @@ from typing import Any, cast
 import sqlalchemy as sa
 from fastapi import APIRouter, Depends, Query, Request
 
+from bidscope.api.auth import require_admin_token
 from bidscope.api.dependencies import RunService
 from bidscope.persistence.models import InboxEvent
 
-router = APIRouter(tags=["inbox"])
+router = APIRouter(
+    tags=["inbox"], dependencies=[Depends(require_admin_token)]
+)
 
 
 def _message_preview(value: str, max_length: int = 240) -> str:

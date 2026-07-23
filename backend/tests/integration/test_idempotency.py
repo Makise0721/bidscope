@@ -336,9 +336,10 @@ async def test_graph_event_deduplication(
     )
     graph = build_graph(deps, checkpointer=InMemorySaver())
 
-    run_id = await create_run(
+    run_id, created = await create_run(
         "四川服务器招标", session_factory=session_factory,
     )
+    assert created is True
 
     input_data = {"user_request": "四川服务器招标"}
     await execute(graph, run_id, input_data, session_factory=session_factory)

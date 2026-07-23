@@ -15,10 +15,13 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
+from bidscope.api.auth import require_admin_token
 from bidscope.api.dependencies import RunService
 from bidscope.persistence.models import RunEvent
 
-router = APIRouter(tags=["events"])
+router = APIRouter(
+    tags=["events"], dependencies=[Depends(require_admin_token)]
+)
 
 #: Seconds between heartbeat comments while waiting for terminal state.
 HEARTBEAT_INTERVAL = 15.0

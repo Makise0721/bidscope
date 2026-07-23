@@ -126,39 +126,26 @@ def test_manifest_rejects_lookalike_ggzy_host() -> None:
 # 3. Userinfo URL rejection --------------------------------------------------
 
 
-def test_manifest_strips_userinfo_correctly() -> None:
-    """A URL with userinfo (user:pass@host) must be flagged.
-
-    Pydantic's HttpUrl extracts the host correctly — the host attribute
-    strips userinfo, so ``https://user:pass@www.ccgp.gov.cn/`` yields
-    host=``www.ccgp.gov.cn`` which passes provenance. This test documents
-    that the host extraction strips credentials as expected.
-
-    NOTE: The current guard does NOT explicitly reject URLs that carry
-    userinfo. If this is considered a gap, a dedicated check should be
-    added. For now, we document the observed behaviour.
-    """
+@pytest.mark.parametrize(
+    "source_url",
+    [
+        "https://user:secret@www.ccgp.gov.cn/cggg/detail.htm",
+        "https://www.ccgp.gov.cn:8443/cggg/detail.htm",
+    ],
+)
+def test_manifest_rejects_url_credentials_and_non_default_port(source_url: str) -> None:
+    """Source URLs must not carry credentials or an unexpected explicit port."""
     data = _valid_manifest_dict()
-    data["source_urls"] = ["https://user:pass@www.ccgp.gov.cn/a.htm"]
-    # Pydantic's HttpUrl normalises the URL; host extraction strips userinfo.
-    # The manifest validates because the resulting host is in the allowlist.
-    manifest = SnapshotManifest.model_validate(data)
+    data["source_urls"] = [source_url]
+    with pytest.raises(ValidationError):
+        SnapshotManifest.model_validate(data)
+
+
+def test_manifest_accepts_ordinary_approved_https_url() -> None:
+    """An approved HTTPS URL without credentials or a custom port remains valid."""
+    manifest = SnapshotManifest.model_validate(_valid_manifest_dict())
     assert manifest.source_urls[0].host == "www.ccgp.gov.cn"
 
-
-def test_manifest_userinfo_does_not_extract_credentials_as_host() -> None:
-    """Ensure userinfo credentials are never mistaken for the host.
-
-    Even if a URL carries userinfo, the ``.host`` property must return
-    only the hostname — not the credentials portion.
-    """
-    data = _valid_manifest_dict()
-    data["source_urls"] = ["https://evil:attacker@www.ccgp.gov.cn/a.htm"]
-    manifest = SnapshotManifest.model_validate(data)
-    host = manifest.source_urls[0].host
-    assert host == "www.ccgp.gov.cn"
-    assert "evil" not in host
-    assert "attacker" not in host
 
 
 # 4. Non-default port ---------------------------------------------------------
@@ -177,18 +164,13 @@ def test_manifest_accepts_https_default_port_explicit() -> None:
     assert manifest.source_urls[0].host == "www.ccgp.gov.cn"
 
 
-def test_manifest_non_default_port_host_extraction() -> None:
-    """Non-default port must not bypass host-based provenance.
-
-    ``https://www.ccgp.gov.cn:8443/a.htm`` must resolve host to
-    ``www.ccgp.gov.cn`` (the port is a separate attribute). The provenance
-    check operates on the host alone, so this passes. We document that
-    the port is not part of the allowlist decision.
-    """
+def test_manifest_rejects_non_default_port() -> None:
+    """A non-default HTTPS port is outside the approved provenance boundary."""
     data = _valid_manifest_dict()
     data["source_urls"] = ["https://www.ccgp.gov.cn:8443/a.htm"]
-    manifest = SnapshotManifest.model_validate(data)
-    assert manifest.source_urls[0].host == "www.ccgp.gov.cn"
+    with pytest.raises(ValidationError):
+        SnapshotManifest.model_validate(data)
+
 
 
 # 5. Path traversal in manifest files ----------------------------------------
