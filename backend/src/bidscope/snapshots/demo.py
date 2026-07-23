@@ -21,7 +21,7 @@ from bidscope.domain.notices import NormalizedNotice
 from bidscope.domain.snapshots import SnapshotManifest
 from bidscope.snapshots import _parse
 from bidscope.snapshots.adapters import InspectionResult, inspect_bundle
-from pydantic import HttpUrl
+from pydantic import HttpUrl, ValidationError
 
 _PAYLOAD_FILE = "notices.json"
 
@@ -51,8 +51,19 @@ class DemoSnapshotAdapter:
             )
 
         notices: list[NormalizedNotice] = []
+        errors: list[str] = []
         for record in records:
-            notices.append(self._parse_record(manifest, record))
+            try:
+                notices.append(self._parse_record(manifest, record))
+            except (ValidationError, _parse.ParseDrift) as exc:
+                errors.append(str(exc))
+                continue
+        if not notices:
+            raise _parse.ParseDrift(
+                "all records failed to parse",
+                path=_PAYLOAD_FILE,
+                detail=f"{errors[:3]}",
+            )
         return notices
 
     def load_expected(self, bundle: Path) -> list[dict[str, object]]:

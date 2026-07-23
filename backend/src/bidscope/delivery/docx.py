@@ -22,6 +22,7 @@ from datetime import datetime
 import sqlalchemy as sa
 from bidscope.delivery.objects import ObjectStore
 from bidscope.domain.reports import Report
+from bidscope.domain.types import BidScopeErrorCode
 from bidscope.persistence.models import Report as ReportModel
 from docx import Document
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -29,6 +30,20 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 #: Bumped when the rendered output format changes. Part of the idempotency key
 #: so a format change yields a fresh export rather than reusing stale bytes.
 RENDERER_VERSION = "docx-v1"
+
+
+class DeliveryError(Exception):
+    """A delivery/export failure carrying a bounded error code."""
+
+    def __init__(
+        self,
+        message: str,
+        code: BidScopeErrorCode = BidScopeErrorCode.DELIVERY_ERROR,
+        cause: BaseException | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.cause = cause
 
 
 @dataclass(frozen=True)
@@ -175,7 +190,14 @@ class ReportDelivery:
 
             object_key = _object_key(report)
             data = render_report(report)
-            self.store.put_bytes(object_key, data)
+            try:
+                self.store.put_bytes(object_key, data)
+            except BaseException as exc:
+                raise DeliveryError(
+                    f"DOCX storage failed for {report.run_id}",
+                    code=BidScopeErrorCode.DELIVERY_ERROR,
+                    cause=exc,
+                ) from exc
 
             row = ReportModel(
                 run_id=report.run_id,

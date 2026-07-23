@@ -17,6 +17,7 @@ rejecting fails it.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
@@ -35,6 +36,9 @@ from bidscope.retrieval.search import RetrievalFilter
 #: Maximum number of synthesis retries after a report-validation failure. The
 #: first failure retries synthesis once; a second failure gives up.
 MAX_SYNTHESIS_RETRIES = 1
+
+#: Maximum transient retries for model calls (design §9: exponential backoff, at most two retries)
+MAX_MODEL_RETRIES = 2
 
 
 def _event(
@@ -69,13 +73,30 @@ async def parse_intent(state: Any, config: RunnableConfig) -> dict[str, Any]:
     """Turn the natural-language request into a structured intent."""
     deps = _deps(config)
     request = state.user_request
-    intent = await deps.intent_model.parse(request, deps.clock)
-    usage = deps.intent_model.last_usage
+    last_error: Exception | None = None
+    for attempt in range(MAX_MODEL_RETRIES + 1):
+        try:
+            intent = await deps.intent_model.parse(request, deps.clock)
+            usage = deps.intent_model.last_usage
+            return {
+                "search_intent": intent,
+                "status": RunStatus.VALIDATE_INTENT,
+                "node_events": [_event(config, state, "parse_intent", "intent_parsed", "ok")],
+                "token_usage": [usage] if usage else [],
+            }
+        except Exception as exc:
+            last_error = exc
+            if attempt < MAX_MODEL_RETRIES:
+                await asyncio.sleep(0.01 * (2 ** attempt))
+                continue
     return {
-        "search_intent": intent,
-        "status": RunStatus.VALIDATE_INTENT,
-        "node_events": [_event(config, state, "parse_intent", "intent_parsed", "ok")],
-        "token_usage": [usage] if usage else [],
+        "status": RunStatus.FAILED,
+        "errors": [SerializableError(
+            code=BidScopeErrorCode.MODEL_TRANSIENT_ERROR,
+            message=f"intent parsing failed after {MAX_MODEL_RETRIES} retries: {last_error}",
+            details={"retries": MAX_MODEL_RETRIES},
+        )],
+        "node_events": [_event(config, state, "parse_intent", "transient_error", "error")],
     }
 
 
