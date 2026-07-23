@@ -1,4 +1,5 @@
 import re
+from collections.abc import Iterable, Mapping
 from typing import Annotated
 from urllib.parse import urlsplit
 
@@ -36,11 +37,14 @@ class SnapshotManifest(BaseModel):
     @field_validator("source_urls", mode="before")
     @classmethod
     def _reject_raw_url_userinfo(cls, value: object) -> object:
-        if not isinstance(value, list):
-            raise ValueError("source_urls must be a list")
-        for raw_url in value:
-            if isinstance(raw_url, str) and "@" in urlsplit(raw_url).netloc:
-                raise ValueError("source_urls must not include URL credentials")
+        if isinstance(value, Iterable) and not isinstance(value, (str, Mapping)):
+            source_urls = list(value)
+            # Raw strings protect untrusted JSON before Pydantic strips empty
+            # userinfo delimiters; HttpUrl values are already normalized.
+            for raw_url in source_urls:
+                if isinstance(raw_url, str) and "@" in urlsplit(raw_url).netloc:
+                    raise ValueError("source_urls must not include URL credentials")
+            return source_urls
         return value
 
     @field_validator("source_urls")

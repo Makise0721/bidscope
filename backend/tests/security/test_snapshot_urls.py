@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import deque
 from pathlib import Path
 
 import pytest
@@ -148,6 +149,26 @@ def test_manifest_accepts_ordinary_approved_https_url() -> None:
     manifest = SnapshotManifest.model_validate(_valid_manifest_dict())
     assert manifest.source_urls[0].host == "www.ccgp.gov.cn"
 
+
+@pytest.mark.parametrize(
+    "source_urls",
+    [
+        ("https://www.ccgp.gov.cn/cggg/detail.htm",),
+        {"https://www.ccgp.gov.cn/cggg/detail.htm"},
+        frozenset({"https://www.ccgp.gov.cn/cggg/detail.htm"}),
+        deque(["https://www.ccgp.gov.cn/cggg/detail.htm"]),
+    ],
+    ids=["tuple", "set", "frozenset", "deque"],
+)
+def test_manifest_accepts_pydantic_url_collections(source_urls: object) -> None:
+    """Pydantic-compatible URL collections are normalized to a list."""
+    data = _valid_manifest_dict()
+    data["source_urls"] = source_urls
+
+    manifest = SnapshotManifest.model_validate(data)
+
+    assert isinstance(manifest.source_urls, list)
+    assert manifest.source_urls[0].host == "www.ccgp.gov.cn"
 
 
 # 4. Non-default port ---------------------------------------------------------
