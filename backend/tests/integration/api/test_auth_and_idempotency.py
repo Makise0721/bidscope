@@ -75,6 +75,30 @@ def test_run_idempotency_replays_without_duplicate_execution(
     assert executions == [first.json()["id"]]
 
 
+def test_runs_without_idempotency_key_are_independent(
+    demo_client: TestClient,
+    monkeypatch: Any,
+) -> None:
+    """Requests without a key create and execute independent runs."""
+    executions: list[str] = []
+
+    async def fake_execute_run(
+        self: RunService, run_id: str, input_data: Any
+    ) -> dict[str, Any]:
+        executions.append(run_id)
+        return {"status": "pending"}
+
+    monkeypatch.setattr(RunService, "execute_run", fake_execute_run)
+
+    first = demo_client.post("/api/runs", json=RUN_BODY)
+    second = demo_client.post("/api/runs", json=RUN_BODY)
+
+    assert first.status_code == 201, first.text
+    assert second.status_code == 201, second.text
+    assert first.json()["id"] != second.json()["id"]
+    assert executions == [first.json()["id"], second.json()["id"]]
+
+
 def test_run_idempotency_key_must_not_be_blank(demo_client: TestClient) -> None:
     """An explicitly supplied blank key is invalid rather than auto-generated."""
     response = demo_client.post(
