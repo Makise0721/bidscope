@@ -1,5 +1,6 @@
 import re
 from typing import Annotated
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
@@ -31,6 +32,16 @@ class SnapshotManifest(BaseModel):
     retrieval_outcome: Annotated[str, Field(min_length=1)]
     parser_version: Annotated[str, Field(min_length=1)]
     files: Annotated[dict[str, str], Field(min_length=1)]
+
+    @field_validator("source_urls", mode="before")
+    @classmethod
+    def _reject_raw_url_userinfo(cls, value: object) -> object:
+        if not isinstance(value, list):
+            raise ValueError("source_urls must be a list")
+        for raw_url in value:
+            if isinstance(raw_url, str) and "@" in urlsplit(raw_url).netloc:
+                raise ValueError("source_urls must not include URL credentials")
+        return value
 
     @field_validator("source_urls")
     @classmethod

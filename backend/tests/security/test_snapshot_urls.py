@@ -130,6 +130,8 @@ def test_manifest_rejects_lookalike_ggzy_host() -> None:
     "source_url",
     [
         "https://user:secret@www.ccgp.gov.cn/cggg/detail.htm",
+        "https://@www.ccgp.gov.cn/cggg/detail.htm",
+        "https://:@www.ccgp.gov.cn/cggg/detail.htm",
         "https://www.ccgp.gov.cn:8443/cggg/detail.htm",
     ],
 )
