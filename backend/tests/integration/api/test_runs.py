@@ -223,6 +223,88 @@ def test_docx_retry_exports_persisted_report_without_running_graph(tmp_path: Pat
         ).status_code == 404
 
 
+def test_docx_retry_recreates_a_missing_attached_object_with_the_same_key(tmp_path: Path) -> None:
+    """A retry repairs a missing object without creating a new report or key."""
+    class CountingObjectStore(LocalObjectStore):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            self.put_calls = 0
+            self.fail_writes = False
+
+        def put_bytes(self, key: str, data: bytes) -> str:
+            self.put_calls += 1
+            if self.fail_writes:
+                raise OSError("object store unavailable")
+            return super().put_bytes(key, data)
+
+    settings = Settings(
+        app_mode="production",
+        database_url="postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test",
+        checkpoint_database_url=(
+            "postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test"
+        ),
+        real_model_enabled=False,
+        admin_token="test-admin-token",
+        object_store_root=str(tmp_path / "objects"),
+    )
+    headers = {"X-Admin-Token": "test-admin-token"}
+    store = CountingObjectStore(tmp_path / "objects")
+    with TestClient(create_app(settings=settings)) as client:
+        service = client.app.state.run_service
+        service.graph = object()
+        service.object_store = store
+
+        async def _persist_and_export() -> tuple[str, str, str]:
+            run_id, created = await service.create_run("DOCX object recovery test")
+            assert created is True
+            report = Report(
+                run_id=run_id,
+                generated_at=datetime(2026, 7, 18, 12, 0, tzinfo=UTC),
+                query_conditions={"region": "四川"},
+            )
+            persistence = ReportPersistence(service.session_factory, store)
+            persisted = await persistence.persist_online_report(report, {})
+            export = await persistence.export_docx(persisted)
+            return run_id, persisted.id, export.object_key
+
+        assert client.portal is not None
+        run_id, report_id, object_key = client.portal.call(_persist_and_export)
+        assert store.exists(object_key)
+        assert store.put_calls == 1
+        store._resolve(object_key).unlink()
+        assert not store.exists(object_key)
+        store.fail_writes = True
+
+        failed_retry = client.post(f"/api/reports/{run_id}/docx/retry", headers=headers)
+        assert failed_retry.status_code == 503, failed_retry.text
+        assert not store.exists(object_key)
+
+        store.fail_writes = False
+        retry = client.post(f"/api/reports/{run_id}/docx/retry", headers=headers)
+        assert retry.status_code == 200, retry.text
+        assert retry.json() == {"report_id": report_id, "docx_object_key": object_key}
+        assert store.exists(object_key)
+        assert store.put_calls == 3
+
+        download = client.get(f"/api/reports/{run_id}/docx", headers=headers)
+        assert download.status_code == 200, download.text
+        assert download.content == store.get_bytes(object_key)
+        assert isinstance(docx.Document(io.BytesIO(download.content)), docx.document.Document)
+
+        idempotent = client.post(f"/api/reports/{run_id}/docx/retry", headers=headers)
+        assert idempotent.status_code == 200, idempotent.text
+        assert idempotent.json() == retry.json()
+        assert store.put_calls == 3
+
+        async def _stored_key() -> str | None:
+            async with service.session_factory() as session:
+                row = await session.get(ReportModel, report_id)
+                assert row is not None
+                return row.docx_object_key
+
+        assert client.portal.call(_stored_key) == object_key
+
+
 def test_retry_succeeds_when_retryable(demo_client: TestClient) -> None:
     """A retryable run can be retried, which re-executes the graph."""
     client = demo_client

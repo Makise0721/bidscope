@@ -68,6 +68,64 @@ async def test_alembic_uses_settings_checkpoint_url() -> None:
     assert "65432" in combined or "connection" in combined.lower()
 
 
+def _alembic(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "alembic", *args],
+        cwd=str(PROJECT_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+
+
+async def test_report_run_id_uniqueness_preflight_is_actionable(
+    db_engine: sa.ext.asyncio.AsyncEngine,
+) -> None:
+    """Legacy duplicate run IDs must fail before the unique constraint is created."""
+    env = os.environ.copy()
+    downgrade = _alembic(env, "downgrade", "a1b2c3d4e5f6")
+    assert downgrade.returncode == 0, downgrade.stdout + downgrade.stderr
+
+    try:
+        async with db_engine.begin() as connection:
+            run_id = "00000000-0000-0000-0000-000000000123"
+            await connection.execute(
+                sa.text(
+                    "INSERT INTO query_runs (id, run_key, status, user_request) "
+                    "VALUES (:run_id, 'legacy-duplicate-run', 'completed', 'migration test')"
+                ),
+                {"run_id": run_id},
+            )
+            await connection.execute(
+                sa.text(
+                    "INSERT INTO reports (run_id, export_key, generated_at) VALUES "
+                    "(:run_id, 'legacy-duplicate-one', now()), "
+                    "(:run_id, 'legacy-duplicate-two', now())"
+                ),
+                {"run_id": run_id},
+            )
+
+        upgrade = _alembic(env, "upgrade", "head")
+        output = upgrade.stdout + upgrade.stderr
+        assert upgrade.returncode != 0
+        assert "duplicate non-null reports.run_id values" in output
+        assert run_id in output
+        assert "resolve duplicate reports before retrying this migration" in output.lower()
+    finally:
+        async with db_engine.begin() as connection:
+            await connection.execute(
+                sa.text("TRUNCATE TABLE source_notices, canonical_notices, query_runs CASCADE")
+            )
+        upgrade = _alembic(env, "upgrade", "head")
+        assert upgrade.returncode == 0, upgrade.stdout + upgrade.stderr
+
+    downgrade = _alembic(env, "downgrade", "a1b2c3d4e5f6")
+    assert downgrade.returncode == 0, downgrade.stdout + downgrade.stderr
+    upgrade = _alembic(env, "upgrade", "head")
+    assert upgrade.returncode == 0, upgrade.stdout + upgrade.stderr
+
+
 async def test_idempotency_keys_are_non_null_without_random_default(
     db_engine: sa.ext.asyncio.AsyncEngine,
 ) -> None:

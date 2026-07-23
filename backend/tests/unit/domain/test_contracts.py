@@ -249,6 +249,14 @@ def test_report_claim_holds_multiple_citations() -> None:
     assert len(claim.citation_ids) == 2
 
 
+def test_report_claim_rejects_duplicate_citation_ids() -> None:
+    with pytest.raises(ValidationError, match="duplicate citation_ids"):
+        ReportClaim(
+            text="重复证据声明",
+            citation_ids=["ev-001", "ev-002", "ev-001"],
+        )
+
+
 # --- errors ------------------------------------------------------------------
 
 

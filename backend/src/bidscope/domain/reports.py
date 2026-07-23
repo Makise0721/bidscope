@@ -18,6 +18,8 @@ class ReportClaim(BaseModel):
     def _require_citations(self) -> "ReportClaim":
         if not self.citation_ids:
             raise ValueError("ReportClaim must reference at least one citation")
+        if len(set(self.citation_ids)) != len(self.citation_ids):
+            raise ValueError("ReportClaim must not contain duplicate citation_ids")
         return self
 
 

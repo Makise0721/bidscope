@@ -302,6 +302,33 @@ async def test_report_replay_and_api_preserve_claim_and_citation_order(
 
 
 @pytest.mark.asyncio
+async def test_persistence_deduplicates_bypassed_claim_citation_ids_in_first_seen_order(
+    session_factory,
+    tmp_path,
+) -> None:
+    report, evidence_by_hash = await _seed_report_inputs(session_factory)
+    item = report.items[0].model_copy(update={
+        "claims": [
+            ReportClaim.model_construct(
+                text="预算和交付地点已确认。",
+                citation_ids=["evidence-002", "evidence-001", "evidence-002"],
+            )
+        ],
+    })
+    report = report.model_copy(update={"items": [item]})
+    persistence = ReportPersistence(session_factory, LocalObjectStore(tmp_path / "objects"))
+
+    persisted = await persistence.persist_online_report(report, evidence_by_hash)
+    replayed = await persistence.load_online_report(report.run_id)
+
+    assert replayed is not None
+    assert replayed.id == persisted.id
+    assert replayed.report.items[0].claims[0].citation_ids == ["evidence-002", "evidence-001"]
+    async with session_factory() as session:
+        assert await _count(session, ReportClaimCitation) == 2
+
+
+@pytest.mark.asyncio
 async def test_database_enforces_one_report_per_non_null_run_id(session_factory) -> None:
     run_id = str(uuid.uuid4())
     generated_at = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)

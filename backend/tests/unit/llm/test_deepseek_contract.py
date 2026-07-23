@@ -20,6 +20,7 @@ import json
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from bidscope.llm.deepseek import DeepSeekDuplicateModel, DeepSeekReportModel
 from bidscope.llm.types import (
     DuplicatePair,
@@ -118,6 +119,14 @@ async def test_routes_through_structured_output() -> None:
     assert isinstance(draft, ReportDraft)
     assert len(draft.items) == 1
     assert draft.items[0].claims[0].citation_ids == ["ev-001"]
+
+
+def test_report_draft_rejects_duplicate_claim_citation_ids() -> None:
+    payload = _draft_json()
+    payload["items"][0]["claims"][0]["citation_ids"] = ["ev-001", "ev-001"]
+
+    with pytest.raises(ValueError, match="duplicate citation_ids"):
+        ReportDraft.model_validate(payload)
 
 
 async def test_wraps_source_text_in_untrusted_section() -> None:

@@ -16,8 +16,35 @@ down_revision: Union[str, None] = "a1b2c3d4e5f6"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
+_DUPLICATE_RUN_ID_SAMPLE_LIMIT = 10
+
+
+def _raise_for_duplicate_report_run_ids() -> None:
+    """Fail with remediable context before adding the one-report-per-run rule."""
+    rows = op.get_bind().execute(
+        sa.text(
+            "SELECT run_id::text AS run_id, count(*) AS report_count "
+            "FROM reports "
+            "WHERE run_id IS NOT NULL "
+            "GROUP BY run_id "
+            "HAVING count(*) > 1 "
+            "ORDER BY count(*) DESC, run_id::text "
+            "LIMIT :sample_limit"
+        ),
+        {"sample_limit": _DUPLICATE_RUN_ID_SAMPLE_LIMIT},
+    )
+    duplicates = [f"{row.run_id} ({row.report_count})" for row in rows]
+    if duplicates:
+        raise RuntimeError(
+            "Cannot add unique reports.run_id constraint: found duplicate non-null "
+            "reports.run_id values "
+            f"(first {_DUPLICATE_RUN_ID_SAMPLE_LIMIT}): {', '.join(duplicates)}. "
+            "Resolve duplicate reports before retrying this migration."
+        )
+
 
 def upgrade() -> None:
+    _raise_for_duplicate_report_run_ids()
     op.add_column(
         "reports",
         sa.Column(

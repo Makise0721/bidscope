@@ -165,14 +165,25 @@ class ReportDelivery:
             if row is None:
                 raise DeliveryError("online report is not persisted")
             if row.docx_object_key:
-                return ExportRecord(
-                    export_key=_export_key(str(row.id)),
-                    object_key=row.docx_object_key,
-                    report_id=str(row.id),
-                    generated_at=row.generated_at,
-                )
+                try:
+                    attached_object_exists = self.store.exists(row.docx_object_key)
+                except Exception as exc:
+                    raise DeliveryError(
+                        f"DOCX storage failed for report {persisted.id}",
+                        code=BidScopeErrorCode.DELIVERY_ERROR,
+                        cause=exc,
+                    ) from exc
+                if attached_object_exists:
+                    return ExportRecord(
+                        export_key=_export_key(str(row.id)),
+                        object_key=row.docx_object_key,
+                        report_id=str(row.id),
+                        generated_at=row.generated_at,
+                    )
+                object_key = row.docx_object_key
+            else:
+                object_key = _object_key(persisted.id)
 
-        object_key = _object_key(persisted.id)
         data = render_report(persisted.report)
         try:
             self.store.put_bytes(object_key, data)

@@ -172,7 +172,12 @@ class ReportPersistence:
             )
             session.add(persisted_claim)
             await session.flush()
-            for citation_ordinal, evidence_hash in enumerate(claim.citation_ids):
+            seen_citation_ids: set[str] = set()
+            citation_ordinal = 0
+            for evidence_hash in claim.citation_ids:
+                if evidence_hash in seen_citation_ids:
+                    continue
+                seen_citation_ids.add(evidence_hash)
                 evidence_id = evidence_ids.get(evidence_hash)
                 if evidence_id is None:
                     evidence = await self._resolve_evidence(
@@ -186,6 +191,7 @@ class ReportPersistence:
                     evidence_id=evidence_id,
                     label=self._citation_label(item, evidence_hash),
                 ))
+                citation_ordinal += 1
 
     @staticmethod
     def _citation_label(item: DomainItem, evidence_hash: str) -> str | None:
