@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from bidscope.delivery.objects import LocalObjectStore
 from bidscope.domain.reports import Report
 from bidscope.persistence.models import (
     NoticeVersion,
+    QueryRun,
     RunEvent,
     SnapshotImport,
     SourceNotice,
@@ -78,12 +80,12 @@ def _write_demo_bundle(path: Path, notices: list[dict[str, Any]], bundle_id: str
 async def clean_idempotency_tables(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Truncate snapshot + report + run-event tables for test isolation."""
+    """Truncate snapshot + report + run-event + query-run tables for isolation."""
     async with session_factory() as session:
         await session.execute(
             sa.text(
                 "TRUNCATE snapshot_imports, snapshot_bundles, reports, "
-                "run_events CASCADE"
+                "run_events, query_runs CASCADE"
             )
         )
         await session.commit()
@@ -138,10 +140,10 @@ async def test_snapshot_reimport_returns_same_import(
     _write_demo_bundle(
         bundle,
         [
-            {"id": "idem-1", "url": "https://example.invalid/idem-1", "title": "A"},
-            {"id": "idem-2", "url": "https://example.invalid/idem-2", "title": "B"},
+            {"id": "demo-idem-1", "url": "https://example.invalid/demo-idem-1", "title": "A"},
+            {"id": "demo-idem-2", "url": "https://example.invalid/demo-idem-2", "title": "B"},
         ],
-        "idem-bundle",
+        "demo-idem-bundle",
     )
 
     first = await importer.import_bundle(bundle)
@@ -174,8 +176,8 @@ async def test_idempotency_key_is_deterministic(
     bundle = tmp_path / "det"
     _write_demo_bundle(
         bundle,
-        [{"id": "det-1", "url": "https://example.invalid/det-1", "title": "A"}],
-        "det-bundle",
+        [{"id": "demo-det-1", "url": "https://example.invalid/demo-det-1", "title": "A"}],
+        "demo-det-bundle",
     )
 
     manifest, notices = _parse_for_key(importer, bundle)
@@ -218,10 +220,10 @@ async def test_object_storage_is_content_addressed(
     _write_demo_bundle(
         bundle,
         [
-            {"id": "ca-1", "url": "https://example.invalid/ca-1", "title": "A"},
-            {"id": "ca-2", "url": "https://example.invalid/ca-2", "title": "B"},
+            {"id": "demo-ca-1", "url": "https://example.invalid/demo-ca-1", "title": "A"},
+            {"id": "demo-ca-2", "url": "https://example.invalid/demo-ca-2", "title": "B"},
         ],
-        "ca-bundle",
+        "demo-ca-bundle",
     )
 
     await importer.import_bundle(bundle)
@@ -254,10 +256,9 @@ async def test_docx_export_is_idempotent(
     row and returns it without re-rendering or inserting a duplicate.
     """
     from bidscope.delivery.docx import ReportDelivery
-    from bidscope.persistence.models import QueryRun
 
     # ReportModel.run_id is a FK to query_runs.id, so back it with a real row.
-    run_id = "run-docx-idem"
+    run_id = str(uuid.uuid4())
     async with session_factory() as session:
         session.add(QueryRun(
             id=run_id, run_key=run_id, status="pending",

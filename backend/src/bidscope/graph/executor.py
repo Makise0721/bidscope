@@ -115,8 +115,22 @@ async def execute(
     checkpoint state (if any) to learn how many node events are already stored,
     then persists only the events that appear beyond that point — so a resumed
     run never duplicates upstream events.
+
+    Idempotency: if the graph has already reached a terminal state for this
+    ``run_id``, the checkpointer holds the completed state and the function
+    returns immediately — re-invoking with the same input never duplicates
+    ``run_events`` rows.
     """
     config = _config(run_id)
+
+    # Idempotency guard: a *completed* run short-circuits on the checkpointer.
+    # A run interrupted at a pause node also carries a checkpoint, but its
+    # ``next`` tuple names the still-pending node(s) — only a truly terminal
+    # checkpoint (empty ``next``) is safe to return without re-streaming.
+    existing = await graph.aget_state(config)
+    if existing and existing.values and not existing.next:
+        return dict(existing.values)
+
     already_persisted = await _persisted_event_count(run_id, session_factory)
     persisted = already_persisted
 

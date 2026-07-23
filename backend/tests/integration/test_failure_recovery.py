@@ -308,9 +308,11 @@ async def test_stale_running_runs_flip_to_retryable(
     flips them to ``retryable`` so they can be explicitly restarted. Their
     checkpoints are left intact for an explicit resume.
     """
+    import uuid
+
     from bidscope.graph.executor import mark_stale_runs_retryable
 
-    run_id = "stale-run-1"
+    run_id = str(uuid.uuid4())
     async with session_factory() as session:
         session.add(QueryRun(
             id=run_id, run_key=run_id, status="running",

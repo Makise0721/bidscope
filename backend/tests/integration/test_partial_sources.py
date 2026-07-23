@@ -241,7 +241,8 @@ async def test_parse_invalid_record_does_not_block_valid_records(
 # ---------------------------------------------------------------------------
 
 
-def test_report_draft_exposes_completeness_warning_field() -> None:
+@pytest.mark.asyncio
+async def test_report_draft_exposes_completeness_warning_field() -> None:
     """A synthesised report draft must carry a ``completeness_warning`` field.
 
     When some sources are unavailable the report is still produced but flagged
@@ -249,7 +250,7 @@ def test_report_draft_exposes_completeness_warning_field() -> None:
     sources are present) so a fully-populated draft sets it to ``None``.
     """
     verified = VerifiedOpportunity(notice_id="demo-001", title="demo", evidence=())
-    draft = FakeReportModel().synthesize(verified)
+    draft = await FakeReportModel().synthesize(verified)
 
     assert isinstance(draft, ReportDraft)
     assert "completeness_warning" in ReportDraft.model_fields
