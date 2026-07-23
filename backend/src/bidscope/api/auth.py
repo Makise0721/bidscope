@@ -8,9 +8,9 @@ from fastapi import HTTPException, Request
 
 
 async def require_admin_token(request: Request) -> None:
-    """Require the configured admin token for production API requests."""
+    """Require the configured admin token outside demo and test modes."""
     settings: Any = request.app.state.settings
-    if settings.app_mode != "production":
+    if settings.app_mode in {"demo", "test"}:
         return
 
     expected = settings.admin_token

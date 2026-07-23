@@ -34,6 +34,22 @@ def test_production_post_runs_accepts_exact_admin_token(
     assert response.json()["id"]
 
 
+def test_development_post_runs_requires_admin_token(
+    development_client: TestClient,
+) -> None:
+    """Development run creation requires the configured admin token."""
+    missing = development_client.post("/api/runs", json=RUN_BODY)
+    assert missing.status_code == 401
+
+    response = development_client.post(
+        "/api/runs",
+        json=RUN_BODY,
+        headers={"X-Admin-Token": "test-admin-token"},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["id"]
+
+
 def test_run_idempotency_replays_without_duplicate_execution(
     demo_client: TestClient,
     monkeypatch: Any,

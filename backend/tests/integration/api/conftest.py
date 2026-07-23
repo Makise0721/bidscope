@@ -58,6 +58,15 @@ def production_client(production_settings: Settings) -> Iterator[TestClient]:
         yield client
 
 
+@pytest.fixture()
+def development_client(tmp_path: Path) -> Iterator[TestClient]:
+    """Development-mode client for admin-authentication coverage."""
+    with TestClient(
+        create_app(settings=_settings(mode="development", tmp_path=tmp_path))
+    ) as client:
+        yield client
+
+
 @pytest.fixture(scope="session")
 def demo_client(tmp_path_factory: pytest.TempPathFactory) -> TestClient:
     """A single synchronous ``TestClient`` wrapping a demo-mode app, per session.
