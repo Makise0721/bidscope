@@ -82,8 +82,8 @@ def _thread_id(run_id: str) -> str:
     return str(run_id)
 
 
-def _config(run_id: str) -> RunnableConfig:
-    return {"configurable": {"thread_id": _thread_id(run_id)}}
+def _config(thread_id: str) -> RunnableConfig:
+    return {"configurable": {"thread_id": str(thread_id)}}
 
 
 async def setup_checkpoints(settings: Settings) -> None:
@@ -108,6 +108,7 @@ async def execute(
     input: Any,
     *,
     session_factory: Any,
+    checkpoint_thread_id: str | None = None,
 ) -> dict[str, Any]:
     """Drive ``graph`` from ``input`` and persist each new node event.
 
@@ -122,7 +123,7 @@ async def execute(
     returns immediately — re-invoking with the same input never duplicates
     ``run_events`` rows.
     """
-    config = _config(run_id)
+    config = _config(checkpoint_thread_id or run_id)
     if isinstance(input, dict) and "run_id" not in input:
         input = {**input, "run_id": str(run_id)}
 

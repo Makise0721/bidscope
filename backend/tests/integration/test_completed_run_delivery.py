@@ -15,6 +15,7 @@ from bidscope.delivery.objects import LocalObjectStore
 from bidscope.delivery.reports import ReportPersistence
 from bidscope.domain.notices import NoticeEvidence as DomainEvidence
 from bidscope.domain.reports import Report, ReportCitation, ReportClaim, ReportItem
+from bidscope.graph.executor import _to_plain_dsn
 from bidscope.persistence.models import (
     NoticeEvidence,
     NoticeVersion,
@@ -35,6 +36,7 @@ from bidscope.persistence.models import (
 )
 from bidscope.persistence.repositories import SnapshotRepository
 from bidscope.snapshots.importer import SnapshotImporter
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -156,33 +158,39 @@ async def test_completed_application_graph_persists_report_and_serves_docx(
         object_store_root=str(tmp_path / "graph-reports"),
     )
     clock = FixedClock(datetime(2026, 7, 18, 9, 0, tzinfo=UTC))
-    graph = build_demo_graph(
-        session_factory, settings, clock=clock, object_store=object_store
-    )
-    service = RunService(session_factory, graph, object_store, settings, clock=clock)
-    run_id, created = await service.create_run("四川省服务器招标")
-    assert created is True
+    dsn = _to_plain_dsn(settings.checkpoint_database_url)
+    async with AsyncPostgresSaver.from_conn_string(dsn) as checkpointer:
+        graph = build_demo_graph(
+            session_factory,
+            settings,
+            checkpointer=checkpointer,
+            clock=clock,
+            object_store=object_store,
+        )
+        service = RunService(session_factory, graph, object_store, settings, clock=clock)
+        run_id, created = await service.create_run("四川省服务器招标")
+        assert created is True
 
-    result = await service.execute_run(run_id, {"user_request": "四川省服务器招标"})
-    assert result["status"] == "completed", result
+        result = await service.execute_run(run_id, {"user_request": "四川省服务器招标"})
+        assert result["status"] == "completed", result
 
-    body = await get_report(run_id, service)
-    assert body["items"]
-    item = body["items"][0]
-    assert item["claims"]
-    assert item["citations"]
-    assert item["citations"][0]["evidence_id"]
-    assert item["citations"][0]["span_hash"]
-    assert item["provenance"]["source_version_id"]
-    response = await download_docx(run_id, service)
-    assert response.status_code == 200
-    assert response.body
+        body = await get_report(run_id, service)
+        assert body["items"]
+        item = body["items"][0]
+        assert item["claims"]
+        assert item["citations"]
+        assert item["citations"][0]["evidence_id"]
+        assert item["citations"][0]["span_hash"]
+        assert item["provenance"]["source_version_id"]
+        response = await download_docx(run_id, service)
+        assert response.status_code == 200
+        assert response.body
 
-    async with session_factory() as session:
-        assert await _count(session, ReportModel) == 1
-        assert await _count(session, ReportItemModel) >= 1
-        assert await _count(session, ReportClaimModel) >= 1
-        assert await _count(session, ReportClaimCitation) >= 1
+        async with session_factory() as session:
+            assert await _count(session, ReportModel) == 1
+            assert await _count(session, ReportItemModel) >= 1
+            assert await _count(session, ReportClaimModel) >= 1
+            assert await _count(session, ReportClaimCitation) >= 1
 
 
 @pytest.mark.asyncio

@@ -29,6 +29,7 @@ from bidscope.api.routes import (
 )
 from bidscope.clock import SystemClock
 from bidscope.config import Settings, get_settings
+from bidscope.graph.executor import mark_stale_runs_retryable
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -38,13 +39,13 @@ async def lifespan(app: FastAPI) -> Any:
     """Initialize shared resources on startup and tear them down on shutdown."""
     settings: Settings = app.state.settings
     clock = SystemClock()
-    service, engine = create_run_service(settings, clock=clock)
-    app.state.clock = clock
-    app.state.run_service = service
-    app.state.engine = engine
-    app.state.fail_next_node = False
-    yield
-    await engine.dispose()
+    async with create_run_service(settings, clock=clock) as (service, engine):
+        app.state.clock = clock
+        app.state.run_service = service
+        app.state.engine = engine
+        app.state.fail_next_node = False
+        await mark_stale_runs_retryable(session_factory=service.session_factory)
+        yield
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

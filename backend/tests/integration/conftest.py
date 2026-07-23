@@ -10,6 +10,7 @@ import pytest
 import pytest_asyncio
 import sqlalchemy as sa
 from bidscope.config import get_settings
+from bidscope.graph.executor import run_setup_checkpoints
 from bidscope.testing import enforce_test_environment
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -139,6 +140,12 @@ def _apply_migrations(_enforce_test_environment: None) -> None:
         cwd=str(PROJECT_ROOT),
         env=env,
     )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _setup_checkpoint_schema(_apply_migrations: None) -> None:
+    """Provision LangGraph tables explicitly before API/graph integration tests."""
+    run_setup_checkpoints(get_settings())
 
 
 @pytest_asyncio.fixture(scope="session")

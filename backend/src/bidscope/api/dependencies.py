@@ -8,11 +8,13 @@ exposes the run lifecycle operations the routes call.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any
 
 import sqlalchemy as sa
-from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -24,7 +26,7 @@ from bidscope.delivery.reports import ReportPersistence
 from bidscope.domain.runs import SerializableError
 from bidscope.domain.types import BidScopeErrorCode
 from bidscope.graph.builder import GraphDeps, build_graph
-from bidscope.graph.executor import Command, create_run, execute
+from bidscope.graph.executor import Command, _to_plain_dsn, create_run, execute
 from bidscope.llm.fake import FakeDuplicateModel, FakeIntentModel, FakeReportModel
 from bidscope.persistence.models import NoticeEvidence, NoticeVersion, QueryRun, RunEvent
 from bidscope.retrieval.embeddings import HashEmbeddingProvider
@@ -83,11 +85,13 @@ def _to_sync_dsn(async_url: str) -> str:
 def build_demo_graph(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
+    *,
+    checkpointer: AsyncPostgresSaver,
     sync_session_factory: sessionmaker[Session] | None = None,
     clock: Clock | None = None,
     object_store: ObjectStore | None = None,
 ) -> Any:
-    """Compile the demo query workflow: fake model + hash embeddings + InMemorySaver."""
+    """Compile the demo workflow with the lifecycle-owned Postgres saver."""
     searcher = HybridSearcher(
         session_factory, HashEmbeddingProvider(dimension=1024),
     )
@@ -104,7 +108,7 @@ def build_demo_graph(
         load_notice_views=lambda ids: _load_notice_views(notice_factory, ids),
         report_persistence=ReportPersistence(session_factory, resolved_store),
     )
-    return build_graph(deps, checkpointer=InMemorySaver())
+    return build_graph(deps, checkpointer=checkpointer)
 
 
 @dataclass
@@ -130,12 +134,14 @@ class RunService:
         object_store: ObjectStore,
         settings: Settings,
         clock: Clock | None = None,
+        checkpointer_kind: str = "unknown",
     ) -> None:
         self.session_factory = session_factory
         self.graph = graph
         self.object_store = object_store
         self.settings = settings
         self.clock = clock or SystemClock()
+        self.checkpointer_kind = checkpointer_kind
         #: Test-only: name of the node that should fail on the next run.
         #: Set by the ``/api/test-controls/fail-next-node`` route and consumed
         #: once by ``execute_run``.
@@ -173,9 +179,15 @@ class RunService:
                 ],
             }
 
+        run = await self.get_run(run_id)
+        checkpoint_thread_id = run.checkpoint_thread_id if run is not None else run_id
         try:
             result = await execute(
-                self.graph, run_id, input, session_factory=self.session_factory,
+                self.graph,
+                run_id,
+                input,
+                session_factory=self.session_factory,
+                checkpoint_thread_id=checkpoint_thread_id,
             )
         except Exception as error:  # noqa: BLE001 - detached route task boundary
             serializable_error = SerializableError(
@@ -201,11 +213,17 @@ class RunService:
         return await self.execute_run(run_id, Command(resume={"action": "approve"}))
 
     async def retry(self, run_id: str) -> dict[str, Any]:
-        """Re-run a retryable run. Raises if not retryable."""
+        """Resume a retryable checkpoint or restart the original request."""
         await self._claim_run(run_id, "retryable", "retryable")
         run = await self.get_run(run_id)
         if run is None:
             raise _RunError(404, "run not found")
+
+        thread_id = run.checkpoint_thread_id or str(run.id)
+        get_state = getattr(self.graph, "aget_state", None)
+        state = await get_state({"configurable": {"thread_id": thread_id}}) if get_state else None
+        if state and state.values and state.next:
+            return await self.execute_run(run_id, Command(resume={"action": "approve"}))
         return await self.execute_run(run_id, {"user_request": run.user_request})
 
     async def _claim_run(self, run_id: str, eligible_status: str, status_name: str) -> None:
@@ -291,13 +309,43 @@ class _RunError(Exception):
         self.detail = detail
 
 
-def create_run_service(settings: Settings, clock: Clock | None = None) -> tuple[RunService, Any]:
-    """Build the engine, session factory, demo graph, object store and service."""
+@asynccontextmanager
+async def create_run_service(
+    settings: Settings,
+    clock: Clock | None = None,
+) -> AsyncIterator[tuple[RunService, Any]]:
+    """Own the API's database engines and durable LangGraph checkpointer.
+
+    Checkpoint schema provisioning deliberately remains outside this factory. The
+    explicit ``bidscope checkpoints setup`` command creates those tables before
+    any API process is started.
+    """
     engine, session_factory = create_engine_and_session(settings)
+    sync_engine = sa.create_engine(_to_sync_dsn(settings.database_url))
+    sync_session_factory = sessionmaker(bind=sync_engine)
     resolved_clock = clock or SystemClock()
     object_store = LocalObjectStore(root=settings.object_store_root)
-    graph = build_demo_graph(
-        session_factory, settings, clock=resolved_clock, object_store=object_store
-    )
-    service = RunService(session_factory, graph, object_store, settings, clock=resolved_clock)
-    return service, engine
+
+    try:
+        dsn = _to_plain_dsn(settings.checkpoint_database_url)
+        async with AsyncPostgresSaver.from_conn_string(dsn) as checkpointer:
+            graph = build_demo_graph(
+                session_factory,
+                settings,
+                checkpointer=checkpointer,
+                sync_session_factory=sync_session_factory,
+                clock=resolved_clock,
+                object_store=object_store,
+            )
+            service = RunService(
+                session_factory,
+                graph,
+                object_store,
+                settings,
+                clock=resolved_clock,
+                checkpointer_kind="postgres",
+            )
+            yield service, engine
+    finally:
+        sync_engine.dispose()
+        await engine.dispose()

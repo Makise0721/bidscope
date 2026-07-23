@@ -16,7 +16,6 @@ import sqlalchemy as sa
 from bidscope.clock import FixedClock
 from bidscope.config import get_settings
 from bidscope.graph.builder import GraphDeps, build_graph
-from graph_fakes import FakeReportPersistence
 from bidscope.graph.executor import (
     _to_plain_dsn,
     create_run,
@@ -25,6 +24,7 @@ from bidscope.graph.executor import (
 from bidscope.llm.fake import FakeDuplicateModel, FakeIntentModel, FakeReportModel
 from bidscope.persistence.models import RunEvent
 from bidscope.retrieval.search import RetrievalFilter, RetrievalResult
+from graph_fakes import FakeReportPersistence
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.types import Command
 
@@ -73,7 +73,6 @@ async def test_cross_instance_resume_does_not_duplicate_upstream_events(
 
     # --- Graph A: run to the confirmation interrupt -------------------------
     async with await _new_checkpointer() as checkpointer_a:
-        await checkpointer_a.setup()
         graph_a = build_graph(deps, checkpointer=checkpointer_a)
         interrupted = await execute(graph_a, run_id, user_request, session_factory=session_factory)
         assert interrupted.get("status") == "awaiting_confirmation"
@@ -82,7 +81,6 @@ async def test_cross_instance_resume_does_not_duplicate_upstream_events(
 
     # --- Graph B: a brand-new checkpointer/process resumes the same run -------
     async with await _new_checkpointer() as checkpointer_b:
-        await checkpointer_b.setup()
         graph_b = build_graph(deps, checkpointer=checkpointer_b)
         finished = await execute(
             graph_b, run_id, Command(resume={"action": "approve"}), session_factory=session_factory
