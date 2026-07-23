@@ -79,6 +79,22 @@ def _alembic(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str
     )
 
 
+def test_report_run_id_preflight_locks_reports_before_duplicate_query() -> None:
+    """The preflight and constraint DDL must share a write-blocking table lock."""
+    source = (
+        PROJECT_ROOT
+        / "migrations"
+        / "versions"
+        / "d8f4a9c2e6b1_complete_report_delivery_persistence.py"
+    ).read_text(encoding="utf-8")
+
+    lock_statement = 'op.execute("LOCK TABLE reports IN SHARE ROW EXCLUSIVE MODE")'
+    duplicate_query = '"SELECT run_id::text AS run_id, count(*) AS report_count "'
+
+    assert lock_statement in source
+    assert source.index(lock_statement) < source.index(duplicate_query)
+
+
 async def test_report_run_id_uniqueness_preflight_is_actionable(
     db_engine: sa.ext.asyncio.AsyncEngine,
 ) -> None:

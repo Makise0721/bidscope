@@ -21,6 +21,8 @@ _DUPLICATE_RUN_ID_SAMPLE_LIMIT = 10
 
 def _raise_for_duplicate_report_run_ids() -> None:
     """Fail with remediable context before adding the one-report-per-run rule."""
+    # Keep concurrent writes from invalidating the preflight before the constraint DDL.
+    op.execute("LOCK TABLE reports IN SHARE ROW EXCLUSIVE MODE")
     rows = op.get_bind().execute(
         sa.text(
             "SELECT run_id::text AS run_id, count(*) AS report_count "
