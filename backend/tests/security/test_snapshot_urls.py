@@ -24,7 +24,7 @@ from bidscope.domain.provenance import (
 )
 from bidscope.domain.snapshots import SnapshotManifest
 from bidscope.snapshots.adapters import inspect_bundle
-from pydantic import ValidationError
+from pydantic import HttpUrl, ValidationError
 
 # --- helpers -----------------------------------------------------------------
 
@@ -153,15 +153,16 @@ def test_manifest_accepts_ordinary_approved_https_url() -> None:
 @pytest.mark.parametrize(
     "source_urls",
     [
+        ["https://www.ccgp.gov.cn/cggg/detail.htm"],
         ("https://www.ccgp.gov.cn/cggg/detail.htm",),
         {"https://www.ccgp.gov.cn/cggg/detail.htm"},
         frozenset({"https://www.ccgp.gov.cn/cggg/detail.htm"}),
         deque(["https://www.ccgp.gov.cn/cggg/detail.htm"]),
     ],
-    ids=["tuple", "set", "frozenset", "deque"],
+    ids=["list", "tuple", "set", "frozenset", "deque"],
 )
-def test_manifest_accepts_pydantic_url_collections(source_urls: object) -> None:
-    """Pydantic-compatible URL collections are normalized to a list."""
+def test_manifest_accepts_exact_raw_string_url_collections(source_urls: object) -> None:
+    """Supported raw-string collection types are normalized to a plain list."""
     data = _valid_manifest_dict()
     data["source_urls"] = source_urls
 
@@ -171,8 +172,39 @@ def test_manifest_accepts_pydantic_url_collections(source_urls: object) -> None:
     assert manifest.source_urls[0].host == "www.ccgp.gov.cn"
 
 
+def test_manifest_rejects_list_subclass_before_url_normalization() -> None:
+    """A list subclass cannot bypass raw userinfo inspection."""
+
+    class UrlList(list[str]):
+        pass
+
+    data = _valid_manifest_dict()
+    data["source_urls"] = UrlList(["https://@www.ccgp.gov.cn/cggg/detail.htm"])
+
+    with pytest.raises(ValidationError, match="source_urls"):
+        SnapshotManifest.model_validate(data)
+
+
+def test_manifest_rejects_generator_before_url_normalization() -> None:
+    """A generator cannot bypass raw userinfo inspection."""
+    data = _valid_manifest_dict()
+    data["source_urls"] = ("https://@www.ccgp.gov.cn/cggg/detail.htm" for _ in range(1))
+
+    with pytest.raises(ValidationError, match="source_urls"):
+        SnapshotManifest.model_validate(data)
+
+
+def test_manifest_rejects_prebuilt_http_url_before_url_normalization() -> None:
+    """Typed URLs are not valid raw provenance manifest entries."""
+    data = _valid_manifest_dict()
+    data["source_urls"] = [HttpUrl("https://@www.ccgp.gov.cn/cggg/detail.htm")]
+
+    with pytest.raises(ValidationError, match="source_urls"):
+        SnapshotManifest.model_validate(data)
+
+
 def test_manifest_rejects_broken_custom_iterable_as_validation_error() -> None:
-    """A custom iterable is left to Pydantic instead of eagerly materialized."""
+    """A custom iterable violates the raw-string manifest input contract."""
 
     class BrokenIterable:
         def __iter__(self) -> object:

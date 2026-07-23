@@ -36,19 +36,22 @@ class SnapshotManifest(BaseModel):
 
     @field_validator("source_urls", mode="before")
     @classmethod
-    def _reject_raw_url_userinfo(cls, value: object) -> object:
+    def _validate_raw_source_urls(cls, value: object) -> list[str]:
+        """Accept only JSON-compatible raw URL collections before URL parsing."""
         if type(value) not in (list, tuple, set, frozenset, deque):
-            return value
-        source_urls = list(cast(
+            raise ValueError("source_urls must be a supported raw string collection")
+        source_urls = cast(
             list[object] | tuple[object, ...] | set[object] | frozenset[object] | deque[object],
             value,
-        ))
-        # Raw strings protect untrusted JSON before Pydantic strips empty
-        # userinfo delimiters; HttpUrl values are already normalized.
+        )
+        raw_source_urls: list[str] = []
         for raw_url in source_urls:
-            if isinstance(raw_url, str) and "@" in urlsplit(raw_url).netloc:
+            if type(raw_url) is not str:
+                raise ValueError("source_urls entries must be raw strings")
+            if "@" in urlsplit(raw_url).netloc:
                 raise ValueError("source_urls must not include URL credentials")
-        return source_urls
+            raw_source_urls.append(raw_url)
+        return raw_source_urls
 
     @field_validator("source_urls")
     @classmethod

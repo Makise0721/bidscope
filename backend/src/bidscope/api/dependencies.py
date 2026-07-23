@@ -187,21 +187,36 @@ class RunService:
 
     async def confirm(self, run_id: str) -> dict[str, Any]:
         """Resume an awaiting-confirmation run. Raises if not confirmable."""
-        run = await self.get_run(run_id)
-        if run is None:
-            raise _RunError(404, "run not found")
-        if run.status != "awaiting_confirmation":
-            raise _RunError(409, f"run is not awaiting confirmation (status={run.status!r})")
+        await self._claim_run(run_id, "awaiting_confirmation", "awaiting confirmation")
         return await self.execute_run(run_id, Command(resume={"action": "approve"}))
 
     async def retry(self, run_id: str) -> dict[str, Any]:
         """Re-run a retryable run. Raises if not retryable."""
+        await self._claim_run(run_id, "retryable", "retryable")
         run = await self.get_run(run_id)
         if run is None:
             raise _RunError(404, "run not found")
-        if run.status != "retryable":
-            raise _RunError(409, f"run is not retryable (status={run.status!r})")
         return await self.execute_run(run_id, {"user_request": run.user_request})
+
+    async def _claim_run(self, run_id: str, eligible_status: str, status_name: str) -> None:
+        """Atomically move an eligible run to ``running`` or raise a lifecycle error."""
+        async with self.session_factory() as session:
+            result = await session.execute(
+                sa.update(QueryRun)
+                .where(QueryRun.id == run_id, QueryRun.status == eligible_status)
+                .values(status="running")
+                .returning(QueryRun.id)
+            )
+            claimed_id = result.scalar_one_or_none()
+            await session.commit()
+
+        if claimed_id is not None:
+            return
+
+        run = await self.get_run(run_id)
+        if run is None:
+            raise _RunError(404, "run not found")
+        raise _RunError(409, f"run is not {status_name} (status={run.status!r})")
 
     async def list_events(self, run_id: str, after_seq: int = -1) -> list[RunEvent]:
         """Return ordered run events with ``seq > after_seq``."""

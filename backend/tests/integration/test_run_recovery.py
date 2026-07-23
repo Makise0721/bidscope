@@ -102,6 +102,55 @@ async def test_create_run_concurrent_same_key_returns_one_row(session_factory: A
 
 
 @pytest.mark.asyncio
+async def test_retry_claims_run_before_concurrent_execution(
+    session_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent retries claim one row, preventing duplicate event persistence."""
+    run_id = str(uuid.uuid4())
+    async with session_factory() as session:
+        session.add(QueryRun(
+            id=run_id,
+            run_key="concurrent-retry",
+            status="retryable",
+            user_request="retry request",
+        ))
+        await session.commit()
+
+    service = RunService(
+        session_factory=session_factory,
+        graph=object(),
+        object_store=object(),
+        settings=get_settings(),
+    )
+    release_execution = asyncio.Event()
+    executions: list[str] = []
+
+    async def blocking_execute_run(
+        self: RunService, claimed_run_id: str, input_data: Any
+    ) -> dict[str, Any]:
+        del self, input_data
+        executions.append(claimed_run_id)
+        await release_execution.wait()
+        return {"status": "completed"}
+
+    monkeypatch.setattr(RunService, "execute_run", blocking_execute_run)
+
+    retries = [
+        asyncio.create_task(service.retry(run_id)),
+        asyncio.create_task(service.retry(run_id)),
+    ]
+    await asyncio.sleep(0.05)
+    release_execution.set()
+    results = await asyncio.gather(*retries, return_exceptions=True)
+
+    assert executions == [run_id]
+    assert sum(isinstance(result, dict) for result in results) == 1
+    conflicts = [result for result in results if getattr(result, "status_code", None) == 409]
+    assert len(conflicts) == 1
+
+
+@pytest.mark.asyncio
 async def test_execute_run_persists_retryable_when_executor_raises(
     session_factory: Any,
     monkeypatch: pytest.MonkeyPatch,
