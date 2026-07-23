@@ -15,9 +15,22 @@ Only synthetic-demo data flows through the demo graph; no network access occurs.
 from __future__ import annotations
 
 import asyncio
+import io
 import time
+from datetime import UTC, datetime
+from pathlib import Path
 
+import docx
+import pytest
+import sqlalchemy as sa
+from bidscope.config import Settings
+from bidscope.delivery.docx import DeliveryError
+from bidscope.delivery.objects import LocalObjectStore
+from bidscope.delivery.reports import ReportPersistence
+from bidscope.domain.reports import Report
+from bidscope.main import create_app
 from bidscope.persistence.models import QueryRun
+from bidscope.persistence.models import Report as ReportModel
 from fastapi.testclient import TestClient
 
 SCHEDULED_QUERY = (
@@ -120,6 +133,94 @@ def test_retry_returns_409_unless_retryable(demo_client: TestClient) -> None:
 
     response = client.post(f"/api/runs/{run_id}/retry")
     assert response.status_code == 409
+
+
+def test_docx_retry_exports_persisted_report_without_running_graph(tmp_path: Path) -> None:
+    """DOCX retry only exports the existing online report and is idempotent."""
+    class FailingObjectStore:
+        def put_bytes(self, key: str, data: bytes) -> str:
+            raise OSError("object store unavailable")
+
+        def get_bytes(self, key: str) -> bytes:
+            raise FileNotFoundError(key)
+
+        def exists(self, key: str) -> bool:
+            return False
+
+    class CountingGraph:
+        def __init__(self) -> None:
+            self.graph_calls = 0
+            self.retrieval_calls = 0
+
+    settings = Settings(
+        app_mode="production",
+        database_url="postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test",
+        checkpoint_database_url=(
+            "postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test"
+        ),
+        real_model_enabled=False,
+        admin_token="test-admin-token",
+        object_store_root=str(tmp_path / "objects"),
+    )
+    headers = {"X-Admin-Token": "test-admin-token"}
+    with TestClient(create_app(settings=settings)) as client:
+        service = client.app.state.run_service
+        graph = CountingGraph()
+        service.graph = graph
+
+        async def _persist_failed_report() -> tuple[str, str]:
+            run_id, created = await service.create_run("DOCX retry test")
+            assert created is True
+            report = Report(
+                run_id=run_id,
+                generated_at=datetime(2026, 7, 18, 12, 0, tzinfo=UTC),
+                query_conditions={"region": "四川"},
+                source_availability=["ccgp", "sichuan"],
+            )
+            failed = ReportPersistence(service.session_factory, FailingObjectStore())
+            persisted = await failed.persist_online_report(report, {})
+            with pytest.raises(DeliveryError):
+                await failed.export_docx(persisted)
+            async with service.session_factory() as session:
+                stored = await session.get(ReportModel, persisted.id)
+                assert stored is not None
+                assert stored.docx_object_key is None
+            return run_id, persisted.id
+
+        assert client.portal is not None
+        run_id, report_id = client.portal.call(_persist_failed_report)
+        service.object_store = LocalObjectStore(tmp_path / "recovered-objects")
+
+        first = client.post(f"/api/reports/{run_id}/docx/retry", headers=headers)
+        second = client.post(f"/api/reports/{run_id}/docx/retry", headers=headers)
+
+        assert first.status_code == 200, first.text
+        assert second.status_code == 200, second.text
+        assert first.json()["report_id"] == report_id
+        assert first.json()["docx_object_key"] == second.json()["docx_object_key"]
+        document = docx.Document(io.BytesIO(service.object_store.get_bytes(
+            first.json()["docx_object_key"]
+        )))
+        paragraphs = [paragraph.text for paragraph in document.paragraphs]
+        assert "ccgp" in paragraphs
+        assert "sichuan" in paragraphs
+        assert graph.graph_calls == 0
+        assert graph.retrieval_calls == 0
+
+        async def _report_rows() -> list[ReportModel]:
+            async with service.session_factory() as session:
+                result = await session.execute(
+                    sa.select(ReportModel).where(ReportModel.run_id == run_id)
+                )
+                return list(result.scalars())
+
+        rows = client.portal.call(_report_rows)
+        assert len(rows) == 1
+        assert rows[0].docx_object_key == first.json()["docx_object_key"]
+        assert client.post(
+            "/api/reports/00000000-0000-0000-0000-000000000000/docx/retry",
+            headers=headers,
+        ).status_code == 404
 
 
 def test_retry_succeeds_when_retryable(demo_client: TestClient) -> None:

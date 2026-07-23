@@ -86,6 +86,7 @@ class ReportPersistence:
                         export_key=f"online:{report.run_id}",
                         conditions=report.query_conditions,
                         freshness_window=report.freshness_window,
+                        source_availability=report.source_availability,
                         completeness_warning=report.completeness_warning,
                         generated_at=report.generated_at,
                     )
@@ -122,6 +123,12 @@ class ReportPersistence:
                     raise
                 return await self._project(session, existing)
 
+    async def load_online_report(self, run_id: str) -> PersistedReport | None:
+        """Hydrate the complete persisted report for a delivery-only retry."""
+        async with self._session_factory() as session:
+            row = await self._find_by_run_id(session, run_id)
+            return None if row is None else await self._project(session, row)
+
     async def export_docx(self, persisted: PersistedReport) -> ExportRecord:
         """Render and attach a DOCX to an already durable online report."""
         return await self._delivery.export_report(persisted)
@@ -134,13 +141,14 @@ class ReportPersistence:
         evidence_by_hash: Mapping[str, EvidenceBinding],
     ) -> dict[str, str]:
         evidence_ids: dict[str, str] = {}
-        for citation in item.citations:
+        for ordinal, citation in enumerate(item.citations):
             evidence = await self._resolve_evidence(
                 session, item.notice_id, citation.evidence_id, evidence_by_hash
             )
             evidence_ids[citation.evidence_id] = str(evidence.id)
             session.add(ReportCitation(
                 report_item_id=persisted_item.id,
+                ordinal=ordinal,
                 evidence_id=evidence.id,
                 label=citation.label,
                 span_start=evidence.start,
@@ -156,11 +164,15 @@ class ReportPersistence:
         evidence_ids: dict[str, str],
         evidence_by_hash: Mapping[str, EvidenceBinding],
     ) -> None:
-        for claim in item.claims:
-            persisted_claim = ReportClaim(report_item_id=persisted_item.id, text=claim.text)
+        for ordinal, claim in enumerate(item.claims):
+            persisted_claim = ReportClaim(
+                report_item_id=persisted_item.id,
+                ordinal=ordinal,
+                text=claim.text,
+            )
             session.add(persisted_claim)
             await session.flush()
-            for evidence_hash in claim.citation_ids:
+            for citation_ordinal, evidence_hash in enumerate(claim.citation_ids):
                 evidence_id = evidence_ids.get(evidence_hash)
                 if evidence_id is None:
                     evidence = await self._resolve_evidence(
@@ -170,6 +182,7 @@ class ReportPersistence:
                     evidence_ids[evidence_hash] = evidence_id
                 session.add(ReportClaimCitation(
                     report_claim_id=persisted_claim.id,
+                    ordinal=citation_ordinal,
                     evidence_id=evidence_id,
                     label=self._citation_label(item, evidence_hash),
                 ))
@@ -237,7 +250,7 @@ class ReportPersistence:
                 sa.select(ReportCitation, NoticeEvidence.span_hash)
                 .join(NoticeEvidence, ReportCitation.evidence_id == NoticeEvidence.id)
                 .where(ReportCitation.report_item_id.in_(item_ids))
-                .order_by(ReportCitation.id)
+                .order_by(ReportCitation.report_item_id, ReportCitation.ordinal, ReportCitation.id)
             )
             for citation, span_hash in citation_rows:
                 citations_by_item[str(citation.report_item_id)].append(DomainCitation(
@@ -247,7 +260,7 @@ class ReportPersistence:
             claim_rows = list((await session.scalars(
                 sa.select(ReportClaim)
                 .where(ReportClaim.report_item_id.in_(item_ids))
-                .order_by(ReportClaim.id)
+                .order_by(ReportClaim.report_item_id, ReportClaim.ordinal, ReportClaim.id)
             )).all())
             claim_ids = [claim.id for claim in claim_rows]
             citation_ids_by_claim: dict[str, list[str]] = defaultdict(list)
@@ -256,7 +269,11 @@ class ReportPersistence:
                     sa.select(ReportClaimCitation.report_claim_id, NoticeEvidence.span_hash)
                     .join(NoticeEvidence, ReportClaimCitation.evidence_id == NoticeEvidence.id)
                     .where(ReportClaimCitation.report_claim_id.in_(claim_ids))
-                    .order_by(ReportClaimCitation.id)
+                    .order_by(
+                        ReportClaimCitation.report_claim_id,
+                        ReportClaimCitation.ordinal,
+                        ReportClaimCitation.id,
+                    )
                 )
                 for claim_id, span_hash in claim_citations:
                     citation_ids_by_claim[str(claim_id)].append(span_hash)
@@ -285,7 +302,7 @@ class ReportPersistence:
             generated_at=row.generated_at,
             query_conditions={str(key): str(value) for key, value in row.conditions.items()},
             freshness_window=row.freshness_window,
-            source_availability=[],
+            source_availability=list(row.source_availability or []),
             completeness_warning=row.completeness_warning,
             items=domain_items,
         )

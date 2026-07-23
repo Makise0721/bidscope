@@ -209,13 +209,18 @@ class Report(Base, TimestampMixin):
     __tablename__ = "reports"
 
     id: Mapped[str] = _pk()
-    run_id: Mapped[str | None] = mapped_column(sa.Uuid, sa.ForeignKey("query_runs.id"), index=True)
+    run_id: Mapped[str | None] = mapped_column(sa.Uuid, sa.ForeignKey("query_runs.id"))
     export_key: Mapped[str] = mapped_column(sa.Text, unique=True, nullable=False)
     conditions: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=_EMPTY_JSON)
     freshness_window: Mapped[str | None] = mapped_column(sa.Text)
+    source_availability: Mapped[list[str]] = mapped_column(
+        JSONB, server_default=_JSON_ARRAY, nullable=False
+    )
     completeness_warning: Mapped[str | None] = mapped_column(sa.Text)
     generated_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), nullable=False)
     docx_object_key: Mapped[str | None] = mapped_column(sa.Text)
+
+    __table_args__ = (sa.UniqueConstraint("run_id", name="uq_reports_run_id"),)
 
 
 class ReportItem(Base, TimestampMixin):
@@ -237,6 +242,7 @@ class ReportClaim(Base, TimestampMixin):
 
     id: Mapped[str] = _pk()
     report_item_id: Mapped[str] = _fk("report_items")
+    ordinal: Mapped[int] = mapped_column(sa.Integer, server_default=sa.text("0"), nullable=False)
     text: Mapped[str] = mapped_column(sa.Text, nullable=False)
 
 
@@ -245,6 +251,7 @@ class ReportClaimCitation(Base, TimestampMixin):
 
     id: Mapped[str] = _pk()
     report_claim_id: Mapped[str] = _fk("report_claims")
+    ordinal: Mapped[int] = mapped_column(sa.Integer, server_default=sa.text("0"), nullable=False)
     evidence_id: Mapped[str] = mapped_column(
         sa.Uuid, sa.ForeignKey("notice_evidence.id"), index=True
     )
@@ -264,6 +271,7 @@ class ReportCitation(Base, TimestampMixin):
 
     id: Mapped[str] = _pk()
     report_item_id: Mapped[str] = _fk("report_items")
+    ordinal: Mapped[int] = mapped_column(sa.Integer, server_default=sa.text("0"), nullable=False)
     evidence_id: Mapped[str] = mapped_column(
         sa.Uuid, sa.ForeignKey("notice_evidence.id"), index=True
     )

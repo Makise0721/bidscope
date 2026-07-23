@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import uuid
 from datetime import UTC, datetime
@@ -9,6 +10,9 @@ from datetime import UTC, datetime
 import docx
 import pytest
 import sqlalchemy as sa
+from bidscope.api.dependencies import RunService
+from bidscope.api.routes.reports import get_report
+from bidscope.config import Settings
 from bidscope.delivery.docx import DeliveryError
 from bidscope.delivery.objects import LocalObjectStore
 from bidscope.delivery.reports import ReportPersistence
@@ -79,6 +83,14 @@ async def _seed_report_inputs(session_factory) -> tuple[Report, dict[str, Domain
             span_hash="evidence-001",
         )
         session.add(evidence)
+        second_evidence = NoticeEvidence(
+            notice_version_id=version.id,
+            text="交付地点为四川省。",
+            start=8,
+            end=17,
+            span_hash="evidence-002",
+        )
+        session.add(second_evidence)
         session.add(QueryRun(
             id=run_id,
             run_key=run_id,
@@ -87,13 +99,22 @@ async def _seed_report_inputs(session_factory) -> tuple[Report, dict[str, Domain
         ))
         await session.commit()
 
-    domain_evidence = DomainEvidence(
-        notice_version_id=str(version.id),
-        text=evidence.text,
-        start=evidence.start,
-        end=evidence.end,
-        span_hash=evidence.span_hash,
-    )
+    domain_evidence = {
+        evidence.span_hash: DomainEvidence(
+            notice_version_id=str(version.id),
+            text=evidence.text,
+            start=evidence.start,
+            end=evidence.end,
+            span_hash=evidence.span_hash,
+        ),
+        second_evidence.span_hash: DomainEvidence(
+            notice_version_id=str(version.id),
+            text=second_evidence.text,
+            start=second_evidence.start,
+            end=second_evidence.end,
+            span_hash=second_evidence.span_hash,
+        ),
+    }
     report = Report(
         run_id=run_id,
         generated_at=now,
@@ -112,7 +133,7 @@ async def _seed_report_inputs(session_factory) -> tuple[Report, dict[str, Domain
             )
         ],
     )
-    return report, {domain_evidence.span_hash: domain_evidence}
+    return report, domain_evidence
 
 
 @pytest.mark.asyncio
@@ -191,6 +212,7 @@ async def test_docx_failure_keeps_online_report_and_later_retry_works(
             return False
 
     report, evidence_by_hash = await _seed_report_inputs(session_factory)
+    report = report.model_copy(update={"source_availability": ["ccgp", "sichuan"]})
     failed = ReportPersistence(session_factory, FailingObjectStore())
     persisted = await failed.persist_online_report(report, evidence_by_hash)
 
@@ -201,9 +223,146 @@ async def test_docx_failure_keeps_online_report_and_later_retry_works(
         stored = await session.get(ReportModel, persisted.id)
         assert stored is not None
         assert stored.docx_object_key is None
+        assert stored.source_availability == ["ccgp", "sichuan"]
 
     retry = ReportPersistence(session_factory, LocalObjectStore(tmp_path / "objects"))
-    export = await retry.export_docx(persisted)
+    replayed = await retry.persist_online_report(report, evidence_by_hash)
+    assert replayed.report.source_availability == ["ccgp", "sichuan"]
+
+    export = await retry.export_docx(replayed)
     assert retry.store.exists(export.object_key)
+    document = docx.Document(io.BytesIO(retry.store.get_bytes(export.object_key)))
+    assert "ccgp" in [paragraph.text for paragraph in document.paragraphs]
+    assert "sichuan" in [paragraph.text for paragraph in document.paragraphs]
+
+    service = RunService(
+        session_factory,
+        graph=object(),
+        object_store=retry.store,
+        settings=Settings(app_mode="test"),
+    )
+    assert (await get_report(report.run_id, service))["source_availability"] == ["ccgp", "sichuan"]
+    async with session_factory() as session:
+        assert await _count(session, ReportModel) == 1
+
+
+@pytest.mark.asyncio
+async def test_report_replay_and_api_preserve_claim_and_citation_order(
+    session_factory,
+    tmp_path,
+) -> None:
+    report, evidence_by_hash = await _seed_report_inputs(session_factory)
+    item = report.items[0].model_copy(update={
+        "citations": [
+            ReportCitation(evidence_id="evidence-002", label="delivery location"),
+            ReportCitation(evidence_id="evidence-001", label="budget"),
+        ],
+        "claims": [
+            ReportClaim(
+                text="预算和交付地点已确认。",
+                citation_ids=["evidence-002", "evidence-001"],
+            ),
+            ReportClaim(text="预算为800万元。", citation_ids=["evidence-001"]),
+        ],
+    })
+    report = report.model_copy(update={"items": [item]})
+    persistence = ReportPersistence(session_factory, LocalObjectStore(tmp_path / "objects"))
+
+    await persistence.persist_online_report(report, evidence_by_hash)
+    replayed = await persistence.persist_online_report(report, evidence_by_hash)
+
+    replayed_item = replayed.report.items[0]
+    assert [citation.evidence_id for citation in replayed_item.citations] == [
+        "evidence-002",
+        "evidence-001",
+    ]
+    assert [claim.text for claim in replayed_item.claims] == [
+        "预算和交付地点已确认。",
+        "预算为800万元。",
+    ]
+    assert replayed_item.claims[0].citation_ids == ["evidence-002", "evidence-001"]
+
+    service = RunService(
+        session_factory,
+        graph=object(),
+        object_store=persistence.store,
+        settings=Settings(app_mode="test"),
+    )
+    body = await get_report(report.run_id, service)
+    api_item = body["items"][0]
+    assert [citation["span_hash"] for citation in api_item["citations"]] == [
+        "evidence-002",
+        "evidence-001",
+    ]
+    assert [claim["text"] for claim in api_item["claims"]] == [
+        "预算和交付地点已确认。",
+        "预算为800万元。",
+    ]
+    assert api_item["claims"][0]["citation_ids"] == ["evidence-002", "evidence-001"]
+
+
+@pytest.mark.asyncio
+async def test_database_enforces_one_report_per_non_null_run_id(session_factory) -> None:
+    run_id = str(uuid.uuid4())
+    generated_at = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
+    async with session_factory() as session:
+        session.add(QueryRun(
+            id=run_id,
+            run_key=run_id,
+            status="running",
+            user_request="test",
+        ))
+        session.add(ReportModel(
+            run_id=run_id,
+            export_key="external:one",
+            generated_at=generated_at,
+        ))
+        await session.commit()
+
+        session.add(ReportModel(
+            run_id=run_id,
+            export_key="external:two",
+            generated_at=generated_at,
+        ))
+        with pytest.raises(sa.exc.IntegrityError):
+            await session.commit()
+        await session.rollback()
+
+        session.add_all([
+            ReportModel(export_key="external:legacy-one", generated_at=generated_at),
+            ReportModel(export_key="external:legacy-two", generated_at=generated_at),
+        ])
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_persistence_creates_one_report_for_a_run(
+    session_factory,
+    tmp_path,
+) -> None:
+    report, evidence_by_hash = await _seed_report_inputs(session_factory)
+    persistence = ReportPersistence(session_factory, LocalObjectStore(tmp_path / "objects"))
+    original_find_by_run_id = persistence._find_by_run_id
+    first_lookup_complete = asyncio.Event()
+    both_lookups_complete = asyncio.Event()
+    lookups = 0
+
+    async def synchronized_find_by_run_id(session, run_id):
+        nonlocal lookups
+        if lookups < 2:
+            lookups += 1
+            first_lookup_complete.set()
+            if lookups == 2:
+                both_lookups_complete.set()
+            await both_lookups_complete.wait()
+        return await original_find_by_run_id(session, run_id)
+
+    persistence._find_by_run_id = synchronized_find_by_run_id  # type: ignore[method-assign]
+    first_task = asyncio.create_task(persistence.persist_online_report(report, evidence_by_hash))
+    await first_lookup_complete.wait()
+    second_task = asyncio.create_task(persistence.persist_online_report(report, evidence_by_hash))
+    first, second = await asyncio.gather(first_task, second_task)
+
+    assert first.id == second.id
     async with session_factory() as session:
         assert await _count(session, ReportModel) == 1

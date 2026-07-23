@@ -12,6 +12,8 @@ from fastapi.responses import Response
 
 from bidscope.api.auth import require_admin_token
 from bidscope.api.dependencies import RunService
+from bidscope.delivery.docx import DeliveryError
+from bidscope.delivery.reports import ReportPersistence
 from bidscope.persistence.models import (
     NoticeEvidence,
     NoticeVersion,
@@ -110,6 +112,16 @@ def _bounded_unknown_fields(value: Any) -> list[str]:
         text
         for item in value[:_ITEM_TEXT_LIMIT]
         if (text := _bounded_text(item, _ITEM_TEXT_LIMIT))
+    ]
+
+
+def _bounded_source_availability(value: Any) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [
+        text
+        for source in value[:_ITEM_TEXT_LIMIT]
+        if (text := _bounded_text(source, _ITEM_TEXT_LIMIT))
     ]
 
 
@@ -233,6 +245,9 @@ def _serialize_report(
             if isinstance(key, str) and isinstance(value, (str, int, float))
         },
         "freshness_window": _bounded_text(report.freshness_window, _ITEM_TEXT_LIMIT),
+        "source_availability": _bounded_source_availability(
+            _safe_attr(report, "source_availability")
+        ),
         "completeness_warning": _bounded_text(report.completeness_warning, _ITEM_TEXT_LIMIT),
         "generated_at": report.generated_at.isoformat() if report.generated_at else None,
         "items": [
@@ -289,7 +304,7 @@ async def _fetch_report(
                 sa.select(ReportCitation, NoticeEvidence)
                 .join(NoticeEvidence, ReportCitation.evidence_id == NoticeEvidence.id)
                 .where(ReportCitation.report_item_id.in_(item_ids))
-                .order_by(ReportCitation.id)
+                .order_by(ReportCitation.report_item_id, ReportCitation.ordinal, ReportCitation.id)
             )
             for citation, evidence in citation_result:
                 start = citation.span_start
@@ -306,7 +321,7 @@ async def _fetch_report(
             claim_rows = list((await session.scalars(
                 sa.select(ReportClaim)
                 .where(ReportClaim.report_item_id.in_(item_ids))
-                .order_by(ReportClaim.id)
+                .order_by(ReportClaim.report_item_id, ReportClaim.ordinal, ReportClaim.id)
             )).all())
             if claim_rows:
                 claim_ids = [claim.id for claim in claim_rows]
@@ -315,7 +330,11 @@ async def _fetch_report(
                     sa.select(ReportClaimCitation.report_claim_id, NoticeEvidence.span_hash)
                     .join(NoticeEvidence, ReportClaimCitation.evidence_id == NoticeEvidence.id)
                     .where(ReportClaimCitation.report_claim_id.in_(claim_ids))
-                    .order_by(ReportClaimCitation.id)
+                    .order_by(
+                        ReportClaimCitation.report_claim_id,
+                        ReportClaimCitation.ordinal,
+                        ReportClaimCitation.id,
+                    )
                 )
                 for claim_id, span_hash in claim_citation_result:
                     citation_ids_by_claim[str(claim_id)].append(span_hash)
@@ -335,6 +354,26 @@ async def get_report(
     """Return a bounded evidence-backed online report JSON DTO."""
     report, items, provenance, citations, claims = await _fetch_report(service, run_id)
     return _serialize_report(report, items, provenance, citations, claims)
+
+
+@router.post("/{run_id}/docx/retry")
+async def retry_docx(
+    run_id: str,
+    service: RunService = Depends(get_run_service),
+) -> dict[str, str]:
+    """Export a persisted report's DOCX without restarting its run."""
+    persistence = ReportPersistence(service.session_factory, service.object_store)
+    persisted = await persistence.load_online_report(run_id)
+    if persisted is None:
+        raise HTTPException(status_code=404, detail="report not found")
+    try:
+        export = await persistence.export_docx(persisted)
+    except DeliveryError as error:
+        raise HTTPException(status_code=503, detail="DOCX export failed") from error
+    return {
+        "report_id": export.report_id,
+        "docx_object_key": export.object_key,
+    }
 
 
 @router.get("/{run_id}/docx")
