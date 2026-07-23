@@ -1,15 +1,9 @@
-"""DOCX rendering and idempotent storage for typed reports.
+"""DOCX rendering and attachment for persisted typed reports.
 
-The renderer converts a :class:`~bidscope.domain.reports.Report` into a DOCX
-byte stream using :mod:`python-docx`. It is a pure function: it touches no
-database, object store, or network, and it never re-prompts a model.
-
-:class:`ReportDelivery` persists the rendered bytes to an
-:class:`~bidscope.delivery.objects.ObjectStore` and keeps a logical export
-record so that exporting the same report twice produces a single stored object
-and a single database row. The idempotency key is derived from the report's run
-identifier plus a renderer version, so a renderer change produces a new export
-while repeated exports of the same report collapse onto one record.
+Rendering is pure. The delivery service writes a deterministic object and only
+then attaches its key to an existing online report row. Online report creation
+belongs to :mod:`bidscope.delivery.reports`, so DOCX failure never rolls back
+already-persisted report evidence.
 """
 
 from __future__ import annotations
@@ -18,8 +12,8 @@ import io
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TYPE_CHECKING
 
-import sqlalchemy as sa
 from bidscope.delivery.objects import ObjectStore
 from bidscope.domain.reports import Report
 from bidscope.domain.types import BidScopeErrorCode
@@ -27,8 +21,12 @@ from bidscope.persistence.models import Report as ReportModel
 from docx import Document
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-#: Bumped when the rendered output format changes. Part of the idempotency key
-#: so a format change yields a fresh export rather than reusing stale bytes.
+if TYPE_CHECKING:
+    from bidscope.delivery.reports import PersistedReport
+
+
+#: Bumped when the rendered output format changes. It participates in the
+#: deterministic DOCX object key while the report row keeps its online key.
 RENDERER_VERSION = "docx-v1"
 
 
@@ -48,7 +46,7 @@ class DeliveryError(Exception):
 
 @dataclass(frozen=True)
 class ExportRecord:
-    """A logical record of one idempotent DOCX export."""
+    """One deterministic DOCX attachment for a persisted online report."""
 
     export_key: str
     object_key: str
@@ -56,9 +54,9 @@ class ExportRecord:
     generated_at: datetime
 
 
-def _export_key(report: Report) -> str:
-    """Derive the idempotent export key from the report ID + renderer version."""
-    return f"{RENDERER_VERSION}:{report.run_id}"
+def _export_key(report_id: str) -> str:
+    """Derive DOCX idempotency from persisted report identity and renderer."""
+    return f"{RENDERER_VERSION}:{report_id}"
 
 
 def _sanitize_filename(name: str) -> str:
@@ -68,19 +66,14 @@ def _sanitize_filename(name: str) -> str:
     return sanitized or "report"
 
 
-def _object_key(report: Report) -> str:
-    """Build the deterministic, sanitized object key for a report's DOCX."""
-    safe = _sanitize_filename(report.run_id)
-    return f"reports/{safe}/bidscope-{safe}.docx"
+def _object_key(report_id: str) -> str:
+    """Build a deterministic object key from report identity and renderer."""
+    safe = _sanitize_filename(report_id)
+    return f"reports/{safe}/{RENDERER_VERSION}/bidscope-{safe}.docx"
 
 
 def render_report(report: Report) -> bytes:
-    """Render a typed report to DOCX bytes.
-
-    Pure function: no storage, no network. The output contains the query
-    conditions, each item title, unknown-field markers, source URLs, evidence
-    labels, and the completeness warning (when present).
-    """
+    """Render a typed report to DOCX bytes without any external effects."""
     document = Document()
     document.add_heading("BidScope Report", level=0)
 
@@ -88,7 +81,6 @@ def render_report(report: Report) -> bytes:
     if report.freshness_window:
         document.add_paragraph(f"Freshness window: {report.freshness_window}")
 
-    # --- Query conditions -------------------------------------------------
     document.add_heading("Query Conditions", level=1)
     conditions_table = document.add_table(rows=1, cols=2)
     hdr = conditions_table.rows[0].cells
@@ -99,18 +91,15 @@ def render_report(report: Report) -> bytes:
         row[0].text = key
         row[1].text = str(value)
 
-    # --- Source availability ----------------------------------------------
     if report.source_availability:
         document.add_heading("Source Availability", level=1)
         for source in report.source_availability:
             document.add_paragraph(source)
 
-    # --- Completeness warning ---------------------------------------------
     if report.completeness_warning:
         document.add_heading("Completeness Warning", level=1)
         document.add_paragraph(report.completeness_warning)
 
-    # --- Items / opportunities --------------------------------------------
     document.add_heading("Opportunities", level=1)
     for idx, item in enumerate(report.items, start=1):
         document.add_heading(f"{idx}. {item.title}", level=2)
@@ -127,9 +116,7 @@ def render_report(report: Report) -> bytes:
                 row[1].text = str(value)
 
         if item.unknown_fields:
-            document.add_paragraph(
-                "未知字段 (unknown fields): " + ", ".join(item.unknown_fields)
-            )
+            document.add_paragraph("未知字段 (unknown fields): " + ", ".join(item.unknown_fields))
 
         if item.relevance_reason:
             document.add_paragraph(f"Relevance: {item.relevance_reason}")
@@ -147,7 +134,6 @@ def render_report(report: Report) -> bytes:
             for claim in item.claims:
                 document.add_paragraph(f"  - {claim.text}")
 
-    # --- Appendix ---------------------------------------------------------
     document.add_heading("Appendix", level=1)
     document.add_paragraph(f"Renderer version: {RENDERER_VERSION}")
     document.add_paragraph(f"Report run ID: {report.run_id}")
@@ -162,7 +148,7 @@ def render_report(report: Report) -> bytes:
 
 
 class ReportDelivery:
-    """Persist rendered DOCX reports to an ObjectStore, idempotently."""
+    """Attach idempotent DOCX objects to already-persisted online reports."""
 
     def __init__(
         self,
@@ -172,56 +158,50 @@ class ReportDelivery:
         self.store = store
         self.session_factory = session_factory
 
-    async def export_report(self, report: Report) -> ExportRecord:
-        """Render, store, and record a DOCX export. Idempotent per report."""
-        export_key = _export_key(report)
+    async def export_report(self, persisted: PersistedReport) -> ExportRecord:
+        """Render and attach a DOCX without creating or replacing a report row."""
         async with self.session_factory() as session:
-            existing = await self._find_export(session, export_key)
-            if existing is not None:
-                # A persisted export always carries its object key; the column is
-                # nullable only to accommodate rows created by other paths.
-                assert existing.docx_object_key is not None
+            row = await session.get(ReportModel, persisted.id)
+            if row is None:
+                raise DeliveryError("online report is not persisted")
+            if row.docx_object_key:
                 return ExportRecord(
-                    export_key=existing.export_key,
-                    object_key=existing.docx_object_key,
-                    report_id=report.run_id,
-                    generated_at=existing.generated_at,
+                    export_key=_export_key(str(row.id)),
+                    object_key=row.docx_object_key,
+                    report_id=str(row.id),
+                    generated_at=row.generated_at,
                 )
 
-            object_key = _object_key(report)
-            data = render_report(report)
-            try:
-                self.store.put_bytes(object_key, data)
-            except BaseException as exc:
-                raise DeliveryError(
-                    f"DOCX storage failed for {report.run_id}",
-                    code=BidScopeErrorCode.DELIVERY_ERROR,
-                    cause=exc,
-                ) from exc
+        object_key = _object_key(persisted.id)
+        data = render_report(persisted.report)
+        try:
+            self.store.put_bytes(object_key, data)
+        except Exception as exc:
+            raise DeliveryError(
+                f"DOCX storage failed for report {persisted.id}",
+                code=BidScopeErrorCode.DELIVERY_ERROR,
+                cause=exc,
+            ) from exc
 
-            row = ReportModel(
-                run_id=report.run_id,
-                export_key=export_key,
-                conditions=report.query_conditions,
-                freshness_window=report.freshness_window,
-                completeness_warning=report.completeness_warning,
-                generated_at=report.generated_at,
-                docx_object_key=object_key,
+        async with self.session_factory() as session:
+            row = await session.get(ReportModel, persisted.id)
+            if row is None:
+                raise DeliveryError("online report disappeared before DOCX attachment")
+            if row.docx_object_key is None:
+                row.docx_object_key = object_key
+                await session.commit()
+            return ExportRecord(
+                export_key=_export_key(str(row.id)),
+                object_key=row.docx_object_key,
+                report_id=str(row.id),
+                generated_at=row.generated_at,
             )
-            session.add(row)
-            await session.commit()
 
-        return ExportRecord(
-            export_key=export_key,
-            object_key=object_key,
-            report_id=report.run_id,
-            generated_at=report.generated_at,
-        )
 
-    async def _find_export(
-        self, session: AsyncSession, export_key: str
-    ) -> ReportModel | None:
-        result = await session.execute(
-            sa.select(ReportModel).where(ReportModel.export_key == export_key)
-        )
-        return result.scalar_one_or_none()
+__all__ = [
+    "DeliveryError",
+    "ExportRecord",
+    "RENDERER_VERSION",
+    "ReportDelivery",
+    "render_report",
+]

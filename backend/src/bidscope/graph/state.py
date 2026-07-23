@@ -76,9 +76,10 @@ class RunState(BaseModel):
     retrieval_plan: RetrievalPlan | None = None
     #: Notice-version ID -> immutable evidence span. Built by ``verify_evidence``
     #: and read by ``validate_report``; never shipped out of the run.
-    evidence_by_id: Annotated[dict[str, NoticeEvidence], lambda left, right: {**left, **right}] = (
-        Field(default_factory=dict)
-    )
+    evidence_by_id: Annotated[
+        dict[str, NoticeEvidence | list[NoticeEvidence] | tuple[NoticeEvidence, ...]],
+        lambda left, right: {**left, **right},
+    ] = Field(default_factory=dict)
     candidate_notice_ids: Annotated[list[str], operator.add] = Field(default_factory=list)
     duplicate_groups: Annotated[list[DuplicateGroup], operator.add] = Field(
         default_factory=list

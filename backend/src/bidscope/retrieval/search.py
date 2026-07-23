@@ -82,7 +82,17 @@ def _apply_structured_filters(
 ) -> SelectStatement:
     """Apply structured filters to a notice_versions statement."""
     if filters.regions:
-        statement = statement.where(NoticeVersion.region.in_(filters.regions))
+        statement = statement.where(
+            sa.or_(
+                *(
+                    sa.or_(
+                        NoticeVersion.region == region,
+                        NoticeVersion.region.startswith(region),
+                    )
+                    for region in filters.regions
+                )
+            )
+        )
     if filters.published_from is not None:
         statement = statement.where(NoticeVersion.publish_date >= filters.published_from)
     if filters.published_to is not None:

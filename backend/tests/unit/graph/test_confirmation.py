@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from bidscope.clock import FixedClock
 from bidscope.domain.enums import RunStatus
 from bidscope.graph.builder import GraphDeps, build_graph
+from graph_fakes import FakeReportPersistence
 from bidscope.llm.fake import FakeDuplicateModel, FakeIntentModel, FakeReportModel
 from bidscope.retrieval.search import (
     RetrievalCandidate,
@@ -95,6 +96,7 @@ def _deps(
         ),
         clock=FixedClock(datetime(2026, 7, 18, 9, 0, tzinfo=UTC)),
         load_notice_views=lambda ids: _notice_views(),
+        report_persistence=FakeReportPersistence(),
     )
 
 

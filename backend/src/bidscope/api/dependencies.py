@@ -8,7 +8,7 @@ exposes the run lifecycle operations the routes call.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any
 
 import sqlalchemy as sa
@@ -20,12 +20,13 @@ from bidscope.clock import Clock, SystemClock
 from bidscope.config import Settings
 from bidscope.db import create_engine_and_session
 from bidscope.delivery.objects import LocalObjectStore, ObjectStore
+from bidscope.delivery.reports import ReportPersistence
 from bidscope.domain.runs import SerializableError
 from bidscope.domain.types import BidScopeErrorCode
 from bidscope.graph.builder import GraphDeps, build_graph
 from bidscope.graph.executor import Command, create_run, execute
 from bidscope.llm.fake import FakeDuplicateModel, FakeIntentModel, FakeReportModel
-from bidscope.persistence.models import NoticeVersion, QueryRun, RunEvent
+from bidscope.persistence.models import NoticeEvidence, NoticeVersion, QueryRun, RunEvent
 from bidscope.retrieval.embeddings import HashEmbeddingProvider
 from bidscope.retrieval.search import HybridSearcher
 
@@ -52,9 +53,14 @@ def _load_notice_views(
             sa.select(NoticeVersion).where(NoticeVersion.id.in_(notice_version_ids))
         )
         for version in result.scalars():
-            views[version.id] = NoticeView(
+            evidence_rows = session.execute(
+                sa.select(NoticeEvidence.text)
+                .where(NoticeEvidence.notice_version_id == version.id)
+                .order_by(NoticeEvidence.id)
+            )
+            views[str(version.id)] = NoticeView(
                 source="synthetic_demo",
-                external_id=version.id,
+                external_id=str(version.id),
                 canonical_url=f"https://example.invalid/{version.id}",
                 project_number=None,
                 content_hash=version.content_hash,
@@ -64,6 +70,7 @@ def _load_notice_views(
                 budget_minor_units=version.budget_minor_units,
                 budget_currency=version.budget_currency,
                 deadline=version.deadline,
+                claim_supporting_texts=tuple(evidence_rows.scalars()),
             )
     return views
 
@@ -78,6 +85,7 @@ def build_demo_graph(
     settings: Settings,
     sync_session_factory: sessionmaker[Session] | None = None,
     clock: Clock | None = None,
+    object_store: ObjectStore | None = None,
 ) -> Any:
     """Compile the demo query workflow: fake model + hash embeddings + InMemorySaver."""
     searcher = HybridSearcher(
@@ -86,6 +94,7 @@ def build_demo_graph(
     notice_factory = sync_session_factory or sessionmaker(
         bind=sa.create_engine(_to_sync_dsn(settings.database_url))
     )
+    resolved_store = object_store or LocalObjectStore(root=settings.object_store_root)
     deps = GraphDeps(
         intent_model=FakeIntentModel(),
         duplicate_model=FakeDuplicateModel(),
@@ -93,6 +102,7 @@ def build_demo_graph(
         searcher=searcher,
         clock=clock or SystemClock(),
         load_notice_views=lambda ids: _load_notice_views(notice_factory, ids),
+        report_persistence=ReportPersistence(session_factory, resolved_store),
     )
     return build_graph(deps, checkpointer=InMemorySaver())
 
@@ -178,7 +188,7 @@ class RunService:
 
         status = result.get("status")
         if status:
-            await self._update_status(run_id, status)
+            await self._update_status(run_id, status, result=result)
         return result
 
     async def get_run(self, run_id: str) -> QueryRun | None:
@@ -234,14 +244,42 @@ class RunService:
         status: str,
         *,
         error: dict[str, Any] | None = None,
+        result: dict[str, Any] | None = None,
     ) -> None:
         async with self.session_factory() as session:
             run = await session.get(QueryRun, run_id)
             if run is not None:
-                run.status = status
+                run.status = str(status)
+                if result is not None:
+                    intent = result.get("search_intent")
+                    if intent is not None:
+                        run.search_intent = _json_safe(intent)
+                    errors = result.get("errors")
+                    if errors:
+                        run.error = {"errors": _json_safe(errors)}
+                    usage = result.get("token_usage")
+                    if usage:
+                        run.token_usage = {"calls": _json_safe(usage)}
                 if error is not None:
                     run.error = error
+                if str(status) == "completed":
+                    run.completed_at = self.clock.now()
                 await session.commit()
+
+
+def _json_safe(value: Any) -> Any:
+    """Convert graph/Pydantic values to JSON-safe persistence payloads."""
+    if hasattr(value, "model_dump"):
+        return _json_safe(value.model_dump(mode="json"))
+    if is_dataclass(value) and not isinstance(value, type):
+        return _json_safe(asdict(value))
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if hasattr(value, "value"):
+        return _json_safe(value.value)
+    return value
 
 
 class _RunError(Exception):
@@ -257,7 +295,9 @@ def create_run_service(settings: Settings, clock: Clock | None = None) -> tuple[
     """Build the engine, session factory, demo graph, object store and service."""
     engine, session_factory = create_engine_and_session(settings)
     resolved_clock = clock or SystemClock()
-    graph = build_demo_graph(session_factory, settings, clock=resolved_clock)
     object_store = LocalObjectStore(root=settings.object_store_root)
+    graph = build_demo_graph(
+        session_factory, settings, clock=resolved_clock, object_store=object_store
+    )
     service = RunService(session_factory, graph, object_store, settings, clock=resolved_clock)
     return service, engine

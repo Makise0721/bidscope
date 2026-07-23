@@ -21,6 +21,7 @@ import pytest
 import pytest_asyncio
 import sqlalchemy as sa
 from bidscope.domain.reports import Report, ReportClaim, ReportItem
+from graph_fakes import FakeReportPersistence
 from bidscope.domain.types import BidScopeErrorCode
 from bidscope.llm.types import ModelUsage, ReportDraft, VerifiedOpportunity
 from bidscope.persistence.models import (
@@ -97,6 +98,7 @@ def _deps(
         ),
         clock=FixedClock(datetime(2026, 7, 18, 9, 0, tzinfo=UTC)),
         load_notice_views=lambda ids: _notice_views(),
+        report_persistence=FakeReportPersistence(),
     )
 
 
@@ -248,17 +250,13 @@ async def test_evidence_validation_retries_synthesis_once() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_docx_storage_failure_is_bounded_and_atomic(
+async def test_docx_storage_failure_is_bounded_and_keeps_online_report(
     session_factory, tmp_path
 ) -> None:
-    """A storage failure during DOCX export must not persist a report row.
+    """DOCX failure is bounded but cannot roll back the online report."""
+    import uuid
 
-    The object store raises ``put_bytes``. The desired behaviour is that the
-    error surfaces as a bounded ``DELIVERY_ERROR`` and that no ``reports`` row
-    is ever committed (the store write precedes the DB write). Currently the
-    raw storage exception propagates unbounded — this test documents the gap.
-    """
-    from bidscope.delivery.docx import ReportDelivery
+    from bidscope.delivery.reports import ReportPersistence
 
     class FailingObjectStore:
         def put_bytes(self, key: str, data: bytes) -> str:
@@ -270,28 +268,30 @@ async def test_docx_storage_failure_is_bounded_and_atomic(
         def exists(self, key: str) -> bool:
             return False
 
-    delivery = ReportDelivery(
-        store=FailingObjectStore(), session_factory=session_factory,
-    )
+    run_id = str(uuid.uuid4())
+    async with session_factory() as session:
+        session.add(QueryRun(
+            id=run_id, run_key=run_id, status="running", user_request="服务器",
+        ))
+        await session.commit()
 
+    persistence = ReportPersistence(session_factory, FailingObjectStore())
     report = Report(
-        run_id="run-docx-fail",
+        run_id=run_id,
         generated_at=datetime(2026, 7, 18, 9, 0, tzinfo=UTC),
         query_conditions={"topics": "服务器", "regions": "四川"},
     )
+    persisted = await persistence.persist_online_report(report, {})
 
     with pytest.raises(Exception) as exc_info:
-        await delivery.export_report(report)
+        await persistence.export_docx(persisted)
 
-    # Atomicity guard (exists): the store failure happens before any DB write.
     async with session_factory() as session:
-        assert await _count(session, ReportModel) == 0
+        stored = await session.get(ReportModel, persisted.id)
+        assert stored is not None
+        assert stored.docx_object_key is None
 
-    # Bounded-error gap: the raised error should carry a DELIVERY_ERROR code.
-    code = getattr(exc_info.value, "code", None)
-    assert code == BidScopeErrorCode.DELIVERY_ERROR, (
-        f"gap: storage error not wrapped as DELIVERY_ERROR, got {exc_info.value!r}"
-    )
+    assert getattr(exc_info.value, "code", None) == BidScopeErrorCode.DELIVERY_ERROR
 
 
 # ---------------------------------------------------------------------------

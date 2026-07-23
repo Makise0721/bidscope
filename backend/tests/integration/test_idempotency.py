@@ -26,6 +26,7 @@ import pytest_asyncio
 import sqlalchemy as sa
 from bidscope.delivery.objects import LocalObjectStore
 from bidscope.domain.reports import Report
+from graph_fakes import FakeReportPersistence
 from bidscope.persistence.models import (
     NoticeVersion,
     QueryRun,
@@ -255,7 +256,7 @@ async def test_docx_export_is_idempotent(
     report's run identifier, so a second ``export_report`` finds the existing
     row and returns it without re-rendering or inserting a duplicate.
     """
-    from bidscope.delivery.docx import ReportDelivery
+    from bidscope.delivery.reports import ReportPersistence
 
     # ReportModel.run_id is a FK to query_runs.id, so back it with a real row.
     run_id = str(uuid.uuid4())
@@ -269,15 +270,16 @@ async def test_docx_export_is_idempotent(
     # Use an isolated store root so the file count is unambiguous.
     store = tmp_path / "docx-objects"
     store.mkdir()
-    delivery = ReportDelivery(
+    persistence = ReportPersistence(
         store=LocalObjectStore(store),
         session_factory=session_factory,
     )
 
     report = _demo_report(run_id=run_id)
+    persisted = await persistence.persist_online_report(report, {})
 
-    first = await delivery.export_report(report)
-    second = await delivery.export_report(report)
+    first = await persistence.export_docx(persisted)
+    second = await persistence.export_docx(persisted)
 
     assert first.export_key == second.export_key
     assert first.object_key == second.object_key
@@ -333,6 +335,7 @@ async def test_graph_event_deduplication(
         searcher=_FakeSearcher(),  # type: ignore[arg-type]
         clock=FixedClock(datetime(2026, 7, 18, 9, 0, tzinfo=UTC)),
         load_notice_views=_views,
+        report_persistence=FakeReportPersistence(),
     )
     graph = build_graph(deps, checkpointer=InMemorySaver())
 

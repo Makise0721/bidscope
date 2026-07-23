@@ -215,6 +215,26 @@ async def test_structured_filter_before_ranking(
 
 
 @pytest.mark.asyncio
+async def test_normalized_region_filter_matches_canonical_snapshot_region(
+    seeded_session, searcher, session_factory
+) -> None:
+    """A province shorthand from intent parsing matches canonical snapshot data."""
+    filters = _fixed_filter()
+    filters.regions = ["四川"]
+    result = await searcher.search(QUERY_TEXT, filters)
+
+    async with session_factory() as session:
+        expected = [
+            await _id_for(session, "sichuan-strong"),
+            await _id_for(session, "text-weak-vector-strong"),
+            await _id_for(session, "text-strong-vector-weak"),
+        ]
+
+    actual = sorted(candidate.notice_version_id for candidate in result.candidates)
+    assert actual == sorted(expected)
+
+
+@pytest.mark.asyncio
 async def test_vector_contribution_is_deterministic(
     seeded_session, searcher, session_factory
 ) -> None:

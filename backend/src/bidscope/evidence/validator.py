@@ -13,6 +13,7 @@ graph never delivers a report containing it.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from bidscope.domain.notices import NoticeEvidence
@@ -22,6 +23,7 @@ from bidscope.llm.types import ReportDraft
 #: A report-like object the validator accepts: a trusted :class:`Report` or the
 #: :class:`ReportDraft` produced by synthesis before it is promoted.
 ReportLike = Report | ReportDraft
+EvidenceById = Mapping[str, NoticeEvidence | list[NoticeEvidence] | tuple[NoticeEvidence, ...]]
 
 
 @dataclass(frozen=True)
@@ -48,7 +50,7 @@ def _hash(text: str) -> str:
 def validate_claim(
     claim: ReportClaim,
     item_version_id: str,
-    evidence_by_id: dict[str, NoticeEvidence],
+    evidence_by_id: EvidenceById,
 ) -> ClaimValidationResult:
     """Check that every citation in ``claim`` resolves to valid evidence.
 
@@ -62,12 +64,22 @@ def validate_claim(
         return ClaimValidationResult(valid=False, errors=("claim_without_citation",))
 
     for citation_id in claim.citation_ids:
-        evidence = evidence_by_id.get(citation_id)
-        if evidence is None:
+        binding = evidence_by_id.get(citation_id)
+        if binding is None:
             errors.append("missing_evidence")
             continue
-        if evidence.notice_version_id != item_version_id:
+        candidates = binding if isinstance(binding, (list, tuple)) else (binding,)
+        evidence = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.notice_version_id == item_version_id
+            ),
+            None,
+        )
+        if evidence is None:
             errors.append("citation_version_mismatch")
+            continue
         if evidence.start < 0 or evidence.end < evidence.start:
             errors.append("invalid_offset")
         text_length = len(evidence.text)
@@ -81,7 +93,7 @@ def validate_claim(
 
 def validate_report(
     report: ReportLike,
-    evidence_by_id: dict[str, NoticeEvidence],
+    evidence_by_id: EvidenceById,
 ) -> ReportValidationResult:
     """Validate every claim in a :class:`~bidscope.domain.reports.Report`.
 

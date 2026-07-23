@@ -22,8 +22,10 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
+from bidscope.delivery.docx import DeliveryError
 from bidscope.domain.enums import RunStatus
 from bidscope.domain.notices import NoticeEvidence
+from bidscope.domain.reports import Report
 from bidscope.domain.runs import SerializableError
 from bidscope.domain.types import BidScopeErrorCode
 from bidscope.evidence.extractor import extract_evidence
@@ -285,7 +287,9 @@ async def verify_evidence(state: Any, config: RunnableConfig) -> dict[str, Any]:
     """
     deps = _deps(config)
     views_by_id = deps.load_notice_views(list(state.candidate_notice_ids))
-    evidence_by_id: dict[str, NoticeEvidence] = {}
+    evidence_by_id: dict[
+        str, NoticeEvidence | list[NoticeEvidence] | tuple[NoticeEvidence, ...]
+    ] = {}
     verified: list[VerifiedOpportunity] = []
 
     for notice_version_id in state.candidate_notice_ids:
@@ -297,7 +301,15 @@ async def verify_evidence(state: Any, config: RunnableConfig) -> dict[str, Any]:
         spans = extract_evidence(notice_version_id, source_text, snippets)
         evidence_spans = []
         for span in spans:
-            evidence_by_id[span.span_hash] = span
+            existing = evidence_by_id.get(span.span_hash)
+            if existing is None:
+                evidence_by_id[span.span_hash] = span
+            elif isinstance(existing, list):
+                evidence_by_id[span.span_hash] = [*existing, span]
+            elif isinstance(existing, tuple):
+                evidence_by_id[span.span_hash] = (*existing, span)
+            else:
+                evidence_by_id[span.span_hash] = (existing, span)
             evidence_spans.append(EvidenceSpan(
                 evidence_id=span.span_hash,
                 text=span.text,
@@ -375,11 +387,84 @@ async def validate_report(state: Any, config: RunnableConfig) -> dict[str, Any]:
 
 
 async def persist_and_deliver(state: Any, config: RunnableConfig) -> dict[str, Any]:
-    """Finalize the run: the report is now trusted and the run is complete."""
+    """Persist a validated online report before attempting its DOCX attachment."""
+    deps = _deps(config)
+    draft = state.report
+    if draft is None or state.search_intent is None:
+        return {
+            "status": RunStatus.FAILED,
+            "errors": [SerializableError(
+                code=BidScopeErrorCode.DELIVERY_ERROR,
+                message="validated report or confirmed intent was unavailable",
+                details={},
+            )],
+            "node_events": [_event(
+                config, state, "persist_and_deliver", "online_report_failed", "error"
+            )],
+        }
+
+    report = Report(
+        run_id=state.run_id,
+        generated_at=deps.clock.now(),
+        query_conditions=_intent_conditions(state.search_intent),
+        freshness_window=draft.freshness_window,
+        source_availability=draft.source_availability,
+        completeness_warning=draft.completeness_warning,
+        items=draft.items,
+    )
+    try:
+        persisted = await deps.report_persistence.persist_online_report(
+            report, state.evidence_by_id
+        )
+    except DeliveryError as error:
+        return {
+            "status": RunStatus.FAILED,
+            "errors": [SerializableError(code=error.code, message=str(error), details={})],
+            "node_events": [_event(
+                config, state, "persist_and_deliver", "online_report_failed", "error"
+            )],
+        }
+
+    try:
+        await deps.report_persistence.export_docx(persisted)
+    except DeliveryError as error:
+        return {
+            "status": RunStatus.COMPLETED,
+            "errors": [SerializableError(
+                code=error.code,
+                message=str(error),
+                details={"docx_retryable": True},
+            )],
+            "node_events": [_event(
+                config,
+                state,
+                "persist_and_deliver",
+                "online_report_ready_docx_failed",
+                "degraded",
+            )],
+        }
+
     return {
         "status": RunStatus.COMPLETED,
-        "node_events": [_event(config, state, "persist_and_deliver", "run_completed", "ok")],
+        "node_events": [_event(config, state, "persist_and_deliver", "report_delivered", "ok")],
     }
+
+
+def _intent_conditions(intent: Any) -> dict[str, str]:
+    """Serialize confirmed intent into small display-safe report conditions."""
+    conditions: dict[str, str] = {
+        "topics": ", ".join(intent.topics),
+        "regions": ", ".join(intent.regions),
+    }
+    if intent.published_from is not None:
+        conditions["published_from"] = intent.published_from.isoformat()
+    if intent.published_to is not None:
+        conditions["published_to"] = intent.published_to.isoformat()
+    if intent.min_budget is not None:
+        conditions["min_budget"] = f"{intent.min_budget.currency} {intent.min_budget.minor_units}"
+    if intent.max_budget is not None:
+        conditions["max_budget"] = f"{intent.max_budget.currency} {intent.max_budget.minor_units}"
+    return conditions
 
 
 def route_after_validate_report(state: Any) -> str:

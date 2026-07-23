@@ -16,6 +16,7 @@ import sqlalchemy as sa
 from bidscope.clock import FixedClock
 from bidscope.config import get_settings
 from bidscope.graph.builder import GraphDeps, build_graph
+from graph_fakes import FakeReportPersistence
 from bidscope.graph.executor import (
     _to_plain_dsn,
     create_run,
@@ -48,6 +49,7 @@ def _build_deps() -> GraphDeps:
         searcher=FakeSearcher(),
         clock=FixedClock(datetime(2026, 7, 18, 9, 0, tzinfo=UTC)),
         load_notice_views=lambda ids: {},
+        report_persistence=FakeReportPersistence(),
     )
 
 

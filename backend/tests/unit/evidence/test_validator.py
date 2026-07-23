@@ -48,6 +48,19 @@ def test_claim_must_reference_same_notice_version() -> None:
     assert result.errors == ("citation_version_mismatch",)
 
 
+def test_claim_selects_matching_version_when_hash_is_shared() -> None:
+    """The same content hash may legitimately occur in two source versions."""
+    first = _evidence(notice_version_id="version-1", text="四川省")
+    second = _evidence(notice_version_id="version-2", text="四川省")
+    result = validate_claim(
+        claim=ReportClaim(text="四川省", citation_ids=[first.span_hash]),
+        item_version_id="version-1",
+        evidence_by_id={first.span_hash: (first, second)},
+    )
+    assert result.valid is True
+    assert result.errors == ()
+
+
 def test_claim_with_missing_evidence_is_rejected() -> None:
     """A citation id with no matching evidence span is rejected."""
     result = validate_claim(

@@ -123,6 +123,8 @@ async def execute(
     ``run_events`` rows.
     """
     config = _config(run_id)
+    if isinstance(input, dict) and "run_id" not in input:
+        input = {**input, "run_id": str(run_id)}
 
     # Idempotency guard: a *completed* run short-circuits on the checkpointer.
     # A run interrupted at a pause node also carries a checkpoint, but its

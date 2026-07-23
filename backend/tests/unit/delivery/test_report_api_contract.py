@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
-from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from bidscope.delivery.docx import ReportDelivery
+from bidscope.delivery.reports import PersistedReport
 from bidscope.domain.reports import Report
 from bidscope.persistence.models import Report as ReportModel
 
 RUN_ID = "11111111-1111-1111-1111-111111111111"
+REPORT_ID = "22222222-2222-2222-2222-222222222222"
 
 
 class _FakeObjectStore:
@@ -27,19 +29,19 @@ class _FakeObjectStore:
         return key in self.objects
 
 
-class _ScalarResult:
-    def scalar_one_or_none(self) -> None:
-        return None
+class _CancellingObjectStore(_FakeObjectStore):
+    def put_bytes(self, key: str, data: bytes) -> str:
+        raise asyncio.CancelledError()
 
 
 class _FakeSession:
-    def __init__(self) -> None:
-        self.added: list[Any] = []
-        self.execute = AsyncMock(return_value=_ScalarResult())
+    def __init__(self, row: ReportModel | None) -> None:
+        self.row = row
         self.commit = AsyncMock()
+        self.add = Mock()
 
-    def add(self, row: Any) -> None:
-        self.added.append(row)
+    async def get(self, _model: object, _id: str) -> ReportModel | None:
+        return self.row
 
 
 class _SessionContext:
@@ -62,18 +64,39 @@ def _sample_report() -> Report:
 
 
 @pytest.mark.asyncio
-async def test_export_persists_typed_report_run_id() -> None:
+async def test_export_attaches_docx_to_existing_typed_online_report() -> None:
     report = _sample_report()
-    session = _FakeSession()
+    row = ReportModel(
+        id=REPORT_ID,
+        run_id=RUN_ID,
+        export_key="online:" + RUN_ID,
+        generated_at=report.generated_at,
+    )
+    session = _FakeSession(row)
     session_factory = Mock(return_value=_SessionContext(session))
+    delivery = ReportDelivery(store=_FakeObjectStore(), session_factory=session_factory)
+
+    record = await delivery.export_report(PersistedReport(REPORT_ID, report, None))
+
+    assert record.report_id == REPORT_ID
+    assert row.docx_object_key == record.object_key
+    session.add.assert_not_called()
+    session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_export_does_not_convert_cancellation_to_delivery_error() -> None:
+    report = _sample_report()
+    row = ReportModel(
+        id=REPORT_ID,
+        run_id=RUN_ID,
+        export_key="online:" + RUN_ID,
+        generated_at=report.generated_at,
+    )
+    session_factory = Mock(return_value=_SessionContext(_FakeSession(row)))
     delivery = ReportDelivery(
-        store=_FakeObjectStore(),
-        session_factory=session_factory,
+        store=_CancellingObjectStore(), session_factory=session_factory
     )
 
-    await delivery.export_report(report)
-
-    assert len(session.added) == 1
-    persisted = session.added[0]
-    assert isinstance(persisted, ReportModel)
-    assert persisted.run_id == report.run_id
+    with pytest.raises(asyncio.CancelledError):
+        await delivery.export_report(PersistedReport(REPORT_ID, report, None))

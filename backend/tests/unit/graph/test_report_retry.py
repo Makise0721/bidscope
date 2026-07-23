@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from bidscope.clock import FixedClock
+from bidscope.delivery.docx import DeliveryError
 from bidscope.domain.enums import RunStatus
 from bidscope.domain.intents import SearchIntent
 from bidscope.graph.builder import GraphDeps, build_graph
@@ -22,6 +23,7 @@ from bidscope.retrieval.search import (
     RetrievalFilter,
     RetrievalResult,
 )
+from graph_fakes import FakeReportPersistence
 from langgraph.checkpoint.memory import InMemorySaver
 
 
@@ -92,6 +94,18 @@ class ScriptedReportModel:
         )
 
 
+class FailingOnlineReportPersistence(FakeReportPersistence):
+    async def persist_online_report(self, report, evidence_by_hash):  # type: ignore[no-untyped-def]
+        _ = report, evidence_by_hash
+        raise DeliveryError("online persistence unavailable")
+
+
+class FailingDocxReportPersistence(FakeReportPersistence):
+    async def export_docx(self, persisted):  # type: ignore[no-untyped-def]
+        _ = persisted
+        raise DeliveryError("DOCX storage unavailable")
+
+
 class ScriptedDuplicateModel:
     async def classify(self, pair: Any) -> Any:
         from bidscope.retrieval.deduplication import DuplicateClassification
@@ -128,6 +142,7 @@ def _deps(
     *,
     fail_for_first_n_calls: int,
     candidate_ids: list[str] | None = None,
+    report_persistence: Any | None = None,
 ) -> GraphDeps:
     from bidscope.retrieval.deduplication import NoticeView
 
@@ -156,6 +171,7 @@ def _deps(
         searcher=ScriptedSearcher(candidate_ids=candidate_ids or ["v1"]),
         clock=FixedClock(datetime(2026, 7, 18, 9, 0, tzinfo=UTC)),
         load_notice_views=lambda ids: views,
+        report_persistence=report_persistence or FakeReportPersistence(),
     )
 
 
@@ -187,6 +203,40 @@ async def test_second_validation_fails_as_evidence_insufficient() -> None:
     assert deps.searcher.search_count == 1, "retrieval must run exactly once"
     codes = [e.code for e in result["errors"]]
     assert "evidence_insufficient" in codes
+
+
+async def test_online_report_persistence_failure_does_not_complete_run() -> None:
+    deps = _deps(
+        fail_for_first_n_calls=0,
+        report_persistence=FailingOnlineReportPersistence(),
+    )
+    graph = build_graph(deps, checkpointer=InMemorySaver())
+
+    result = await graph.ainvoke(
+        {"user_request": "x", "run_id": "delivery-failure"},
+        {"configurable": {"thread_id": "delivery-failure"}},
+    )
+
+    assert result["status"] == RunStatus.FAILED
+    assert result["node_events"][-1]["event"] == "online_report_failed"
+
+
+async def test_docx_failure_completes_run_with_degraded_delivery_event() -> None:
+    deps = _deps(
+        fail_for_first_n_calls=0,
+        report_persistence=FailingDocxReportPersistence(),
+    )
+    graph = build_graph(deps, checkpointer=InMemorySaver())
+
+    result = await graph.ainvoke(
+        {"user_request": "x", "run_id": "docx-failure"},
+        {"configurable": {"thread_id": "docx-failure"}},
+    )
+
+    assert result["status"] == RunStatus.COMPLETED
+    assert result["errors"][-1].details == {"docx_retryable": True}
+    assert result["node_events"][-1]["event"] == "online_report_ready_docx_failed"
+    assert result["node_events"][-1]["status"] == "degraded"
 
 
 __all__ = ["ReportModel", "VerifiedOpportunity"]

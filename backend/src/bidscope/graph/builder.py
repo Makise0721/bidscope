@@ -59,6 +59,7 @@ class GraphDeps:
     searcher: HybridSearcher
     clock: Any
     load_notice_views: Callable[[list[str]], dict[str, Any]]
+    report_persistence: Any
 
 
 def _route_after_validate(state: Any) -> str:
