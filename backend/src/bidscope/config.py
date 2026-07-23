@@ -1,6 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,6 +26,7 @@ class Settings(BaseSettings):
     #: Root directory for the local object store (DOCX outputs and snapshot
     #: payloads in local/demo deployments).
     object_store_root: str = "data/objects"
+    stale_run_after_seconds: int = Field(default=300, gt=0)
     #: Token required by the ``/api/test-controls/*`` routes. Those routes are
     #: only registered when ``app_mode == "test"``, and this token gates them.
     test_control_token: str | None = None

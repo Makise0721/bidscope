@@ -7,6 +7,7 @@ import time
 import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import sqlalchemy as sa
@@ -81,22 +82,32 @@ def test_test_mode_api_uses_postgres_checkpointer(test_settings: Settings) -> No
 
 
 def test_startup_marks_only_stale_runs_retryable(test_settings: Settings) -> None:
-    """Recovery runs after the service is valid and leaves terminal/pause rows alone."""
-    ids = {status: str(uuid.uuid4()) for status in (
-        "pending", "running", "completed", "awaiting_confirmation",
-    )}
+    """Startup recovery leaves fresh and nonrecoverable rows untouched."""
+    now = datetime.now(UTC)
+    old = now - timedelta(seconds=test_settings.stale_run_after_seconds + 1)
+    fresh = now - timedelta(seconds=1)
+    records = {
+        "old_pending": ("pending", old),
+        "old_running": ("running", old),
+        "fresh_pending": ("pending", fresh),
+        "fresh_running": ("running", fresh),
+        "completed": ("completed", old),
+        "awaiting_confirmation": ("awaiting_confirmation", old),
+    }
+    ids = {name: str(uuid.uuid4()) for name in records}
 
     async def seed() -> None:
         engine, session_factory = create_engine_and_session(test_settings)
         try:
             async with session_factory() as session:
-                for status, run_id in ids.items():
+                for name, (status, updated_at) in records.items():
                     session.add(QueryRun(
-                        id=run_id,
-                        run_key=run_id,
+                        id=ids[name],
+                        run_key=ids[name],
                         status=status,
                         user_request="startup recovery",
-                        checkpoint_thread_id=run_id,
+                        checkpoint_thread_id=ids[name],
+                        updated_at=updated_at,
                     ))
                 await session.commit()
         finally:
@@ -115,8 +126,10 @@ def test_startup_marks_only_stale_runs_retryable(test_settings: Settings) -> Non
         recovered = _run_in_client(client, statuses)
         assert client.app.state.run_service.checkpointer_kind == "postgres"
 
-    assert recovered[ids["pending"]] == "retryable"
-    assert recovered[ids["running"]] == "retryable"
+    assert recovered[ids["old_pending"]] == "retryable"
+    assert recovered[ids["old_running"]] == "retryable"
+    assert recovered[ids["fresh_pending"]] == "pending"
+    assert recovered[ids["fresh_running"]] == "running"
     assert recovered[ids["completed"]] == "completed"
     assert recovered[ids["awaiting_confirmation"]] == "awaiting_confirmation"
 

@@ -8,6 +8,7 @@ exposes the run lifecycle operations the routes call.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, is_dataclass
@@ -146,6 +147,8 @@ class RunService:
         #: Set by the ``/api/test-controls/fail-next-node`` route and consumed
         #: once by ``execute_run``.
         self.fail_next_node: str | None = None
+        self._run_tasks: set[asyncio.Task[dict[str, Any]]] = set()
+        self._shutting_down = False
 
     async def create_run(
         self, user_request: str, *, run_key: str | None = None
@@ -155,6 +158,25 @@ class RunService:
             user_request, run_key=run_key, session_factory=self.session_factory
         )
 
+    def schedule_run(self, run_id: str, input: Any) -> asyncio.Task[dict[str, Any]]:  # noqa: ANN401
+        """Schedule a run and retain it until its task completes."""
+        if self._shutting_down:
+            raise RuntimeError("run service is shutting down")
+        task = asyncio.create_task(self.execute_run(run_id, input))
+        self._run_tasks.add(task)
+        task.add_done_callback(self._run_tasks.discard)
+        return task
+
+    async def shutdown(self) -> None:
+        """Cancel and drain all detached runs before shared resources close."""
+        self._shutting_down = True
+        tasks = tuple(self._run_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._run_tasks.clear()
+
     async def execute_run(self, run_id: str, input: Any) -> dict[str, Any]:  # noqa: ANN401
         """Drive the graph from ``input`` and sync the final status back to the DB.
 
@@ -162,6 +184,30 @@ class RunService:
         short-circuits with a ``retryable`` failure *before* the graph executes,
         then clears the flag so subsequent runs proceed normally.
         """
+        try:
+            return await self._execute_run(run_id, input)
+        except asyncio.CancelledError:
+            error = SerializableError(
+                code=BidScopeErrorCode.GRAPH_NODE_ERROR,
+                message="run execution cancelled",
+                details={},
+            ).model_dump(mode="json")
+            await self._persist_cancellation(run_id, error)
+            raise
+
+    async def _persist_cancellation(
+        self, run_id: str, error: dict[str, Any]
+    ) -> None:
+        """Best-effort cancellation persistence while shared resources remain open."""
+        task = asyncio.create_task(self._update_status(run_id, "retryable", error=error))
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        except BaseException:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _execute_run(self, run_id: str, input: Any) -> dict[str, Any]:  # noqa: ANN401
         fail_node = self.fail_next_node
         if fail_node is not None:
             self.fail_next_node = None
@@ -221,7 +267,22 @@ class RunService:
 
         thread_id = run.checkpoint_thread_id or str(run.id)
         get_state = getattr(self.graph, "aget_state", None)
-        state = await get_state({"configurable": {"thread_id": thread_id}}) if get_state else None
+        try:
+            state = (
+                await get_state({"configurable": {"thread_id": thread_id}})
+                if get_state
+                else None
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - checkpoint recovery boundary
+            serializable_error = SerializableError(
+                code=BidScopeErrorCode.GRAPH_NODE_ERROR,
+                message=str(error)[:1000],
+                details={},
+            ).model_dump(mode="json")
+            await self._update_status(run_id, "retryable", error=serializable_error)
+            return {"status": "retryable", "errors": [serializable_error]}
         if state and state.values and state.next:
             return await self.execute_run(run_id, Command(resume={"action": "approve"}))
         return await self.execute_run(run_id, {"user_request": run.user_request})
@@ -232,7 +293,7 @@ class RunService:
             result = await session.execute(
                 sa.update(QueryRun)
                 .where(QueryRun.id == run_id, QueryRun.status == eligible_status)
-                .values(status="running")
+                .values(status="running", updated_at=self.clock.now())
                 .returning(QueryRun.id)
             )
             claimed_id = result.scalar_one_or_none()
@@ -268,6 +329,7 @@ class RunService:
             run = await session.get(QueryRun, run_id)
             if run is not None:
                 run.status = str(status)
+                run.updated_at = self.clock.now()
                 if result is not None:
                     intent = result.get("search_intent")
                     if intent is not None:

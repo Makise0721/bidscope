@@ -219,17 +219,22 @@ async def create_run(
 async def mark_stale_runs_retryable(
     *,
     session_factory: Any,
+    stale_before: datetime | None = None,
 ) -> int:
     """Mark stale ``pending`` and ``running`` rows as ``retryable``.
 
     A process crash can leave rows stuck before or during execution; on startup
-    we flip both states to ``retryable``. Their checkpoints remain intact.
+    we flip old rows in both states to ``retryable``. Their checkpoints remain
+    intact.
     """
     async with session_factory() as session:
+        statement = sa.update(QueryRun).where(
+            QueryRun.status.in_(("pending", "running")),
+        )
+        if stale_before is not None:
+            statement = statement.where(QueryRun.updated_at < stale_before)
         result = await session.execute(
-            sa.update(QueryRun)
-            .where(QueryRun.status.in_(("pending", "running")))
-            .values(status="retryable")
+            statement.values(status="retryable", updated_at=datetime.now(UTC))
             .returning(QueryRun.id)
         )
         ids = result.scalars().all()

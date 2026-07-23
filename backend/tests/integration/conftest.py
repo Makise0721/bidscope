@@ -3,7 +3,7 @@ import os
 import subprocess
 import sys
 import warnings
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -161,6 +161,37 @@ def session_factory(
     return async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
 
 
+async def _truncate_test_tables(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Clear relational records and stateful LangGraph checkpoint rows."""
+    async with session_factory() as session:
+        await session.execute(
+            sa.text(
+                "TRUNCATE TABLE checkpoint_blobs, checkpoint_writes, checkpoints CASCADE"
+            )
+        )
+        # query_runs CASCADEs to run_events and reports; the remaining tables
+        # CASCADE among themselves via their foreign keys.
+        await session.execute(
+            sa.text(
+                "TRUNCATE TABLE source_notices, canonical_notices, query_runs CASCADE"
+            )
+        )
+        await session.commit()
+
+
+@pytest_asyncio.fixture
+async def reset_test_database(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> Callable[[], Awaitable[None]]:
+    """Expose the same cleanup used by the integration isolation fixture."""
+    async def reset() -> None:
+        await _truncate_test_tables(session_factory)
+
+    return reset
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def _clean_tables(session_factory: async_sessionmaker[AsyncSession]) -> None:
     """Provide test isolation on the shared test database.
@@ -170,12 +201,4 @@ async def _clean_tables(session_factory: async_sessionmaker[AsyncSession]) -> No
     (notice_versions, report_items, ...) that foreign-key into the truncated
     ones.
     """
-    async with session_factory() as session:
-        # query_runs CASCADEs to run_events and reports; the remaining tables
-        # CASCADE among themselves via their foreign keys.
-        await session.execute(
-            sa.text(
-                "TRUNCATE TABLE source_notices, canonical_notices, query_runs CASCADE"
-            )
-        )
-        await session.commit()
+    await _truncate_test_tables(session_factory)

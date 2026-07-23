@@ -55,15 +55,16 @@ def test_run_idempotency_replays_without_duplicate_execution(
     monkeypatch: Any,
 ) -> None:
     """A repeated key returns the original run and schedules execution once."""
-    executions: list[str] = []
+    scheduled: list[str] = []
 
-    async def fake_execute_run(
+    def fake_schedule_run(
         self: RunService, run_id: str, input_data: Any
-    ) -> dict[str, Any]:
-        executions.append(run_id)
-        return {"status": "pending"}
+    ) -> object:
+        del self, input_data
+        scheduled.append(run_id)
+        return object()
 
-    monkeypatch.setattr(RunService, "execute_run", fake_execute_run)
+    monkeypatch.setattr(RunService, "schedule_run", fake_schedule_run)
     headers = {"Idempotency-Key": "api-replay-key"}
 
     first = demo_client.post("/api/runs", json=RUN_BODY, headers=headers)
@@ -72,7 +73,7 @@ def test_run_idempotency_replays_without_duplicate_execution(
     assert first.status_code == 201, first.text
     assert replay.status_code == 200, replay.text
     assert replay.json()["id"] == first.json()["id"]
-    assert executions == [first.json()["id"]]
+    assert scheduled == [first.json()["id"]]
 
 
 def test_run_idempotency_key_rejects_different_normalized_request(
@@ -107,15 +108,16 @@ def test_runs_without_idempotency_key_are_independent(
     monkeypatch: Any,
 ) -> None:
     """Requests without a key create and execute independent runs."""
-    executions: list[str] = []
+    scheduled: list[str] = []
 
-    async def fake_execute_run(
+    def fake_schedule_run(
         self: RunService, run_id: str, input_data: Any
-    ) -> dict[str, Any]:
-        executions.append(run_id)
-        return {"status": "pending"}
+    ) -> object:
+        del self, input_data
+        scheduled.append(run_id)
+        return object()
 
-    monkeypatch.setattr(RunService, "execute_run", fake_execute_run)
+    monkeypatch.setattr(RunService, "schedule_run", fake_schedule_run)
 
     first = demo_client.post("/api/runs", json=RUN_BODY)
     second = demo_client.post("/api/runs", json=RUN_BODY)
@@ -123,7 +125,7 @@ def test_runs_without_idempotency_key_are_independent(
     assert first.status_code == 201, first.text
     assert second.status_code == 201, second.text
     assert first.json()["id"] != second.json()["id"]
-    assert executions == [first.json()["id"], second.json()["id"]]
+    assert scheduled == [first.json()["id"], second.json()["id"]]
 
 
 def test_run_idempotency_key_must_not_be_blank(demo_client: TestClient) -> None:

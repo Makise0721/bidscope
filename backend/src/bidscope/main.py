@@ -9,6 +9,7 @@ wraps them. Test-only routes are registered only when ``app_mode == "test"``.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -44,8 +45,17 @@ async def lifespan(app: FastAPI) -> Any:
         app.state.run_service = service
         app.state.engine = engine
         app.state.fail_next_node = False
-        await mark_stale_runs_retryable(session_factory=service.session_factory)
-        yield
+        stale_before = clock.now() - timedelta(
+            seconds=settings.stale_run_after_seconds
+        )
+        await mark_stale_runs_retryable(
+            session_factory=service.session_factory,
+            stale_before=stale_before,
+        )
+        try:
+            yield
+        finally:
+            await service.shutdown()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

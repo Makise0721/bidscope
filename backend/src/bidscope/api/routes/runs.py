@@ -14,7 +14,6 @@ The state-machine contract:
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from typing import Any
 
@@ -79,9 +78,7 @@ async def create_run(
         )
     if created:
         # Schedule only after the pending row commits, so acknowledged work is durable.
-        asyncio.create_task(
-            service.execute_run(run_id, {"user_request": user_request})
-        )
+        service.schedule_run(run_id, {"user_request": user_request})
     else:
         response.status_code = 200
     return RunQueryResult.from_row(run).__dict__ if run else {

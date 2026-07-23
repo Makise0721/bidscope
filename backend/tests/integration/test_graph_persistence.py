@@ -8,6 +8,7 @@ channel state, resuming never re-emits or re-persists them.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -22,7 +23,7 @@ from bidscope.graph.executor import (
     execute,
 )
 from bidscope.llm.fake import FakeDuplicateModel, FakeIntentModel, FakeReportModel
-from bidscope.persistence.models import RunEvent
+from bidscope.persistence.models import QueryRun, RunEvent
 from bidscope.retrieval.search import RetrievalFilter, RetrievalResult
 from graph_fakes import FakeReportPersistence
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -98,6 +99,48 @@ async def test_cross_instance_resume_does_not_duplicate_upstream_events(
     assert events_after_b >= events_after_a
     # The Clock-injected timestamp is persisted, not just server insert time.
     await _assert_timestamps_persisted(run_id, session_factory)
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_cleanup_allows_a_reused_thread_to_execute_fresh_events(
+    session_factory: Any,
+    reset_test_database: Any,
+) -> None:
+    """Isolation clears terminal checkpoints as well as relational run rows."""
+    run_id = str(uuid.uuid4())
+    request = {"user_request": "四川省服务器招标"}
+
+    async with session_factory() as session:
+        session.add(QueryRun(
+            id=run_id,
+            run_key="checkpoint-cleanup-old",
+            status="pending",
+            user_request=request["user_request"],
+            checkpoint_thread_id=run_id,
+        ))
+        await session.commit()
+    async with await _new_checkpointer() as old_checkpointer:
+        old_graph = build_graph(_build_deps(), checkpointer=old_checkpointer)
+        old_result = await execute(old_graph, run_id, request, session_factory=session_factory)
+    assert old_result["status"] == "completed"
+
+    await reset_test_database()
+
+    async with session_factory() as session:
+        session.add(QueryRun(
+            id=run_id,
+            run_key="checkpoint-cleanup-fresh",
+            status="pending",
+            user_request=request["user_request"],
+            checkpoint_thread_id=run_id,
+        ))
+        await session.commit()
+    async with await _new_checkpointer() as fresh_checkpointer:
+        fresh_graph = build_graph(_build_deps(), checkpointer=fresh_checkpointer)
+        fresh_result = await execute(fresh_graph, run_id, request, session_factory=session_factory)
+
+    assert fresh_result["status"] == "completed"
+    assert await _count_events(run_id, session_factory) > 0
 
 
 async def _assert_timestamps_persisted(run_id: str, session_factory: Any) -> None:

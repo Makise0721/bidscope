@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -67,6 +68,12 @@ api_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(api_app, name="api")
+
+
+def configure_windows_selector_event_loop_policy() -> None:
+    """Use selector-backed loops for psycopg async connections on Windows."""
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
 def _build_importer() -> SnapshotImporter:
@@ -216,6 +223,7 @@ def api_serve(
 
     from bidscope.main import app
 
+    configure_windows_selector_event_loop_policy()
     uvicorn.run(app, host=host, port=port)
 
 
@@ -227,6 +235,7 @@ def scheduler_run_once() -> None:
     """Run one scheduler tick immediately (used by tests and manual triggers)."""
     from bidscope.subscriptions.scheduler import run_scheduler_tick
 
+    configure_windows_selector_event_loop_policy()
     counters = asyncio.run(run_scheduler_tick(get_settings()))
     typer.echo(
         "scheduler tick: "
@@ -242,6 +251,7 @@ def scheduler_start() -> None:
     """Start the APScheduler process role (blocks; one instance per host)."""
     from bidscope.subscriptions.scheduler import start_scheduler
 
+    configure_windows_selector_event_loop_policy()
     scheduler = start_scheduler()
     typer.echo("subscription scheduler started (Ctrl+C to stop)")
     try:
