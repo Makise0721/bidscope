@@ -17,7 +17,6 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from bidscope.api.dependencies import create_run_service
-from bidscope.graph.executor import mark_stale_runs_retryable
 from bidscope.api.routes import (
     evaluations,
     events,
@@ -40,7 +39,6 @@ async def lifespan(app: FastAPI) -> Any:
     settings: Settings = app.state.settings
     clock = SystemClock()
     service, engine = create_run_service(settings, clock=clock)
-    await mark_stale_runs_retryable(session_factory=service.session_factory)
     app.state.clock = clock
     app.state.run_service = service
     app.state.engine = engine
