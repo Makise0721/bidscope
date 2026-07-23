@@ -71,6 +71,12 @@ async def create_run(
     run_key = supplied_key.strip() if supplied_key is not None else str(uuid.uuid4())
 
     run_id, created = await service.create_run(user_request, run_key=run_key)
+    run = await service.get_run(run_id)
+    if not created and run is not None and run.user_request != user_request:
+        raise HTTPException(
+            status_code=409,
+            detail="Idempotency-Key is already bound to a different user_request",
+        )
     if created:
         # Schedule only after the pending row commits, so acknowledged work is durable.
         asyncio.create_task(
@@ -78,7 +84,6 @@ async def create_run(
         )
     else:
         response.status_code = 200
-    run = await service.get_run(run_id)
     return RunQueryResult.from_row(run).__dict__ if run else {
         "id": run_id, "status": "pending", "user_request": user_request
     }

@@ -14,6 +14,8 @@ from typing import Any
 
 import pytest
 import sqlalchemy as sa
+from bidscope.api.dependencies import RunService
+from bidscope.config import get_settings
 from bidscope.graph.executor import create_run, mark_stale_runs_retryable
 from bidscope.persistence.models import QueryRun
 
@@ -97,3 +99,45 @@ async def test_create_run_concurrent_same_key_returns_one_row(session_factory: A
             sa.select(sa.func.count()).where(QueryRun.run_key == "concurrent-key")
         )
     assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_run_persists_retryable_when_executor_raises(
+    session_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A route-style detached task resolves after an unexpected graph failure."""
+    from bidscope.api import dependencies
+
+    async def exploding_execute(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        raise RuntimeError("executor failure")
+
+    monkeypatch.setattr(dependencies, "execute", exploding_execute)
+    service = RunService(
+        session_factory=session_factory,
+        graph=object(),
+        object_store=object(),
+        settings=get_settings(),
+    )
+    run_id, created = await service.create_run(
+        "failing request", run_key="executor-failure",
+    )
+    assert created is True
+
+    task = asyncio.create_task(
+        service.execute_run(run_id, {"user_request": "failing request"}),
+    )
+    result = await task
+
+    assert result["status"] == "retryable"
+    assert task.exception() is None
+    async with session_factory() as session:
+        run = await session.get(QueryRun, run_id)
+    assert run is not None
+    assert run.status == "retryable"
+    assert run.error == {
+        "code": "graph_node_error",
+        "message": "executor failure",
+        "details": {},
+    }

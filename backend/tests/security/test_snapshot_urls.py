@@ -171,6 +171,20 @@ def test_manifest_accepts_pydantic_url_collections(source_urls: object) -> None:
     assert manifest.source_urls[0].host == "www.ccgp.gov.cn"
 
 
+def test_manifest_rejects_broken_custom_iterable_as_validation_error() -> None:
+    """A custom iterable is left to Pydantic instead of eagerly materialized."""
+
+    class BrokenIterable:
+        def __iter__(self) -> object:
+            raise TypeError("custom iterator must not be consumed")
+
+    data = _valid_manifest_dict()
+    data["source_urls"] = BrokenIterable()
+
+    with pytest.raises(ValidationError):
+        SnapshotManifest.model_validate(data)
+
+
 # 4. Non-default port ---------------------------------------------------------
 
 

@@ -484,13 +484,14 @@ class SubscriptionService:
 
         # 1. Create a query run (reuses the executor's run lifecycle so a
         #    ``QueryRun`` row exists for the dual-worker assertion).
-        run_id, _created = await create_run(
+        run_id, created = await create_run(
             f"subscription {sub.id}", session_factory=self.session_factory,
         )
-        await execute(
-            _dummy_graph(), run_id, {"user_request": f"subscription {sub.id}"},
-            session_factory=self.session_factory,
-        )
+        if created:
+            await execute(
+                _dummy_graph(), run_id, {"user_request": f"subscription {sub.id}"},
+                session_factory=self.session_factory,
+            )
 
         # 2. Retrieve notices matching the subscription's intent.
         notices = await self._retrieve_notices(session, sub)

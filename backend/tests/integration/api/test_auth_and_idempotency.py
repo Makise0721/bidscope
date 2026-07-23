@@ -75,6 +75,33 @@ def test_run_idempotency_replays_without_duplicate_execution(
     assert executions == [first.json()["id"]]
 
 
+def test_run_idempotency_key_rejects_different_normalized_request(
+    demo_client: TestClient,
+    monkeypatch: Any,
+) -> None:
+    """A key may replay its original normalized request only."""
+    executions: list[str] = []
+
+    async def fake_execute_run(
+        self: RunService, run_id: str, input_data: Any
+    ) -> dict[str, Any]:
+        del self, input_data
+        executions.append(run_id)
+        return {"status": "pending"}
+
+    monkeypatch.setattr(RunService, "execute_run", fake_execute_run)
+    headers = {"Idempotency-Key": "api-conflict-key"}
+    first_request = {"user_request": "  first request  "}
+    second_request = {"user_request": "second request"}
+
+    first = demo_client.post("/api/runs", json=first_request, headers=headers)
+    conflict = demo_client.post("/api/runs", json=second_request, headers=headers)
+
+    assert first.status_code == 201, first.text
+    assert conflict.status_code == 409, conflict.text
+    assert executions == [first.json()["id"]]
+
+
 def test_runs_without_idempotency_key_are_independent(
     demo_client: TestClient,
     monkeypatch: Any,

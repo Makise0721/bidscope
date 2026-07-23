@@ -20,6 +20,8 @@ from bidscope.clock import Clock, SystemClock
 from bidscope.config import Settings
 from bidscope.db import create_engine_and_session
 from bidscope.delivery.objects import LocalObjectStore, ObjectStore
+from bidscope.domain.runs import SerializableError
+from bidscope.domain.types import BidScopeErrorCode
 from bidscope.graph.builder import GraphDeps, build_graph
 from bidscope.graph.executor import Command, create_run, execute
 from bidscope.llm.fake import FakeDuplicateModel, FakeIntentModel, FakeReportModel
@@ -161,9 +163,19 @@ class RunService:
                 ],
             }
 
-        result = await execute(
-            self.graph, run_id, input, session_factory=self.session_factory,
-        )
+        try:
+            result = await execute(
+                self.graph, run_id, input, session_factory=self.session_factory,
+            )
+        except Exception as error:  # noqa: BLE001 - detached route task boundary
+            serializable_error = SerializableError(
+                code=BidScopeErrorCode.GRAPH_NODE_ERROR,
+                message=str(error)[:1000],
+                details={},
+            ).model_dump(mode="json")
+            await self._update_status(run_id, "retryable", error=serializable_error)
+            return {"status": "retryable", "errors": [serializable_error]}
+
         status = result.get("status")
         if status:
             await self._update_status(run_id, status)
@@ -201,11 +213,19 @@ class RunService:
             )
             return list(result.scalars())
 
-    async def _update_status(self, run_id: str, status: str) -> None:
+    async def _update_status(
+        self,
+        run_id: str,
+        status: str,
+        *,
+        error: dict[str, Any] | None = None,
+    ) -> None:
         async with self.session_factory() as session:
             run = await session.get(QueryRun, run_id)
             if run is not None:
                 run.status = status
+                if error is not None:
+                    run.error = error
                 await session.commit()
 
 

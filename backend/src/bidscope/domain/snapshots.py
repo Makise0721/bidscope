@@ -1,6 +1,6 @@
 import re
-from collections.abc import Iterable, Mapping
-from typing import Annotated
+from collections import deque
+from typing import Annotated, cast
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
@@ -37,15 +37,18 @@ class SnapshotManifest(BaseModel):
     @field_validator("source_urls", mode="before")
     @classmethod
     def _reject_raw_url_userinfo(cls, value: object) -> object:
-        if isinstance(value, Iterable) and not isinstance(value, (str, Mapping)):
-            source_urls = list(value)
-            # Raw strings protect untrusted JSON before Pydantic strips empty
-            # userinfo delimiters; HttpUrl values are already normalized.
-            for raw_url in source_urls:
-                if isinstance(raw_url, str) and "@" in urlsplit(raw_url).netloc:
-                    raise ValueError("source_urls must not include URL credentials")
-            return source_urls
-        return value
+        if type(value) not in (list, tuple, set, frozenset, deque):
+            return value
+        source_urls = list(cast(
+            list[object] | tuple[object, ...] | set[object] | frozenset[object] | deque[object],
+            value,
+        ))
+        # Raw strings protect untrusted JSON before Pydantic strips empty
+        # userinfo delimiters; HttpUrl values are already normalized.
+        for raw_url in source_urls:
+            if isinstance(raw_url, str) and "@" in urlsplit(raw_url).netloc:
+                raise ValueError("source_urls must not include URL credentials")
+        return source_urls
 
     @field_validator("source_urls")
     @classmethod

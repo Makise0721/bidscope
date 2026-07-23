@@ -871,8 +871,11 @@ async def test_run_subscription_advances_schedule_before_releasing_lock(
 
     monkeypatch.setattr(service_module, "acquire_advisory_lock", acquire)
     monkeypatch.setattr(service_module, "release_advisory_lock", release)
-    monkeypatch.setattr(service_module, "create_run", AsyncMock(return_value="run-id"))
-    monkeypatch.setattr(service_module, "execute", AsyncMock())
+    monkeypatch.setattr(
+        service_module, "create_run", AsyncMock(return_value=("run-id", True)),
+    )
+    execute = AsyncMock()
+    monkeypatch.setattr(service_module, "execute", execute)
     monkeypatch.setattr(
         service_module, "_compute_next_run", Mock(return_value=next_run),
     )
@@ -901,6 +904,11 @@ async def test_run_subscription_advances_schedule_before_releasing_lock(
     )
 
     assert result["failed"] is False
+    execute.assert_awaited_once()
+    assert execute.await_args.args[1:] == (
+        "run-id", {"user_request": f"subscription {sub_id}"},
+    )
+    assert execute.await_args.kwargs == {"session_factory": service.session_factory}
     assert sub.normalized_intent[KEY_NEXT_RUN_AT] == next_run.isoformat()
     assert events == [
         "acquire",
@@ -908,6 +916,46 @@ async def test_run_subscription_advances_schedule_before_releasing_lock(
         ("commit", True, next_run.isoformat()),
         ("release", True),
     ]
+
+
+@pytest.mark.asyncio
+async def test_subscription_does_not_execute_existing_query_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An idempotent subscription run must not execute an existing query run."""
+    from bidscope.subscriptions import service as service_module
+    from bidscope.subscriptions.service import SubscriptionService
+
+    subscription = _make_subscription(subscription_id=_next_id("sub-existing-run"))
+    session = Mock()
+    session.commit = AsyncMock()
+    execute = AsyncMock()
+    service = SubscriptionService(cast(async_sessionmaker[AsyncSession], Mock()))
+
+    monkeypatch.setattr(
+        service_module, "create_run", AsyncMock(return_value=("existing-run", False)),
+    )
+    monkeypatch.setattr(service_module, "execute", execute)
+    monkeypatch.setattr(service, "_retrieve_notices", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        service,
+        "_diff_and_emit",
+        AsyncMock(return_value={
+            "new_notices": 0,
+            "material_changes": 0,
+            "unchanged": 0,
+            "failed": False,
+            "skipped": False,
+        }),
+    )
+    monkeypatch.setattr(service, "_advance_seen", AsyncMock())
+
+    result = await service._run_locked(
+        session, subscription, datetime(2026, 7, 20, 9, tzinfo=UTC),
+    )
+
+    assert result["failed"] is False
+    execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio
