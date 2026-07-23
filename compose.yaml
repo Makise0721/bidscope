@@ -33,6 +33,55 @@ services:
     volumes:
       - minio_data:/data
 
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["bidscope", "api", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      BIDSCOPE_APP_MODE: demo
+      BIDSCOPE_DATABASE_URL: postgresql+asyncpg://bidscope:bidscope@postgres:5432/bidscope
+      BIDSCOPE_CHECKPOINT_DATABASE_URL: postgresql+psycopg://bidscope:bidscope@postgres:5432/bidscope
+      BIDSCOPE_OBJECT_STORE_TYPE: s3
+      BIDSCOPE_S3_ENDPOINT: http://minio:9000
+      BIDSCOPE_S3_BUCKET: bidscope
+      BIDSCOPE_S3_ACCESS_KEY: minio
+      BIDSCOPE_S3_SECRET_KEY: minioadmin
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["bidscope", "scheduler", "start"]
+    environment:
+      BIDSCOPE_APP_MODE: production
+      BIDSCOPE_DATABASE_URL: postgresql+asyncpg://bidscope:bidscope@postgres:5432/bidscope
+      BIDSCOPE_CHECKPOINT_DATABASE_URL: postgresql+psycopg://bidscope:bidscope@postgres:5432/bidscope
+      BIDSCOPE_OBJECT_STORE_TYPE: s3
+      BIDSCOPE_S3_ENDPOINT: http://minio:9000
+      BIDSCOPE_S3_BUCKET: bidscope
+      BIDSCOPE_S3_ACCESS_KEY: minio
+      BIDSCOPE_S3_SECRET_KEY: minioadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   minio_data:

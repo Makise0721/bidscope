@@ -7,6 +7,9 @@
     "dev:web": "npm --prefix web run dev",
     "test:web": "npm --prefix web run test:unit",
     "build:web": "npm --prefix web run build",
-    "test:e2e": "echo \"E2E disabled in P0 snapshot-only build\" && exit 0"
+    "test:e2e": "playwright test --config=e2e/playwright.config.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
   }
 }

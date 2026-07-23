@@ -13,6 +13,7 @@ Only synthetic-demo data is used; no network access occurs.
 from __future__ import annotations
 
 import io
+import uuid
 from datetime import UTC, datetime
 
 import docx
@@ -26,10 +27,34 @@ from bidscope.domain.reports import (
     ReportClaim,
     ReportItem,
 )
+from bidscope.persistence.models import QueryRun
 from bidscope.persistence.models import Report as ReportModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-REPORT_ID = "demo-run-delivery-001"
+REPORT_ID = str(uuid.uuid4())
+
+
+@pytest.fixture(autouse=True)
+async def _seed_query_run(
+    session_factory: sa.orm.sessionmaker, _clean_tables: None,
+) -> None:
+    """Insert a QueryRun row so the reports.run_id foreign key is satisfiable.
+
+    ``reports.run_id`` references ``query_runs.id``; without a parent row the
+    export would trip a foreign-key violation. ``_clean_tables`` truncates
+    ``query_runs`` before each test, so we re-seed here, depending on it to
+    guarantee ordering.
+    """
+    async with session_factory() as session:
+        session.add(
+            QueryRun(
+                id=REPORT_ID,
+                run_key=REPORT_ID,
+                status="completed",
+                user_request="test",
+            )
+        )
+        await session.commit()
 
 
 def _sample_report() -> Report:

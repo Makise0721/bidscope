@@ -124,13 +124,39 @@ class RunService:
         self.object_store = object_store
         self.settings = settings
         self.clock = clock or SystemClock()
+        #: Test-only: name of the node that should fail on the next run.
+        #: Set by the ``/api/test-controls/fail-next-node`` route and consumed
+        #: once by ``execute_run``.
+        self.fail_next_node: str | None = None
 
     async def create_run(self, user_request: str) -> str:
         """Persist a ``pending`` run and return its id."""
         return await create_run(user_request, session_factory=self.session_factory)
 
     async def execute_run(self, run_id: str, input: Any) -> dict[str, Any]:  # noqa: ANN401
-        """Drive the graph from ``input`` and sync the final status back to the DB."""
+        """Drive the graph from ``input`` and sync the final status back to the DB.
+
+        Test-only: when ``self.fail_next_node`` is set, the very next run
+        short-circuits with a ``retryable`` failure *before* the graph executes,
+        then clears the flag so subsequent runs proceed normally.
+        """
+        fail_node = self.fail_next_node
+        if fail_node is not None:
+            self.fail_next_node = None
+            await self._update_status(run_id, "retryable")
+            return {
+                "status": "retryable",
+                "fail_next_node": fail_node,
+                "errors": [
+                    {
+                        "code": "INJECTED_NODE_FAILURE",
+                        "message": (
+                            f"Test-only injected failure for node {fail_node!r}"
+                        ),
+                    }
+                ],
+            }
+
         result = await execute(
             self.graph, run_id, input, session_factory=self.session_factory,
         )

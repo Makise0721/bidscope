@@ -429,7 +429,7 @@ async def test_provenance_inconsistency_not_persisted(
     write. The error is raised by the adapter's ``parse`` (before the write
     transaction opens), so no rows are ever created.
     """
-    from pydantic import ValidationError
+    from bidscope.snapshots._parse import ParseDrift
 
     bad = tmp_path / "bad-provenance"
     _write_demo_bundle(
@@ -445,7 +445,7 @@ async def test_provenance_inconsistency_not_persisted(
         "demo-bad-provenance",
     )
 
-    with pytest.raises(ValidationError):
+    with pytest.raises(ParseDrift):
         await importer.import_bundle(bad)
 
     async with session_factory() as session:

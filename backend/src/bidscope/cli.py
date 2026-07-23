@@ -62,6 +62,12 @@ eval_app = typer.Typer(
 )
 app.add_typer(eval_app, name="eval")
 
+api_app = typer.Typer(
+    help="Run the BidScope API server.",
+    no_args_is_help=True,
+)
+app.add_typer(api_app, name="api")
+
 
 def _build_importer() -> SnapshotImporter:
     """Construct an importer backed by the configured database and object store."""
@@ -195,6 +201,22 @@ def evaluation_run(
         typer.echo(f"evaluation failed: {error}", err=True)
         raise typer.Exit(code=1) from None
     typer.echo(_json_payload(result))
+
+
+# --- api ---------------------------------------------------------------------
+
+
+@api_app.command("serve", help="Start the BidScope API server.")
+def api_serve(
+    host: Annotated[str, typer.Option("--host")] = "0.0.0.0",
+    port: Annotated[int, typer.Option("--port")] = 8000,
+) -> None:
+    """Serve the FastAPI app (SPA + API) via uvicorn."""
+    import uvicorn
+
+    from bidscope.main import app
+
+    uvicorn.run(app, host=host, port=port)
 
 
 # --- scheduler ---------------------------------------------------------------

@@ -9,9 +9,12 @@ wraps them. Test-only routes are registered only when ``app_mode == "test"``.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from bidscope.api.dependencies import create_run_service
 from bidscope.api.routes import (
@@ -26,6 +29,8 @@ from bidscope.api.routes import (
 )
 from bidscope.clock import SystemClock
 from bidscope.config import Settings, get_settings
+
+STATIC_DIR = Path(__file__).parent / "static"
 
 
 @asynccontextmanager
@@ -63,6 +68,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # requests to /api/test-controls/* fall through to a 404.
     if resolved_settings.app_mode == "test":
         application.include_router(test_controls.router)
+
+    # Serve the built SPA. Mounted AFTER all API routes so it never shadows
+    # them; the catch-all falls back to index.html for client-side routing.
+    if STATIC_DIR.exists():
+        application.mount(
+            "/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets"
+        )
+
+        @application.get("/{full_path:path}")
+        async def serve_spa(full_path: str) -> FileResponse:  # noqa: ARG001
+            index_file = STATIC_DIR / "index.html"
+            if index_file.exists():
+                return FileResponse(index_file)
+            return FileResponse(STATIC_DIR / full_path)
 
     return application
 
