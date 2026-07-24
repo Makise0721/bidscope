@@ -122,7 +122,8 @@ def build_demo_graph(
 ) -> Any:
     """Compile the demo workflow with the lifecycle-owned Postgres saver."""
     searcher = HybridSearcher(
-        session_factory, HashEmbeddingProvider(dimension=1024),
+        session_factory,
+        HashEmbeddingProvider(dimension=1024),
     )
     notice_factory = sync_session_factory or sessionmaker(
         bind=sa.create_engine(_to_sync_dsn(settings.database_url))
@@ -183,9 +184,7 @@ class RunService:
         self, user_request: str, *, run_key: str | None = None
     ) -> tuple[str, bool]:
         """Persist or load a ``pending`` run by its idempotency key."""
-        return await create_run(
-            user_request, run_key=run_key, session_factory=self.session_factory
-        )
+        return await create_run(user_request, run_key=run_key, session_factory=self.session_factory)
 
     def schedule_run(self, run_id: str, input: Any) -> asyncio.Task[dict[str, Any]]:  # noqa: ANN401
         """Schedule a run and retain it until its task completes."""
@@ -239,7 +238,13 @@ class RunService:
         if failures:
             raise BaseExceptionGroup("Detached run tasks failed during shutdown", failures)
 
-    async def execute_run(self, run_id: str, input: Any) -> dict[str, Any]:  # noqa: ANN401
+    async def execute_run(
+        self,
+        run_id: str,
+        input: Any,
+        *,
+        force_fresh: bool = False,
+    ) -> dict[str, Any]:  # noqa: ANN401
         """Drive the graph from ``input`` and sync the final status back to the DB.
 
         Test-only: when ``self.fail_next_node`` is set, the very next run
@@ -247,7 +252,7 @@ class RunService:
         then clears the flag so subsequent runs proceed normally.
         """
         try:
-            return await self._execute_run(run_id, input)
+            return await self._execute_run(run_id, input, force_fresh=force_fresh)
         except asyncio.CancelledError:
             error = SerializableError(
                 code=BidScopeErrorCode.GRAPH_NODE_ERROR,
@@ -343,7 +348,13 @@ class RunService:
         if status_error is not None:
             raise asyncio.CancelledError() from status_error
 
-    async def _execute_run(self, run_id: str, input: Any) -> dict[str, Any]:  # noqa: ANN401
+    async def _execute_run(
+        self,
+        run_id: str,
+        input: Any,
+        *,
+        force_fresh: bool = False,
+    ) -> dict[str, Any]:  # noqa: ANN401
         fail_node = self.fail_next_node
         if fail_node is not None:
             self.fail_next_node = None
@@ -354,9 +365,7 @@ class RunService:
                 "errors": [
                     {
                         "code": "INJECTED_NODE_FAILURE",
-                        "message": (
-                            f"Test-only injected failure for node {fail_node!r}"
-                        ),
+                        "message": (f"Test-only injected failure for node {fail_node!r}"),
                     }
                 ],
             }
@@ -370,6 +379,7 @@ class RunService:
                 input,
                 session_factory=self.session_factory,
                 checkpoint_thread_id=checkpoint_thread_id,
+                force_fresh=force_fresh,
             )
         except Exception as error:  # noqa: BLE001 - detached route task boundary
             serializable_error = SerializableError(
@@ -415,9 +425,7 @@ class RunService:
             thread_id = run.checkpoint_thread_id or str(run.id)
             get_state = getattr(self.graph, "aget_state", None)
             state = (
-                await get_state({"configurable": {"thread_id": thread_id}})
-                if get_state
-                else None
+                await get_state({"configurable": {"thread_id": thread_id}}) if get_state else None
             )
         except asyncio.CancelledError:
             await self._repair_cancelled_claim(run_id, "retry checkpoint lookup cancelled")
@@ -430,9 +438,17 @@ class RunService:
             ).model_dump(mode="json")
             await self._update_status(run_id, "retryable", error=serializable_error)
             return {"status": "retryable", "errors": [serializable_error]}
-        if state and state.values and state.next:
-            return await self.execute_run(run_id, Command(resume={"action": "retry"}))
-        return await self.execute_run(run_id, {"user_request": run.user_request})
+        if state and state.next:
+            return await self.execute_run(
+                run_id,
+                Command(resume={"action": "retry"}),
+                force_fresh=False,
+            )
+        return await self.execute_run(
+            run_id,
+            {"user_request": run.user_request},
+            force_fresh=True,
+        )
 
     async def _claim_run_safely(
         self,

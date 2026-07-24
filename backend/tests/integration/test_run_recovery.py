@@ -39,13 +39,15 @@ async def test_mark_stale_runs_retryable(session_factory: Any) -> None:
             (completed_id, "completed"),
             (awaiting_id, "awaiting_confirmation"),
         ):
-            session.add(QueryRun(
-                id=run_id,
-                run_key=run_id,
-                status=status,
-                user_request="x",
-                updated_at=stale_at,
-            ))
+            session.add(
+                QueryRun(
+                    id=run_id,
+                    run_key=run_id,
+                    status=status,
+                    user_request="x",
+                    updated_at=stale_at,
+                )
+            )
         await session.commit()
 
     changed = await mark_stale_runs_retryable(
@@ -95,12 +97,8 @@ async def test_create_run_starts_in_pending(session_factory: Any) -> None:
 async def test_create_run_concurrent_same_key_returns_one_row(session_factory: Any) -> None:
     """Concurrent callers sharing a key receive one durable run."""
     results = await asyncio.gather(
-        create_run(
-            "same request", run_key="concurrent-key", session_factory=session_factory
-        ),
-        create_run(
-            "same request", run_key="concurrent-key", session_factory=session_factory
-        ),
+        create_run("same request", run_key="concurrent-key", session_factory=session_factory),
+        create_run("same request", run_key="concurrent-key", session_factory=session_factory),
     )
 
     assert len({run_id for run_id, _ in results}) == 1
@@ -120,12 +118,14 @@ async def test_retry_claims_run_before_concurrent_execution(
     """Concurrent retries claim one row, preventing duplicate event persistence."""
     run_id = str(uuid.uuid4())
     async with session_factory() as session:
-        session.add(QueryRun(
-            id=run_id,
-            run_key="concurrent-retry",
-            status="retryable",
-            user_request="retry request",
-        ))
+        session.add(
+            QueryRun(
+                id=run_id,
+                run_key="concurrent-retry",
+                status="retryable",
+                user_request="retry request",
+            )
+        )
         await session.commit()
 
     service = RunService(
@@ -136,12 +136,18 @@ async def test_retry_claims_run_before_concurrent_execution(
     )
     release_execution = asyncio.Event()
     executions: list[str] = []
+    force_fresh_values: list[bool] = []
 
     async def blocking_execute_run(
-        self: RunService, claimed_run_id: str, input_data: Any
+        self: RunService,
+        claimed_run_id: str,
+        input_data: Any,
+        *,
+        force_fresh: bool = False,
     ) -> dict[str, Any]:
         del self, input_data
         executions.append(claimed_run_id)
+        force_fresh_values.append(force_fresh)
         await release_execution.wait()
         return {"status": "completed"}
 
@@ -156,6 +162,7 @@ async def test_retry_claims_run_before_concurrent_execution(
     results = await asyncio.gather(*retries, return_exceptions=True)
 
     assert executions == [run_id]
+    assert force_fresh_values == [True]
     assert sum(isinstance(result, dict) for result in results) == 1
     conflicts = [result for result in results if getattr(result, "status_code", None) == 409]
     assert len(conflicts) == 1
@@ -164,6 +171,7 @@ async def test_retry_claims_run_before_concurrent_execution(
 @pytest.mark.asyncio
 async def test_retry_reexecutes_fresh_input_for_terminal_checkpoint_and_preserves_events(
     session_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A retryable row ignores a stale terminal checkpoint and runs fresh input."""
     run_id = str(uuid.uuid4())
@@ -180,21 +188,25 @@ async def test_retry_reexecutes_fresh_input_for_terminal_checkpoint_and_preserve
         "status": "ok",
     }
     async with session_factory() as session:
-        session.add(QueryRun(
-            id=run_id,
-            run_key="terminal-checkpoint-retry",
-            status="retryable",
-            user_request="fresh request",
-            checkpoint_thread_id="same-thread",
-        ))
-        session.add(RunEvent(
-            query_run_id=run_id,
-            seq=0,
-            timestamp=datetime(2026, 7, 18, 9, 0, tzinfo=UTC),
-            node=old_event["node"],
-            event=old_event["event"],
-            status=old_event["status"],
-        ))
+        session.add(
+            QueryRun(
+                id=run_id,
+                run_key="terminal-checkpoint-retry",
+                status="retryable",
+                user_request="fresh request",
+                checkpoint_thread_id="same-thread",
+            )
+        )
+        session.add(
+            RunEvent(
+                query_run_id=run_id,
+                seq=0,
+                timestamp=datetime(2026, 7, 18, 9, 0, tzinfo=UTC),
+                node=old_event["node"],
+                event=old_event["event"],
+                status=old_event["status"],
+            )
+        )
         await session.commit()
 
     class TerminalCheckpointGraph:
@@ -223,9 +235,20 @@ async def test_retry_reexecutes_fresh_input_for_terminal_checkpoint_and_preserve
         settings=get_settings(),
     )
 
+    from bidscope.api import dependencies
+    from bidscope.graph.executor import execute as graph_execute
+
+    force_fresh_values: list[bool] = []
+
+    async def execute_with_mode(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        force_fresh_values.append(kwargs.get("force_fresh", False))
+        return await graph_execute(*args, **kwargs)
+
+    monkeypatch.setattr(dependencies, "execute", execute_with_mode)
     result = await service.retry(run_id)
 
     assert result["status"] == "completed"
+    assert force_fresh_values == [True]
     assert len(graph.inputs) == 1
     assert graph.inputs[0]["user_request"] == "fresh request"
     assert graph.inputs[0]["run_id"] == run_id
@@ -260,22 +283,24 @@ async def test_successful_completion_clears_old_error_but_keeps_degraded_errors(
         "details": {"docx_retryable": True},
     }
     async with session_factory() as session:
-        session.add_all([
-            QueryRun(
-                id=clear_id,
-                run_key="clear-old-error",
-                status="retryable",
-                user_request="clear error",
-                error=old_error,
-            ),
-            QueryRun(
-                id=degraded_id,
-                run_key="retain-degraded-error",
-                status="retryable",
-                user_request="retain error",
-                error=old_error,
-            ),
-        ])
+        session.add_all(
+            [
+                QueryRun(
+                    id=clear_id,
+                    run_key="clear-old-error",
+                    status="retryable",
+                    user_request="clear error",
+                    error=old_error,
+                ),
+                QueryRun(
+                    id=degraded_id,
+                    run_key="retain-degraded-error",
+                    status="retryable",
+                    user_request="retain error",
+                    error=old_error,
+                ),
+            ]
+        )
         await session.commit()
 
     await service._update_status(clear_id, "completed", result={"status": "completed"})
@@ -316,7 +341,8 @@ async def test_execute_run_persists_retryable_when_executor_raises(
         settings=get_settings(),
     )
     run_id, created = await service.create_run(
-        "failing request", run_key="executor-failure",
+        "failing request",
+        run_key="executor-failure",
     )
     assert created is True
 
@@ -404,12 +430,14 @@ async def test_cancelled_retry_after_claim_repairs_run_for_next_retry(
     """Cancellation after the claim commits restores retryable eligibility."""
     run_id = str(uuid.uuid4())
     async with session_factory() as session:
-        session.add(QueryRun(
-            id=run_id,
-            run_key="cancelled-retry-claim",
-            status="retryable",
-            user_request="retry request",
-        ))
+        session.add(
+            QueryRun(
+                id=run_id,
+                run_key="cancelled-retry-claim",
+                status="retryable",
+                user_request="retry request",
+            )
+        )
         await session.commit()
 
     class FailingStateGraph:
@@ -428,7 +456,9 @@ async def test_cancelled_retry_after_claim_repairs_run_for_next_retry(
     release_claim = asyncio.Event()
 
     async def delayed_claim(
-        claimed_run_id: str, eligible_status: str, status_name: str,
+        claimed_run_id: str,
+        eligible_status: str,
+        status_name: str,
     ) -> bool:
         claimed = await original_claim(claimed_run_id, eligible_status, status_name)
         claim_committed.set()
@@ -481,12 +511,14 @@ async def test_claim_cancellation_reinjected_after_drain_restores_eligibility(
 
     run_id = str(uuid.uuid4())
     async with session_factory() as session:
-        session.add(QueryRun(
-            id=run_id,
-            run_key=f"reinjected-{method_name}-claim",
-            status=eligible_status,
-            user_request="retry request",
-        ))
+        session.add(
+            QueryRun(
+                id=run_id,
+                run_key=f"reinjected-{method_name}-claim",
+                status=eligible_status,
+                user_request="retry request",
+            )
+        )
         await session.commit()
 
     service = RunService(
@@ -502,7 +534,9 @@ async def test_claim_cancellation_reinjected_after_drain_restores_eligibility(
     release_claim = asyncio.Event()
 
     async def delayed_claim(
-        claimed_run_id: str, claimable_status: str, claim_status_name: str,
+        claimed_run_id: str,
+        claimable_status: str,
+        claim_status_name: str,
     ) -> bool:
         claimed = await original_claim(claimed_run_id, claimable_status, claim_status_name)
         claim_committed.set()
@@ -560,12 +594,14 @@ async def test_cancelled_retry_get_run_repairs_run_for_next_retry(
     """Cancellation during the post-claim row lookup restores eligibility."""
     run_id = str(uuid.uuid4())
     async with session_factory() as session:
-        session.add(QueryRun(
-            id=run_id,
-            run_key="cancelled-retry-get-run",
-            status="retryable",
-            user_request="retry request",
-        ))
+        session.add(
+            QueryRun(
+                id=run_id,
+                run_key="cancelled-retry-get-run",
+                status="retryable",
+                user_request="retry request",
+            )
+        )
         await session.commit()
 
     class FailingStateGraph:
@@ -615,6 +651,7 @@ async def test_retry_checkpoint_state_failure_leaves_run_eligible_for_retry(
     session_factory: Any,
 ) -> None:
     """A failing checkpoint state query cannot strand a claimed run in ``running``."""
+
     class FailingStateGraph:
         def __init__(self) -> None:
             self.calls = 0
@@ -626,12 +663,14 @@ async def test_retry_checkpoint_state_failure_leaves_run_eligible_for_retry(
 
     run_id = str(uuid.uuid4())
     async with session_factory() as session:
-        session.add(QueryRun(
-            id=run_id,
-            run_key="retry-state-failure",
-            status="retryable",
-            user_request="retry request",
-        ))
+        session.add(
+            QueryRun(
+                id=run_id,
+                run_key="retry-state-failure",
+                status="retryable",
+                user_request="retry request",
+            )
+        )
         await session.commit()
 
     graph = FailingStateGraph()
@@ -664,6 +703,7 @@ async def test_cancelled_retry_checkpoint_lookup_repairs_run_for_next_retry(
     session_factory: Any,
 ) -> None:
     """Cancellation during checkpoint lookup restores retryable eligibility."""
+
     class CancelledStateGraph:
         def __init__(self) -> None:
             self.started = asyncio.Event()
@@ -680,12 +720,14 @@ async def test_cancelled_retry_checkpoint_lookup_repairs_run_for_next_retry(
 
     run_id = str(uuid.uuid4())
     async with session_factory() as session:
-        session.add(QueryRun(
-            id=run_id,
-            run_key="cancelled-retry-state",
-            status="retryable",
-            user_request="retry request",
-        ))
+        session.add(
+            QueryRun(
+                id=run_id,
+                run_key="cancelled-retry-state",
+                status="retryable",
+                user_request="retry request",
+            )
+        )
         await session.commit()
 
     graph = CancelledStateGraph()

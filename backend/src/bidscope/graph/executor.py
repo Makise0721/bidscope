@@ -41,8 +41,6 @@ from sqlalchemy.exc import IntegrityError
 from bidscope.config import Settings, get_settings
 from bidscope.persistence.models import QueryRun, RunEvent
 
-_TERMINAL_RUN_STATUSES = {"completed", "failed", "evidence_insufficient"}
-
 
 def _to_datetime(value: Any) -> datetime:
     """Parse an ISO-8601 timestamp from a node event, falling back to now."""
@@ -111,6 +109,7 @@ async def execute(
     *,
     session_factory: Any,
     checkpoint_thread_id: str | None = None,
+    force_fresh: bool = False,
 ) -> dict[str, Any]:
     """Drive ``graph`` from ``input`` and persist each new node event.
 
@@ -123,24 +122,15 @@ async def execute(
     Idempotency: if the graph has already reached a terminal state for this
     ``run_id``, the checkpointer holds the completed state and the function
     returns immediately — re-invoking with the same input never duplicates
-    ``run_events`` rows.
+    ``run_events`` rows. ``force_fresh=True`` explicitly bypasses that guard
+    for a retry that must execute the original request again.
     """
     config = _config(checkpoint_thread_id or run_id)
     if isinstance(input, dict) and "run_id" not in input:
         input = {**input, "run_id": str(run_id)}
 
-    # Read the durable row before inspecting the checkpoint. Retryable and
-    # recovery rows may retain a terminal checkpoint but must accept fresh input.
-    async with session_factory() as session:
-        persisted_run = await session.get(QueryRun, str(run_id))
     existing = await graph.aget_state(config)
-    if (
-        persisted_run is not None
-        and persisted_run.status in _TERMINAL_RUN_STATUSES
-        and existing
-        and existing.values
-        and not existing.next
-    ):
+    if not force_fresh and existing and existing.values and not existing.next:
         return dict(existing.values)
 
     already_persisted = await _persisted_event_count(run_id, session_factory)
@@ -169,16 +159,18 @@ async def _append_events(
     async with session_factory() as session:
         for index in range(start, len(events)):
             event = events[index]
-            session.add(RunEvent(
-                query_run_id=str(run_id),
-                seq=index,
-                timestamp=_to_datetime(event.get("timestamp")),
-                node=event.get("node", ""),
-                event=event.get("event", ""),
-                status=event.get("status", ""),
-                message=event.get("message"),
-                details=event.get("details", {}),
-            ))
+            session.add(
+                RunEvent(
+                    query_run_id=str(run_id),
+                    seq=index,
+                    timestamp=_to_datetime(event.get("timestamp")),
+                    node=event.get("node", ""),
+                    event=event.get("event", ""),
+                    status=event.get("status", ""),
+                    message=event.get("message"),
+                    details=event.get("details", {}),
+                )
+            )
         await session.commit()
 
 
@@ -197,20 +189,20 @@ async def create_run(
 
     resolved_key = run_key or str(uuid.uuid4())
     async with session_factory() as session:
-        existing = await session.scalar(
-            sa.select(QueryRun).where(QueryRun.run_key == resolved_key)
-        )
+        existing = await session.scalar(sa.select(QueryRun).where(QueryRun.run_key == resolved_key))
         if existing is not None:
             return str(existing.id), False
 
         run_id = str(uuid.uuid4())
-        session.add(QueryRun(
-            id=run_id,
-            run_key=resolved_key,
-            status="pending",
-            user_request=user_request,
-            checkpoint_thread_id=_thread_id(run_id),
-        ))
+        session.add(
+            QueryRun(
+                id=run_id,
+                run_key=resolved_key,
+                status="pending",
+                user_request=user_request,
+                checkpoint_thread_id=_thread_id(run_id),
+            )
+        )
         try:
             await session.commit()
         except IntegrityError:
@@ -242,8 +234,9 @@ async def mark_stale_runs_retryable(
         if stale_before is not None:
             statement = statement.where(QueryRun.updated_at < stale_before)
         result = await session.execute(
-            statement.values(status="retryable", updated_at=datetime.now(UTC))
-            .returning(QueryRun.id)
+            statement.values(status="retryable", updated_at=datetime.now(UTC)).returning(
+                QueryRun.id
+            )
         )
         ids = result.scalars().all()
         await session.commit()

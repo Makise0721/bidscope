@@ -26,7 +26,6 @@ import pytest_asyncio
 import sqlalchemy as sa
 from bidscope.delivery.objects import LocalObjectStore
 from bidscope.domain.reports import Report
-from graph_fakes import FakeReportPersistence
 from bidscope.persistence.models import (
     NoticeVersion,
     QueryRun,
@@ -38,6 +37,7 @@ from bidscope.persistence.models import (
     Report as ReportModel,
 )
 from bidscope.snapshots.importer import SnapshotImporter
+from graph_fakes import FakeReportPersistence
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -165,9 +165,7 @@ async def test_snapshot_reimport_returns_same_import(
 # ---------------------------------------------------------------------------
 
 
-async def test_idempotency_key_is_deterministic(
-    importer, tmp_path: Path
-) -> None:
+async def test_idempotency_key_is_deterministic(importer, tmp_path: Path) -> None:
     """``_derive_idempotency_key`` produces the same key for identical content.
 
     The key is a pure function of ``bundle_id`` + sorted notice content hashes,
@@ -189,9 +187,7 @@ async def test_idempotency_key_is_deterministic(
     assert isinstance(key_a, str) and len(key_a) == 64  # SHA-256 hex
 
 
-def _parse_for_key(
-    importer: SnapshotImporter, bundle: Path
-) -> tuple[Any, list[Any]]:
+def _parse_for_key(importer: SnapshotImporter, bundle: Path) -> tuple[Any, list[Any]]:
     """Parse a bundle the way ``import_bundle`` does, returning (manifest, notices)."""
     from bidscope.snapshots import _parse
 
@@ -207,9 +203,7 @@ def _parse_for_key(
 # ---------------------------------------------------------------------------
 
 
-async def test_object_storage_is_content_addressed(
-    importer, tmp_path: Path
-) -> None:
+async def test_object_storage_is_content_addressed(importer, tmp_path: Path) -> None:
     """Re-import stores identical bytes under the same key — no duplicates.
 
     Object keys are derived from each notice's content hash
@@ -247,9 +241,7 @@ def count_store_files(root: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
-async def test_docx_export_is_idempotent(
-    session_factory, tmp_path: Path
-) -> None:
+async def test_docx_export_is_idempotent(session_factory, tmp_path: Path) -> None:
     """Exporting the same report twice produces a single stored object and row.
 
     The export key (``"{renderer_version}:{run_id}"``) is derived from the
@@ -261,10 +253,15 @@ async def test_docx_export_is_idempotent(
     # ReportModel.run_id is a FK to query_runs.id, so back it with a real row.
     run_id = str(uuid.uuid4())
     async with session_factory() as session:
-        session.add(QueryRun(
-            id=run_id, run_key=run_id, status="pending",
-            user_request="四川服务器", checkpoint_thread_id=run_id,
-        ))
+        session.add(
+            QueryRun(
+                id=run_id,
+                run_key=run_id,
+                status="pending",
+                user_request="四川服务器",
+                checkpoint_thread_id=run_id,
+            )
+        )
         await session.commit()
 
     # Use an isolated store root so the file count is unambiguous.
@@ -305,11 +302,11 @@ def _demo_report(run_id: str) -> Report:
 async def test_graph_event_deduplication(
     session_factory,
 ) -> None:
-    """Re-executing an already-completed run persists no duplicate events.
+    """A terminal checkpoint is idempotent even while its row remains pending.
 
-    :func:`~bidscope.graph.executor.execute` reads the persisted event count
-    before streaming the graph and only appends events beyond that point, so a
-    second ``execute`` call against the same ``run_id`` writes nothing.
+    :func:`~bidscope.graph.executor.execute` reads the checkpoint state before
+    streaming the graph and returns it directly when it is terminal, regardless
+    of the relational row status.
     """
     from bidscope.clock import FixedClock
     from bidscope.graph.builder import GraphDeps, build_graph
@@ -322,7 +319,10 @@ async def test_graph_event_deduplication(
             from bidscope.retrieval.search import RetrievalResult
 
             return RetrievalResult(
-                query=query, candidates=[], degraded_modes=[], filters_applied={},
+                query=query,
+                candidates=[],
+                degraded_modes=[],
+                filters_applied={},
             )
 
     def _views(ids):  # type: ignore[no-untyped-def]
@@ -340,7 +340,8 @@ async def test_graph_event_deduplication(
     graph = build_graph(deps, checkpointer=InMemorySaver())
 
     run_id, created = await create_run(
-        "四川服务器招标", session_factory=session_factory,
+        "四川服务器招标",
+        session_factory=session_factory,
     )
     assert created is True
 
@@ -348,7 +349,10 @@ async def test_graph_event_deduplication(
     await execute(graph, run_id, input_data, session_factory=session_factory)
     async with session_factory() as session:
         after_first = await _count(session, RunEvent)
+        run = await session.get(QueryRun, run_id)
 
+    assert run is not None
+    assert run.status == "pending"
     await execute(graph, run_id, input_data, session_factory=session_factory)
     async with session_factory() as session:
         after_second = await _count(session, RunEvent)
