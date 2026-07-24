@@ -93,13 +93,57 @@ async def setup_checkpoints(settings: Settings) -> None:
         await checkpointer.setup()
 
 
-async def _persisted_event_count(run_id: str, session_factory: Any) -> int:
-    """Return the number of ``run_events`` already stored for this run."""
-    async with session_factory() as session:
-        result = await session.execute(
-            sa.select(sa.func.count()).where(RunEvent.query_run_id == str(run_id))
+def _event_fingerprint(event: Any) -> tuple[Any, ...]:
+    """Return timestamp-independent identity for a streamed or stored event."""
+    if isinstance(event, dict):
+        return (
+            event.get("node", ""),
+            event.get("event", ""),
+            event.get("status", ""),
+            event.get("message"),
+            event.get("details", {}),
         )
-        return result.scalar_one() or 0
+    return (
+        event.node,
+        event.event,
+        event.status,
+        event.message,
+        event.details,
+    )
+
+
+async def _reconcile_event_cursor(
+    run_id: str,
+    checkpoint_events: list[dict[str, Any]],
+    session_factory: Any,
+) -> tuple[int, int]:
+    """Find checkpoint events in ordered relational history and return its cursor."""
+    async with session_factory() as session:
+        rows = list(
+            (
+                await session.scalars(
+                    sa.select(RunEvent)
+                    .where(RunEvent.query_run_id == str(run_id))
+                    .order_by(RunEvent.seq)
+                )
+            ).all()
+        )
+
+    if not rows or not checkpoint_events:
+        next_seq = rows[-1].seq + 1 if rows else 0
+        return 0, next_seq
+
+    local = [_event_fingerprint(event) for event in checkpoint_events]
+    history = [_event_fingerprint(row) for row in rows]
+    length = len(local)
+    if history[:length] == local:
+        return length, rows[0].seq
+
+    for start in range(len(history) - length, -1, -1):
+        if history[start : start + length] == local:
+            return length, rows[start].seq
+
+    return 0, rows[-1].seq + 1
 
 
 async def execute(
@@ -133,14 +177,19 @@ async def execute(
     if not force_fresh and existing and existing.values and not existing.next:
         return dict(existing.values)
 
-    already_persisted = await _persisted_event_count(run_id, session_factory)
     reset = (
         await _reset_checkpoint_state(graph, config)
         if force_fresh
         else False
     )
-    persisted = 0 if reset else already_persisted
-    persisted_seq_offset = already_persisted if reset else 0
+    checkpoint_events = [] if reset else list(
+        (existing.values or {}).get("node_events", []) if existing else []
+    )
+    persisted, persisted_seq_offset = await _reconcile_event_cursor(
+        run_id,
+        checkpoint_events,
+        session_factory,
+    )
 
     async for state in graph.astream(input, config, stream_mode="values"):
         events = state.get("node_events", [])

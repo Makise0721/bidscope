@@ -423,8 +423,14 @@ class RunService:
         """Look up retry state and repair the claim when cancellation interrupts it."""
         try:
             context = await self._retry_context(run_id)
-        except asyncio.CancelledError:
-            await self._repair_cancelled_claim(run_id, "retry checkpoint lookup cancelled")
+        except asyncio.CancelledError as cancellation_error:
+            repair = asyncio.create_task(
+                self._repair_cancelled_claim(run_id, "retry checkpoint lookup cancelled")
+            )
+            try:
+                await _drain_task_preserving_cancellation(repair)
+            except BaseException as repair_error:
+                raise cancellation_error from repair_error
             raise
 
         if isinstance(context, dict):

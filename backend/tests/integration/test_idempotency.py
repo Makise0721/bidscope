@@ -20,6 +20,7 @@ import json
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -510,6 +511,207 @@ async def test_force_fresh_retry_resets_checkpoint_state_but_appends_events(
     assert [event.event for event in rows].count("old_event") == 1
     assert len(rows) > old_event_seq + 1
     assert await checkpointer.aget_tuple(config) is not None
+
+
+async def test_resume_reconciles_partial_fresh_retry_events_with_relational_history(
+    session_factory,
+) -> None:
+    """A pending fresh-retry checkpoint continues from its own DB event slice."""
+    from bidscope.graph.executor import create_run, execute
+
+    old_event = {
+        "node": "old_node",
+        "event": "old_event",
+        "status": "ok",
+        "timestamp": "2026-07-18T09:00:00+00:00",
+        "message": "old",
+        "details": {"attempt": 0},
+    }
+    new_event_one = {
+        "node": "new_node",
+        "event": "new_event_one",
+        "status": "ok",
+        "timestamp": "2026-07-18T09:01:00+00:00",
+        "message": "first fresh event",
+        "details": {"attempt": 1},
+    }
+    new_event_two = {
+        "node": "new_node",
+        "event": "new_event_two",
+        "status": "ok",
+        "timestamp": "2026-07-18T09:02:00+00:00",
+        "message": "resumed fresh event",
+        "details": {"attempt": 1},
+    }
+
+    class PartialFreshRetryGraph:
+        def __init__(self) -> None:
+            self.phase = 0
+            self.state: SimpleNamespace | None = SimpleNamespace(
+                values={"node_events": [old_event]},
+                next=(),
+            )
+            self.checkpointer = self._Checkpointer(self)
+
+        class _Checkpointer:
+            def __init__(self, graph: PartialFreshRetryGraph) -> None:
+                self.graph = graph
+
+            async def adelete_thread(self, thread_id: str) -> None:
+                assert thread_id == "same-thread"
+                self.graph.state = None
+
+        async def aget_state(self, config: Any) -> SimpleNamespace | None:
+            assert config["configurable"]["thread_id"] == "same-thread"
+            return self.state
+
+        async def astream(self, input_data: Any, config: Any, stream_mode: str) -> Any:
+            del input_data
+            assert config["configurable"]["thread_id"] == "same-thread"
+            assert stream_mode == "values"
+            if self.phase == 0:
+                self.phase += 1
+                self.state = SimpleNamespace(
+                    values={"node_events": [new_event_one]},
+                    next=("resume",),
+                )
+                yield self.state.values
+                return
+
+            assert self.phase == 1
+            self.phase += 1
+            self.state = SimpleNamespace(
+                values={"node_events": [new_event_one, new_event_two]},
+                next=(),
+            )
+            yield self.state.values
+
+    run_id, created = await create_run("retry request", session_factory=session_factory)
+    assert created is True
+    async with session_factory() as session:
+        session.add(
+            RunEvent(
+                query_run_id=run_id,
+                seq=0,
+                timestamp=datetime(2026, 7, 18, 9, 0, tzinfo=UTC),
+                node=old_event["node"],
+                event=old_event["event"],
+                status=old_event["status"],
+                message=old_event["message"],
+                details=old_event["details"],
+            )
+        )
+        await session.commit()
+
+    graph = PartialFreshRetryGraph()
+    await execute(
+        graph,
+        run_id,
+        {"user_request": "retry request"},
+        session_factory=session_factory,
+        checkpoint_thread_id="same-thread",
+        force_fresh=True,
+    )
+    await execute(
+        graph,
+        run_id,
+        {"user_request": "retry request"},
+        session_factory=session_factory,
+        checkpoint_thread_id="same-thread",
+    )
+
+    async with session_factory() as session:
+        rows = list(
+            (
+                await session.scalars(
+                    sa.select(RunEvent)
+                    .where(RunEvent.query_run_id == run_id)
+                    .order_by(RunEvent.seq)
+                )
+            ).all()
+        )
+
+    assert [row.seq for row in rows] == [0, 1, 2]
+    assert [row.event for row in rows] == [
+        "old_event",
+        "new_event_one",
+        "new_event_two",
+    ]
+
+
+async def test_retry_checkpoint_error_cancellation_repairs_after_delayed_status_write(
+    session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled checkpoint-error write still repairs a claimed run."""
+    run_id = str(uuid.uuid4())
+    async with session_factory() as session:
+        session.add(
+            QueryRun(
+                id=run_id,
+                run_key="delayed-retry-checkpoint-cancel",
+                status="retryable",
+                user_request="retry request",
+            )
+        )
+        await session.commit()
+
+    class FailingStateGraph:
+        async def aget_state(self, config: Any) -> None:
+            del config
+            raise RuntimeError("checkpoint unavailable")
+
+    service = RunService(
+        session_factory=session_factory,
+        graph=FailingStateGraph(),
+        object_store=object(),
+        settings=get_settings(),
+    )
+    original_update_status = service._update_status
+    update_started = asyncio.Event()
+    release_update = asyncio.Event()
+    repair_started = asyncio.Event()
+    release_repair = asyncio.Event()
+    calls = 0
+
+    async def delayed_update_status(*args: Any, **kwargs: Any) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            update_started.set()
+            await release_update.wait()
+            return
+        await original_update_status(*args, **kwargs)
+
+    original_repair = service._repair_cancelled_claim
+
+    async def delayed_repair(run_id: str, message: str) -> None:
+        repair_started.set()
+        await release_repair.wait()
+        await original_repair(run_id, message)
+
+    monkeypatch.setattr(service, "_update_status", delayed_update_status)
+    monkeypatch.setattr(service, "_repair_cancelled_claim", delayed_repair)
+    retry_task = asyncio.create_task(service.retry(run_id))
+    await asyncio.wait_for(update_started.wait(), timeout=1)
+    retry_task.cancel()
+    release_update.set()
+    await asyncio.wait_for(repair_started.wait(), timeout=1)
+    retry_task.cancel()
+    release_repair.set()
+    with pytest.raises(asyncio.CancelledError):
+        await retry_task
+
+    async with session_factory() as session:
+        run = await session.get(QueryRun, run_id)
+    assert run is not None
+    assert run.status == "retryable"
+    assert run.error == {
+        "code": "graph_node_error",
+        "message": "retry checkpoint lookup cancelled",
+        "details": {},
+    }
+    assert calls == 2
 
 
 async def test_terminal_retry_checkpoint_error_cancellation_repairs_claim(
