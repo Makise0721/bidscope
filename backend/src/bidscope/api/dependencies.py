@@ -12,6 +12,7 @@ import asyncio
 from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any, cast
 
@@ -28,7 +29,15 @@ from bidscope.delivery.reports import ReportPersistence
 from bidscope.domain.runs import SerializableError
 from bidscope.domain.types import BidScopeErrorCode
 from bidscope.graph.builder import GraphDeps, build_graph
-from bidscope.graph.executor import Command, _to_plain_dsn, create_run, execute
+from bidscope.graph.executor import (
+    Command,
+    EventReconciliationError,
+    RunOwnershipLostError,
+    _to_plain_dsn,
+    create_run,
+    execute,
+    run_lock_key,
+)
 from bidscope.llm.fake import FakeDuplicateModel, FakeIntentModel, FakeReportModel
 from bidscope.persistence.models import NoticeEvidence, NoticeVersion, QueryRun, RunEvent
 from bidscope.retrieval.embeddings import HashEmbeddingProvider
@@ -163,6 +172,11 @@ class _ClaimRepairedCancellation(asyncio.CancelledError):
 class RunService:
     """Run lifecycle operations over the shared demo graph."""
 
+    _claimed_run_ids: ContextVar[frozenset[tuple[int, str]]] = ContextVar(
+        "bidscope_claimed_run_ids",
+        default=frozenset(),
+    )
+
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -185,6 +199,14 @@ class RunService:
         self._run_tasks: set[asyncio.Task[dict[str, Any]]] = set()
         self._completed_task_errors: deque[BaseException] = deque(maxlen=32)
         self._shutting_down = False
+
+    def _add_claimed_run_id(self, run_id: str) -> None:
+        """Record a relational claim in only the current task's context."""
+        self._claimed_run_ids.set(self._claimed_run_ids.get() | {(id(self), run_id)})
+
+    def _remove_claimed_run_id(self, run_id: str) -> None:
+        """Drop a relational claim from only the current task's context."""
+        self._claimed_run_ids.set(self._claimed_run_ids.get() - {(id(self), run_id)})
 
     async def create_run(
         self, user_request: str, *, run_key: str | None = None
@@ -258,14 +280,19 @@ class RunService:
         then clears the flag so subsequent runs proceed normally.
         """
         try:
-            return await self._execute_run(run_id, input, force_fresh=force_fresh)
+            return await self._execute_run(
+                run_id,
+                input,
+                force_fresh=force_fresh,
+                claimed=(id(self), run_id) in self._claimed_run_ids.get(),
+            )
         except asyncio.CancelledError:
             error = SerializableError(
                 code=BidScopeErrorCode.GRAPH_NODE_ERROR,
                 message="run execution cancelled",
                 details={},
             ).model_dump(mode="json")
-            await self._persist_cancellation(run_id, error)
+            await self._persist_cancellation(run_id, error, expected_status="running")
             raise
 
     async def _persist_cancellation(
@@ -360,54 +387,148 @@ class RunService:
         input: Any,
         *,
         force_fresh: bool = False,
+        claimed: bool = False,
     ) -> dict[str, Any]:  # noqa: ANN401
-        await self._start_run(run_id)
-        fail_node = self.fail_next_node
-        if fail_node is not None:
-            self.fail_next_node = None
-            error = SerializableError(
-                code=BidScopeErrorCode.GRAPH_NODE_ERROR,
-                message=f"Test-only injected failure for node {fail_node!r}",
-                details={"node": fail_node},
-            ).model_dump(mode="json")
-            result = {"status": "retryable", "errors": [error]}
-            await self._update_status(run_id, "retryable", error=error)
-            return result
+        if claimed:
+            self._remove_claimed_run_id(run_id)
+        else:
+            started = await self._start_run(run_id)
+            if started is False:
+                return {"status": "retryable"}
 
-        run = await self.get_run(run_id)
-        checkpoint_thread_id = run.checkpoint_thread_id if run is not None else run_id
-        try:
-            result = await execute(
-                self.graph,
-                run_id,
-                input,
-                session_factory=self.session_factory,
-                checkpoint_thread_id=checkpoint_thread_id,
-                force_fresh=force_fresh,
+        async with self.session_factory() as owner_session:
+            owner_connection = await owner_session.connection()
+            lock_result = await owner_connection.execute(
+                sa.text("SELECT pg_try_advisory_lock(:key)"),
+                {"key": run_lock_key(run_id)},
             )
-        except Exception as error:  # noqa: BLE001 - detached route task boundary
-            serializable_error = SerializableError(
-                code=BidScopeErrorCode.GRAPH_NODE_ERROR,
-                message=str(error)[:1000],
-                details={},
-            ).model_dump(mode="json")
-            await self._update_status(run_id, "retryable", error=serializable_error)
-            return {"status": "retryable", "errors": [serializable_error]}
+            lock_acquired = bool(lock_result.scalar_one())
+            if not lock_acquired:
+                await owner_connection.rollback()
+                await self._update_status(
+                    run_id,
+                    "retryable",
+                    expected_status="running",
+                )
+                return {"status": "retryable"}
 
-        status = result.get("status")
-        if status:
-            await self._update_status(run_id, cast(str, status), result=result)
-        return result
+            async def ensure_active(session: AsyncSession | None = None) -> None:
+                """Heartbeat this worker only while the run remains running."""
+                if session is None:
+                    async with self.session_factory() as heartbeat_session:
+                        heartbeat_result = await heartbeat_session.execute(
+                            sa.update(QueryRun)
+                            .where(QueryRun.id == run_id, QueryRun.status == "running")
+                            .values(updated_at=self.clock.now())
+                        )
+                        await heartbeat_session.commit()
+                else:
+                    heartbeat_result = await session.execute(
+                        sa.update(QueryRun)
+                        .where(QueryRun.id == run_id, QueryRun.status == "running")
+                        .values(updated_at=self.clock.now())
+                    )
+                if not bool(getattr(heartbeat_result, "rowcount", 0)):
+                    raise RunOwnershipLostError(f"run ownership lost: {run_id}")
 
-    async def _start_run(self, run_id: str) -> None:
-        """Atomically activate a newly scheduled pending run."""
+            try:
+                fail_node = self.fail_next_node
+                if fail_node is not None:
+                    self.fail_next_node = None
+                    error = SerializableError(
+                        code=BidScopeErrorCode.GRAPH_NODE_ERROR,
+                        message=f"Test-only injected failure for node {fail_node!r}",
+                        details={"node": fail_node},
+                    ).model_dump(mode="json")
+                    result = {"status": "retryable", "errors": [error]}
+                    if not await self._update_status(
+                        run_id,
+                        "retryable",
+                        error=error,
+                        expected_status="running",
+                    ):
+                        return {"status": "retryable"}
+                    return result
+
+                run = await self.get_run(run_id)
+                checkpoint_thread_id = run.checkpoint_thread_id if run is not None else run_id
+                try:
+                    result = await execute(
+                        self.graph,
+                        run_id,
+                        input,
+                        session_factory=self.session_factory,
+                        checkpoint_thread_id=checkpoint_thread_id,
+                        force_fresh=force_fresh,
+                        ensure_active=ensure_active,
+                    )
+                except RunOwnershipLostError:
+                    return {"status": "retryable"}
+                except EventReconciliationError as error:
+                    serializable_error = SerializableError(
+                        code=BidScopeErrorCode.GRAPH_NODE_ERROR,
+                        message=str(error)[:1000],
+                        details={},
+                    ).model_dump(mode="json")
+                    await self._update_status(
+                        run_id,
+                        "retryable",
+                        error=serializable_error,
+                        expected_status="running",
+                    )
+                    return {"status": "retryable", "errors": [serializable_error]}
+                except Exception as error:  # noqa: BLE001 - detached route task boundary
+                    serializable_error = SerializableError(
+                        code=BidScopeErrorCode.GRAPH_NODE_ERROR,
+                        message=str(error)[:1000],
+                        details={},
+                    ).model_dump(mode="json")
+                    if not await self._update_status(
+                        run_id,
+                        "retryable",
+                        error=serializable_error,
+                        expected_status="running",
+                    ):
+                        return {"status": "retryable"}
+                    return {"status": "retryable", "errors": [serializable_error]}
+
+                status = result.get("status")
+                if status:
+                    result_error = None
+                    errors = result.get("errors")
+                    if errors:
+                        result_error = {"errors": _json_safe(errors)}
+                    if not await self._update_status(
+                        run_id,
+                        cast(str, status),
+                        error=result_error,
+                        result=result,
+                        expected_status="running",
+                    ):
+                        return {"status": "retryable"}
+                return result
+            finally:
+                release = asyncio.create_task(
+                    owner_connection.execute(
+                        sa.text("SELECT pg_advisory_unlock(:key)"),
+                        {"key": run_lock_key(run_id)},
+                    )
+                )
+                await _drain_task_preserving_cancellation(release)
+                await _drain_task_preserving_cancellation(
+                    asyncio.create_task(owner_connection.commit())
+                )
+
+    async def _start_run(self, run_id: str) -> bool:
+        """Atomically activate a pending run and report whether it is owned."""
         async with self.session_factory() as session:
-            await session.execute(
+            update_result = await session.execute(
                 sa.update(QueryRun)
                 .where(QueryRun.id == run_id, QueryRun.status == "pending")
                 .values(status="running", updated_at=self.clock.now())
             )
             await session.commit()
+            return bool(getattr(update_result, "rowcount", 0))
 
     async def get_run(self, run_id: str) -> QueryRun | None:
         async with self.session_factory() as session:
@@ -421,6 +542,7 @@ class RunService:
             "awaiting confirmation",
             "confirmation claim cancelled",
         )
+        self._add_claimed_run_id(run_id)
         return await self.execute_run(run_id, Command(resume={"action": "approve"}))
 
     async def retry(self, run_id: str) -> dict[str, Any]:
@@ -431,6 +553,7 @@ class RunService:
             "retryable",
             "retry claim cancelled",
         )
+        self._add_claimed_run_id(run_id)
         return await self._retry_after_claim_safely(run_id)
 
     async def _retry_after_claim_safely(self, run_id: str) -> dict[str, Any]:
@@ -439,6 +562,7 @@ class RunService:
             context = await self._retry_context(run_id)
         except asyncio.CancelledError as cancellation_error:
             if getattr(cancellation_error, "claim_repaired", False):
+                self._remove_claimed_run_id(run_id)
                 raise
             repair = asyncio.create_task(
                 self._repair_cancelled_claim(run_id, "retry checkpoint lookup cancelled")
@@ -446,10 +570,13 @@ class RunService:
             try:
                 await _drain_task_preserving_cancellation(repair)
             except BaseException as repair_error:
+                self._remove_claimed_run_id(run_id)
                 raise cancellation_error from repair_error
+            self._remove_claimed_run_id(run_id)
             raise
 
         if isinstance(context, dict):
+            self._remove_claimed_run_id(run_id)
             return context
         run, state = context
         if state and state.next:
@@ -608,6 +735,18 @@ class RunService:
                     "status": str(status),
                     "updated_at": self.clock.now(),
                 }
+                if result is not None:
+                    intent = result.get("search_intent")
+                    if intent is not None:
+                        values["search_intent"] = _json_safe(intent)
+                    errors = result.get("errors")
+                    if errors:
+                        values["error"] = {"errors": _json_safe(errors)}
+                    elif str(status) == "completed" and error is None:
+                        values["error"] = None
+                    usage = result.get("token_usage")
+                    if usage:
+                        values["token_usage"] = {"calls": _json_safe(usage)}
                 if error is not None:
                     values["error"] = error
                 if str(status) == "completed":

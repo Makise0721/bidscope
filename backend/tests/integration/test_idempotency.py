@@ -695,6 +695,140 @@ async def test_event_reconciliation_does_not_match_duplicate_fingerprint_from_ol
     assert base == 2
 
 
+async def test_terminal_checkpoint_reconciles_events_before_short_circuit(
+    session_factory,
+) -> None:
+    """A terminal checkpoint with missing relational events fails closed."""
+    from bidscope.graph.executor import EventReconciliationError, create_run, execute
+
+    run_id, created = await create_run("terminal reconciliation", session_factory=session_factory)
+    assert created is True
+    event = {
+        "node": "node",
+        "event": "done",
+        "status": "ok",
+        "message": None,
+        "details": {},
+        "timestamp": "2026-07-18T09:00:00+00:00",
+    }
+
+    class TerminalGraph:
+        async def aget_state(self, config: Any) -> Any:
+            del config
+            return SimpleNamespace(
+                values={"status": "completed", "node_events": [event]},
+                next=(),
+            )
+
+        async def astream(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("terminal checkpoint must not graph-stream")
+
+    with pytest.raises(EventReconciliationError):
+        await execute(
+            TerminalGraph(),
+            run_id,
+            {"user_request": "terminal"},
+            session_factory=session_factory,
+        )
+
+
+async def test_terminal_checkpoint_rejects_conflicting_relational_event(
+    session_factory,
+) -> None:
+    """A terminal checkpoint conflict is not accepted as an idempotent replay."""
+    from bidscope.graph.executor import EventReconciliationError, create_run, execute
+
+    run_id, created = await create_run("terminal conflict", session_factory=session_factory)
+    assert created is True
+    local = {
+        "node": "node",
+        "event": "done",
+        "status": "ok",
+        "message": None,
+        "details": {},
+        "timestamp": "2026-07-18T09:00:00+00:00",
+    }
+    async with session_factory() as session:
+        session.add(
+            RunEvent(
+                query_run_id=run_id,
+                seq=0,
+                timestamp=datetime(2026, 7, 18, 9, tzinfo=UTC),
+                node="node",
+                event="different",
+                status="ok",
+            )
+        )
+        await session.commit()
+
+    class TerminalGraph:
+        async def aget_state(self, config: Any) -> Any:
+            del config
+            return SimpleNamespace(
+                values={"status": "completed", "node_events": [local]},
+                next=(),
+            )
+
+        async def astream(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("terminal checkpoint must not graph-stream")
+
+    with pytest.raises(EventReconciliationError):
+        await execute(
+            TerminalGraph(),
+            run_id,
+            {"user_request": "terminal"},
+            session_factory=session_factory,
+        )
+
+
+async def test_event_reconciliation_rejects_trailing_relational_event(
+    session_factory,
+) -> None:
+    """A checkpoint prefix plus an unrepresented relational row fails closed."""
+    from bidscope.graph.executor import (
+        EventReconciliationError,
+        _reconcile_event_cursor,
+        create_run,
+    )
+
+    def event(name: str) -> dict[str, Any]:
+        return {
+            "node": "node",
+            "event": name,
+            "status": "ok",
+            "timestamp": "2026-07-18T09:00:00+00:00",
+            "message": name,
+            "details": {},
+        }
+
+    local = [event("A"), event("B")]
+    run_id, created = await create_run("trailing event", session_factory=session_factory)
+    assert created is True
+    async with session_factory() as session:
+        for seq, row in enumerate([*local, event("C")]):
+            session.add(
+                RunEvent(
+                    query_run_id=run_id,
+                    seq=seq,
+                    timestamp=datetime(2026, 7, 18, 9, seq, tzinfo=UTC),
+                    node=row["node"],
+                    event=row["event"],
+                    status=row["status"],
+                    message=row["message"],
+                    details=row["details"],
+                )
+            )
+        await session.commit()
+
+    with pytest.raises(EventReconciliationError):
+        await _reconcile_event_cursor(
+            run_id,
+            local,
+            session_factory,
+            event_seq_offset=0,
+        )
+
+
 async def test_event_reconciliation_rejects_middle_sequence_mismatch(session_factory) -> None:
     """A mismatch at the expected sequence fails instead of selecting a suffix."""
     from bidscope.graph.executor import _reconcile_event_cursor, create_run

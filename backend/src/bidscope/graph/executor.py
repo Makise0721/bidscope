@@ -27,8 +27,11 @@ deduplicates by reading the checkpoint state for an interrupted run.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import inspect
 import re
 import selectors
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -95,6 +98,16 @@ async def setup_checkpoints(settings: Settings) -> None:
 
 class EventReconciliationError(RuntimeError):
     """A checkpoint cannot be safely aligned with its relational event attempt."""
+
+
+class RunOwnershipLostError(RuntimeError):
+    """The worker no longer owns the relational run row."""
+
+
+def run_lock_key(run_id: str) -> int:
+    """Derive a deterministic signed 64-bit advisory lock key for one run."""
+    digest = hashlib.sha256(f"run::{run_id}".encode()).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=True)
 
 
 async def _event_rows(
@@ -182,6 +195,11 @@ async def _reconcile_event_cursor(
                 raise EventReconciliationError(
                     f"legacy checkpoint conflicts at relational sequence {index}"
                 )
+        maximum = await _max_event_seq(run_id, session_factory)
+        if maximum is not None and maximum >= len(local):
+            raise EventReconciliationError(
+                f"legacy relational event history has trailing sequence {len(local)}"
+            )
         return len(local), 0
 
     if event_seq_offset < 0:
@@ -213,11 +231,28 @@ async def _reconcile_event_cursor(
         matched += 1
 
     expected_next = event_seq_offset + matched
-    if not local and by_seq.get(expected_next) is not None:
+    if by_seq.get(expected_next) is not None:
+        if matched < len(local):
+            raise EventReconciliationError(
+                f"checkpoint has no event to validate relational sequence {expected_next}"
+            )
         raise EventReconciliationError(
-            f"checkpoint has no event to validate relational sequence {expected_next}"
+            f"relational event history has trailing sequence {expected_next}"
         )
     return matched, event_seq_offset
+
+
+async def _ensure_active(
+    ensure_active: Callable[[Any | None], Awaitable[None]] | None,
+    session: Any | None = None,
+) -> None:
+    """Invoke ownership fencing callbacks with legacy no-argument compatibility."""
+    if ensure_active is None:
+        return
+    if len(inspect.signature(ensure_active).parameters) == 0:
+        await ensure_active()  # type: ignore[call-arg]
+    else:
+        await ensure_active(session)
 
 
 async def _next_event_seq(run_id: str, session_factory: Any) -> int:
@@ -237,6 +272,7 @@ async def execute(
     session_factory: Any,
     checkpoint_thread_id: str | None = None,
     force_fresh: bool = False,
+    ensure_active: Callable[[Any | None], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Drive ``graph`` from ``input`` and persist each new node event.
 
@@ -257,8 +293,6 @@ async def execute(
         input = {**input, "run_id": str(run_id)}
 
     existing = await graph.aget_state(config)
-    if not force_fresh and existing and existing.values and not existing.next:
-        return dict(existing.values)
 
     fresh_offset: int | None = None
     if force_fresh:
@@ -284,6 +318,12 @@ async def execute(
         event_seq_offset=event_seq_offset,
     )
 
+    if not force_fresh and existing and existing.values and not existing.next:
+        await _ensure_active(ensure_active)
+        return dict(existing.values)
+
+    await _ensure_active(ensure_active)
+
     async for state in graph.astream(input, config, stream_mode="values"):
         events = state.get("node_events", [])
         new_count = len(events)
@@ -294,6 +334,7 @@ async def execute(
                 persisted,
                 session_factory,
                 seq_offset=persisted_seq_offset,
+                ensure_active=ensure_active,
             )
             persisted = new_count
 
@@ -321,11 +362,13 @@ async def _append_events(
     session_factory: Any,
     *,
     seq_offset: int = 0,
+    ensure_active: Callable[[Any | None], Awaitable[None]] | None = None,
 ) -> None:
     """Persist ``events[start:]`` and heartbeat the owning query run."""
     if start >= len(events):
         return
     async with session_factory() as session:
+        await _ensure_active(ensure_active, session)
         for index in range(start, len(events)):
             event = events[index]
             session.add(
@@ -340,11 +383,6 @@ async def _append_events(
                     details=event.get("details", {}),
                 )
             )
-        await session.execute(
-            sa.update(QueryRun)
-            .where(QueryRun.id == str(run_id))
-            .values(updated_at=datetime.now(UTC))
-        )
         await session.commit()
 
 

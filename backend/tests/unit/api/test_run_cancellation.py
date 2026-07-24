@@ -219,6 +219,63 @@ async def test_persist_cancellation_chains_non_exception_child_failure(
 
 
 @pytest.mark.asyncio
+async def test_concurrent_execution_cannot_borrow_retry_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A task-local retry claim cannot authorize a concurrent execution task."""
+    service = object.__new__(RunService)
+    lookup_started = asyncio.Event()
+    release_lookup = asyncio.Event()
+    observed_claims: list[bool] = []
+
+    async def blocking_context(run_id: str) -> dict[str, Any]:
+        del run_id
+        lookup_started.set()
+        await release_lookup.wait()
+        return {"status": "retryable"}
+
+    async def record_execute(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args
+        observed_claims.append(kwargs["claimed"])
+        return {"status": "retryable"}
+
+    monkeypatch.setattr(service, "_claim_run_safely", AsyncMock())
+    monkeypatch.setattr(service, "_retry_context", blocking_context)
+    monkeypatch.setattr(service, "_execute_run", record_execute)
+
+    retry_task = asyncio.create_task(service.retry("run-1"))
+    await asyncio.wait_for(lookup_started.wait(), timeout=1)
+    assert await service.execute_run("run-1", {}) == {"status": "retryable"}
+    release_lookup.set()
+    assert await retry_task == {"status": "retryable"}
+
+    assert observed_claims == [False]
+
+
+@pytest.mark.asyncio
+async def test_retry_lookup_failure_clears_task_local_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retryable checkpoint lookup result cannot authorize later execution."""
+    service = object.__new__(RunService)
+    observed_claims: list[bool] = []
+
+    async def record_execute(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args
+        observed_claims.append(kwargs["claimed"])
+        return {"status": "retryable"}
+
+    monkeypatch.setattr(service, "_claim_run_safely", AsyncMock())
+    monkeypatch.setattr(service, "_retry_context", AsyncMock(return_value={"status": "retryable"}))
+    monkeypatch.setattr(service, "_execute_run", record_execute)
+
+    assert await service.retry("run-1") == {"status": "retryable"}
+    assert await service.execute_run("run-1", {}) == {"status": "retryable"}
+
+    assert observed_claims == [False]
+
+
+@pytest.mark.asyncio
 async def test_retry_passes_retry_resume_action_and_confirm_keeps_approve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -230,7 +287,30 @@ async def test_retry_passes_retry_resume_action_and_confirm_keeps_approve(
     service._claim_run_safely = AsyncMock()
     service._start_run = AsyncMock()
     service._update_status = AsyncMock()
-    service.session_factory = object()
+
+    class FakeResult:
+        def scalar_one(self) -> bool:
+            return True
+
+    class FakeConnection:
+        async def execute(self, *args: Any, **kwargs: Any) -> FakeResult:
+            del args, kwargs
+            return FakeResult()
+
+        async def commit(self) -> None:
+            return None
+
+    class FakeSession:
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            del args
+
+        async def connection(self) -> FakeConnection:
+            return FakeConnection()
+
+    service.session_factory = FakeSession
     service.get_run = AsyncMock(
         return_value=SimpleNamespace(
             id="run-1",

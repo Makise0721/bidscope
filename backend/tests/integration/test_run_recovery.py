@@ -154,6 +154,194 @@ async def test_scheduled_run_transitions_to_running_before_graph_work(
 
 
 @pytest.mark.asyncio
+async def test_zero_row_start_does_not_execute_graph(
+    session_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker whose pending claim was lost must not enter graph execution."""
+    from bidscope.api import dependencies
+
+    run_id = str(uuid.uuid4())
+    async with session_factory() as session:
+        session.add(
+            QueryRun(
+                id=run_id,
+                run_key="start-claim-lost",
+                status="retryable",
+                user_request="lost claim",
+            )
+        )
+        await session.commit()
+
+    graph_calls = 0
+
+    async def unexpected_execute(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal graph_calls
+        del args, kwargs
+        graph_calls += 1
+        return {"status": "completed"}
+
+    monkeypatch.setattr(dependencies, "execute", unexpected_execute)
+    service = RunService(
+        session_factory=session_factory,
+        graph=object(),
+        object_store=object(),
+        settings=get_settings(),
+    )
+
+    result = await service.execute_run(run_id, {"user_request": "lost claim"})
+
+    assert result == {"status": "retryable"}
+    assert graph_calls == 0
+    async with session_factory() as session:
+        run = await session.get(QueryRun, run_id)
+    assert run is not None
+    assert run.status == "retryable"
+
+
+@pytest.mark.asyncio
+async def test_stale_worker_cannot_append_events_or_finalize(
+    session_factory: Any,
+) -> None:
+    """A stale worker stops before relational writes after its status is flipped."""
+    run_id, created = await create_run(
+        "stale worker request",
+        run_key="stale-worker-fencing",
+        session_factory=session_factory,
+    )
+    assert created is True
+    graph_started = asyncio.Event()
+    stale_flipped = asyncio.Event()
+    event = {
+        "timestamp": "2026-07-18T09:00:00+00:00",
+        "node": "parse_intent",
+        "event": "intent_parsed",
+        "status": "ok",
+        "message": None,
+        "details": {},
+    }
+
+    class StaleGraph:
+        async def aget_state(self, config: Any) -> Any:
+            del config
+            if stale_flipped.is_set():
+                return SimpleNamespace(
+                    values={"status": "completed", "node_events": [event]},
+                    next=(),
+                )
+            return SimpleNamespace(values={}, next=("node",))
+
+        async def astream(self, input_data: Any, config: Any, stream_mode: str) -> Any:
+            del input_data, config
+            assert stream_mode == "values"
+            graph_started.set()
+            async with session_factory() as session:
+                await session.execute(
+                    sa.update(QueryRun)
+                    .where(QueryRun.id == run_id)
+                    .values(status="retryable")
+                )
+                await session.commit()
+            stale_flipped.set()
+            yield {"status": "completed", "node_events": [event]}
+
+    service = RunService(
+        session_factory=session_factory,
+        graph=StaleGraph(),
+        object_store=object(),
+        settings=get_settings(),
+    )
+    result = await service.execute_run(run_id, {"user_request": "stale worker request"})
+
+    assert graph_started.is_set()
+    assert result == {"status": "retryable"}
+    async with session_factory() as session:
+        run = await session.get(QueryRun, run_id)
+        events = await session.scalars(
+            sa.select(RunEvent).where(RunEvent.query_run_id == run_id)
+        )
+        persisted_events = list(events)
+    assert run is not None
+    assert run.status == "retryable"
+    assert persisted_events == []
+
+
+@pytest.mark.asyncio
+async def test_run_advisory_lock_fences_concurrent_retry_until_old_worker_exits(
+    session_factory: Any,
+) -> None:
+    """A retry cannot graph-run while the old worker holds the run lock."""
+    run_id = str(uuid.uuid4())
+    async with session_factory() as session:
+        session.add(
+            QueryRun(
+                id=run_id,
+                run_key="run-lock-retry",
+                status="pending",
+                user_request="locked retry",
+                checkpoint_thread_id=run_id,
+            )
+        )
+        await session.commit()
+
+    graph_started = asyncio.Event()
+    release_old_worker = asyncio.Event()
+    execution_count = 0
+    terminal_pending = False
+
+    class LockingGraph:
+        async def aget_state(self, config: Any) -> Any:
+            del config
+            if terminal_pending:
+                return SimpleNamespace(values={"status": "completed"}, next=())
+            return SimpleNamespace(values={}, next=("node",))
+
+        async def astream(self, input_data: Any, config: Any, stream_mode: str) -> Any:
+            nonlocal execution_count, terminal_pending
+            del input_data, config
+            assert stream_mode == "values"
+            execution_count += 1
+            if execution_count == 1:
+                graph_started.set()
+                await release_old_worker.wait()
+            terminal_pending = True
+            yield {"status": "completed", "node_events": []}
+
+    graph = LockingGraph()
+    first_service = RunService(
+        session_factory=session_factory,
+        graph=graph,
+        object_store=object(),
+        settings=get_settings(),
+    )
+    old_task = asyncio.create_task(
+        first_service.execute_run(run_id, {"user_request": "locked retry"})
+    )
+    await asyncio.wait_for(graph_started.wait(), timeout=1)
+
+    async with session_factory() as session:
+        await session.execute(
+            sa.update(QueryRun).where(QueryRun.id == run_id).values(status="retryable")
+        )
+        await session.commit()
+
+    retry_service = RunService(
+        session_factory=session_factory,
+        graph=graph,
+        object_store=object(),
+        settings=get_settings(),
+    )
+    blocked_retry = await retry_service.retry(run_id)
+    assert blocked_retry == {"status": "retryable"}
+    assert execution_count == 1
+
+    release_old_worker.set()
+    assert await old_task == {"status": "retryable"}
+    assert await retry_service.retry(run_id) == {"status": "completed"}
+    assert execution_count == 2
+
+
+@pytest.mark.asyncio
 async def test_injected_failure_persists_the_returned_bounded_error(
     session_factory: Any,
 ) -> None:
