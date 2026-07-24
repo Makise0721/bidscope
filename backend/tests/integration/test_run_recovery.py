@@ -322,6 +322,101 @@ async def test_cancelled_retry_after_claim_repairs_run_for_next_retry(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method_name", "eligible_status", "cancellation_message"),
+    [
+        ("retry", "retryable", "retry claim cancelled"),
+        (
+            "confirm",
+            "awaiting_confirmation",
+            "confirmation claim cancelled",
+        ),
+    ],
+)
+async def test_claim_cancellation_reinjected_after_drain_restores_eligibility(
+    session_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+    eligible_status: str,
+    cancellation_message: str,
+) -> None:
+    """A cancellation queued between claim drain and repair cannot strand the run."""
+    from bidscope.api import dependencies
+
+    run_id = str(uuid.uuid4())
+    async with session_factory() as session:
+        session.add(QueryRun(
+            id=run_id,
+            run_key=f"reinjected-{method_name}-claim",
+            status=eligible_status,
+            user_request="retry request",
+        ))
+        await session.commit()
+
+    service = RunService(
+        session_factory=session_factory,
+        graph=object(),
+        object_store=object(),
+        settings=get_settings(),
+    )
+    original_claim = service._claim_run
+    original_drain = dependencies._drain_task_preserving_cancellation
+    original_repair = service._repair_cancelled_claim
+    claim_committed = asyncio.Event()
+    release_claim = asyncio.Event()
+
+    async def delayed_claim(
+        claimed_run_id: str, claimable_status: str, claim_status_name: str,
+    ) -> bool:
+        claimed = await original_claim(claimed_run_id, claimable_status, claim_status_name)
+        claim_committed.set()
+        await release_claim.wait()
+        return claimed
+
+    async def drain_then_reinject_cancellation(
+        claim: asyncio.Future[bool],
+    ) -> bool:
+        claimed = await original_drain(claim)
+        current = asyncio.current_task()
+        assert current is not None
+        current.cancel()
+        return claimed
+
+    async def repair_after_cancellation_delivery(
+        repaired_run_id: str,
+        message: str,
+    ) -> None:
+        await asyncio.sleep(0)
+        await original_repair(repaired_run_id, message)
+
+    monkeypatch.setattr(service, "_claim_run", delayed_claim)
+    monkeypatch.setattr(service, "_repair_cancelled_claim", repair_after_cancellation_delivery)
+    monkeypatch.setattr(
+        dependencies,
+        "_drain_task_preserving_cancellation",
+        drain_then_reinject_cancellation,
+    )
+
+    cancelled_operation = asyncio.create_task(getattr(service, method_name)(run_id))
+    await asyncio.wait_for(claim_committed.wait(), timeout=1)
+    cancelled_operation.cancel()
+    release_claim.set()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_operation
+
+    async with session_factory() as session:
+        cancelled_run = await session.get(QueryRun, run_id)
+    assert cancelled_run is not None
+    assert cancelled_run.status == "retryable"
+    assert cancelled_run.error == {
+        "code": "graph_node_error",
+        "message": cancellation_message,
+        "details": {},
+    }
+    assert await original_claim(run_id, "retryable", "retryable") is True
+
+
+@pytest.mark.asyncio
 async def test_cancelled_retry_get_run_repairs_run_for_next_retry(
     session_factory: Any,
     monkeypatch: pytest.MonkeyPatch,

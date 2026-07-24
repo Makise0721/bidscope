@@ -200,9 +200,24 @@ class RunService:
         tasks = tuple(self._run_tasks)
         for task in tasks:
             task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._run_tasks.clear()
+
+        results: list[dict[str, Any] | BaseException] = []
+        try:
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            self._run_tasks.clear()
+
+        failures = [
+            result
+            for result in results
+            if isinstance(result, BaseException)
+            and not isinstance(result, asyncio.CancelledError)
+        ]
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise BaseExceptionGroup("Detached run tasks failed during shutdown", failures)
 
     async def execute_run(self, run_id: str, input: Any) -> dict[str, Any]:  # noqa: ANN401
         """Drive the graph from ``input`` and sync the final status back to the DB.
@@ -418,8 +433,14 @@ class RunService:
             except BaseException as claim_error:
                 raise cancellation_error from claim_error
             if claimed:
-                await self._repair_cancelled_claim(run_id, cancellation_message)
-            raise
+                repair = asyncio.create_task(
+                    self._repair_cancelled_claim(run_id, cancellation_message),
+                )
+                try:
+                    await _drain_task_preserving_cancellation(repair)
+                except BaseException as repair_error:
+                    raise cancellation_error from repair_error
+            raise cancellation_error
 
     async def _repair_cancelled_claim(self, run_id: str, message: str) -> None:
         """Restore only the run still owned by this claim to retryable."""
