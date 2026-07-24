@@ -41,6 +41,8 @@ from sqlalchemy.exc import IntegrityError
 from bidscope.config import Settings, get_settings
 from bidscope.persistence.models import QueryRun, RunEvent
 
+_TERMINAL_RUN_STATUSES = {"completed", "failed", "evidence_insufficient"}
+
 
 def _to_datetime(value: Any) -> datetime:
     """Parse an ISO-8601 timestamp from a node event, falling back to now."""
@@ -127,12 +129,18 @@ async def execute(
     if isinstance(input, dict) and "run_id" not in input:
         input = {**input, "run_id": str(run_id)}
 
-    # Idempotency guard: a *completed* run short-circuits on the checkpointer.
-    # A run interrupted at a pause node also carries a checkpoint, but its
-    # ``next`` tuple names the still-pending node(s) — only a truly terminal
-    # checkpoint (empty ``next``) is safe to return without re-streaming.
+    # Read the durable row before inspecting the checkpoint. Retryable and
+    # recovery rows may retain a terminal checkpoint but must accept fresh input.
+    async with session_factory() as session:
+        persisted_run = await session.get(QueryRun, str(run_id))
     existing = await graph.aget_state(config)
-    if existing and existing.values and not existing.next:
+    if (
+        persisted_run is not None
+        and persisted_run.status in _TERMINAL_RUN_STATUSES
+        and existing
+        and existing.values
+        and not existing.next
+    ):
         return dict(existing.values)
 
     already_persisted = await _persisted_event_count(run_id, session_factory)

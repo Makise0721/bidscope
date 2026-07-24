@@ -9,6 +9,7 @@ exposes the run lifecycle operations the routes call.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, is_dataclass
@@ -175,6 +176,7 @@ class RunService:
         #: once by ``execute_run``.
         self.fail_next_node: str | None = None
         self._run_tasks: set[asyncio.Task[dict[str, Any]]] = set()
+        self._completed_task_errors: deque[BaseException] = deque(maxlen=32)
         self._shutting_down = False
 
     async def create_run(
@@ -191,8 +193,18 @@ class RunService:
             raise RuntimeError("run service is shutting down")
         task = asyncio.create_task(self.execute_run(run_id, input))
         self._run_tasks.add(task)
-        task.add_done_callback(self._run_tasks.discard)
+        task.add_done_callback(self._on_run_task_done)
         return task
+
+    def _on_run_task_done(self, task: asyncio.Task[dict[str, Any]]) -> None:
+        """Consume completed-task exceptions while retaining unexpected failures."""
+        self._run_tasks.discard(task)
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if error is not None:
+            self._completed_task_errors.append(error)
 
     async def shutdown(self) -> None:
         """Cancel and drain all detached runs before shared resources close."""
@@ -205,15 +217,23 @@ class RunService:
         try:
             if tasks:
                 results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            failures = [
+                result
+                for result in results
+                if isinstance(result, BaseException)
+                and not isinstance(result, asyncio.CancelledError)
+            ]
+            completed_errors = getattr(self, "_completed_task_errors", ())
+            for error in completed_errors:
+                if not any(error is failure for failure in failures):
+                    failures.append(error)
         finally:
             self._run_tasks.clear()
+            completed_errors = getattr(self, "_completed_task_errors", None)
+            if completed_errors is not None:
+                completed_errors.clear()
 
-        failures = [
-            result
-            for result in results
-            if isinstance(result, BaseException)
-            and not isinstance(result, asyncio.CancelledError)
-        ]
         if len(failures) == 1:
             raise failures[0]
         if failures:
@@ -411,7 +431,7 @@ class RunService:
             await self._update_status(run_id, "retryable", error=serializable_error)
             return {"status": "retryable", "errors": [serializable_error]}
         if state and state.values and state.next:
-            return await self.execute_run(run_id, Command(resume={"action": "approve"}))
+            return await self.execute_run(run_id, Command(resume={"action": "retry"}))
         return await self.execute_run(run_id, {"user_request": run.user_request})
 
     async def _claim_run_safely(
@@ -526,6 +546,8 @@ class RunService:
                     errors = result.get("errors")
                     if errors:
                         run.error = {"errors": _json_safe(errors)}
+                    elif str(status) == "completed":
+                        run.error = None
                     usage = result.get("token_usage")
                     if usage:
                         run.token_usage = {"calls": _json_safe(usage)}

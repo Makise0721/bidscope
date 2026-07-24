@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -18,7 +19,7 @@ import sqlalchemy as sa
 from bidscope.api.dependencies import RunService
 from bidscope.config import get_settings
 from bidscope.graph.executor import create_run, mark_stale_runs_retryable
-from bidscope.persistence.models import QueryRun
+from bidscope.persistence.models import QueryRun, RunEvent
 
 
 @pytest.mark.asyncio
@@ -158,6 +159,141 @@ async def test_retry_claims_run_before_concurrent_execution(
     assert sum(isinstance(result, dict) for result in results) == 1
     conflicts = [result for result in results if getattr(result, "status_code", None) == 409]
     assert len(conflicts) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_reexecutes_fresh_input_for_terminal_checkpoint_and_preserves_events(
+    session_factory: Any,
+) -> None:
+    """A retryable row ignores a stale terminal checkpoint and runs fresh input."""
+    run_id = str(uuid.uuid4())
+    old_event = {
+        "timestamp": "2026-07-18T09:00:00+00:00",
+        "node": "old_node",
+        "event": "old_event",
+        "status": "ok",
+    }
+    new_event = {
+        "timestamp": "2026-07-18T09:01:00+00:00",
+        "node": "new_node",
+        "event": "new_event",
+        "status": "ok",
+    }
+    async with session_factory() as session:
+        session.add(QueryRun(
+            id=run_id,
+            run_key="terminal-checkpoint-retry",
+            status="retryable",
+            user_request="fresh request",
+            checkpoint_thread_id="same-thread",
+        ))
+        session.add(RunEvent(
+            query_run_id=run_id,
+            seq=0,
+            timestamp=datetime(2026, 7, 18, 9, 0, tzinfo=UTC),
+            node=old_event["node"],
+            event=old_event["event"],
+            status=old_event["status"],
+        ))
+        await session.commit()
+
+    class TerminalCheckpointGraph:
+        def __init__(self) -> None:
+            self.inputs: list[Any] = []
+            self.configs: list[Any] = []
+
+        async def aget_state(self, config: Any) -> Any:
+            self.configs.append(config)
+            return SimpleNamespace(
+                values={"status": "completed", "node_events": [old_event]},
+                next=(),
+            )
+
+        async def astream(self, input_data: Any, config: Any, stream_mode: str) -> Any:
+            assert stream_mode == "values"
+            self.inputs.append(input_data)
+            self.configs.append(config)
+            yield {"status": "completed", "node_events": [old_event, new_event]}
+
+    graph = TerminalCheckpointGraph()
+    service = RunService(
+        session_factory=session_factory,
+        graph=graph,
+        object_store=object(),
+        settings=get_settings(),
+    )
+
+    result = await service.retry(run_id)
+
+    assert result["status"] == "completed"
+    assert len(graph.inputs) == 1
+    assert graph.inputs[0]["user_request"] == "fresh request"
+    assert graph.inputs[0]["run_id"] == run_id
+    assert all(config["configurable"]["thread_id"] == "same-thread" for config in graph.configs)
+    async with session_factory() as session:
+        run = await session.get(QueryRun, run_id)
+        events = await session.execute(
+            sa.select(RunEvent).where(RunEvent.query_run_id == run_id).order_by(RunEvent.seq)
+        )
+    assert run is not None
+    assert run.status == "completed"
+    assert [event.node for event in events.scalars()] == ["old_node", "new_node"]
+
+
+@pytest.mark.asyncio
+async def test_successful_completion_clears_old_error_but_keeps_degraded_errors(
+    session_factory: Any,
+) -> None:
+    """Successful clean results clear stale errors while DOCX degradation remains visible."""
+    service = RunService(
+        session_factory=session_factory,
+        graph=object(),
+        object_store=object(),
+        settings=get_settings(),
+    )
+    clear_id = str(uuid.uuid4())
+    degraded_id = str(uuid.uuid4())
+    old_error = {"code": "graph_node_error", "message": "previous failure"}
+    degraded_error = {
+        "code": "delivery_error",
+        "message": "DOCX storage unavailable",
+        "details": {"docx_retryable": True},
+    }
+    async with session_factory() as session:
+        session.add_all([
+            QueryRun(
+                id=clear_id,
+                run_key="clear-old-error",
+                status="retryable",
+                user_request="clear error",
+                error=old_error,
+            ),
+            QueryRun(
+                id=degraded_id,
+                run_key="retain-degraded-error",
+                status="retryable",
+                user_request="retain error",
+                error=old_error,
+            ),
+        ])
+        await session.commit()
+
+    await service._update_status(clear_id, "completed", result={"status": "completed"})
+    await service._update_status(
+        degraded_id,
+        "completed",
+        result={"status": "completed", "errors": [degraded_error]},
+    )
+
+    async with session_factory() as session:
+        clear_run = await session.get(QueryRun, clear_id)
+        degraded_run = await session.get(QueryRun, degraded_id)
+    assert clear_run is not None
+    assert clear_run.status == "completed"
+    assert clear_run.error is None
+    assert degraded_run is not None
+    assert degraded_run.status == "completed"
+    assert degraded_run.error == {"errors": [degraded_error]}
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -13,6 +14,10 @@ from bidscope.api.dependencies import RunService
 
 class _ChildAbort(BaseException):
     """A child-task failure that does not inherit from ``Exception``."""
+
+
+class _DetachedAbort(BaseException):
+    """An unexpected failure from a detached task."""
 
 
 @pytest.mark.asyncio
@@ -41,6 +46,43 @@ async def test_shutdown_raises_unexpected_child_base_exception_after_draining() 
     assert task.done()
     assert not service._run_tasks
     assert service._shutting_down is True
+
+
+@pytest.mark.asyncio
+async def test_shutdown_surfaces_completed_detached_task_base_exception_without_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed detached failure remains observable until shutdown drains it."""
+    service = object.__new__(RunService)
+    service._shutting_down = False
+    service._run_tasks = set()
+    service._completed_task_errors = []
+
+    async def fail_detached(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        raise _DetachedAbort("detached task failed")
+
+    monkeypatch.setattr(service, "execute_run", fail_detached)
+    loop = asyncio.get_running_loop()
+    loop_errors: list[dict[str, Any]] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda loop, context: loop_errors.append(context))
+    try:
+        task = service.schedule_run("run-1", {})
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert task.done()
+        assert not service._run_tasks
+
+        with pytest.raises(_DetachedAbort, match="detached task failed"):
+            await service.shutdown()
+
+        del task
+        gc.collect()
+        await asyncio.sleep(0)
+        assert not loop_errors
+    finally:
+        loop.set_exception_handler(previous_handler)
 
 
 @pytest.mark.asyncio
@@ -174,3 +216,45 @@ async def test_persist_cancellation_chains_non_exception_child_failure(
         await service._persist_cancellation("run-1", {"code": "graph_node_error"})
 
     assert isinstance(error.value.__cause__, _ChildAbort)
+
+
+@pytest.mark.asyncio
+async def test_retry_passes_retry_resume_action_and_confirm_keeps_approve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry and confirmation use distinct graph resume actions."""
+    from bidscope.api import dependencies
+
+    service = object.__new__(RunService)
+    service.fail_next_node = None
+    service._claim_run_safely = AsyncMock()
+    service._update_status = AsyncMock()
+    service.session_factory = object()
+    service.get_run = AsyncMock(
+        return_value=SimpleNamespace(
+            id="run-1",
+            checkpoint_thread_id="thread-1",
+            user_request="request",
+        )
+    )
+
+    class RecordingGraph:
+        async def aget_state(self, config: Any) -> Any:
+            del config
+            return SimpleNamespace(values={"status": "retryable"}, next=("node",))
+
+    service.graph = RecordingGraph()
+    received: list[Any] = []
+
+    async def fake_execute(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del kwargs
+        received.append(args[2])
+        return {"status": "completed"}
+
+    monkeypatch.setattr(dependencies, "execute", fake_execute)
+
+    await service.retry("run-1")
+    await service.confirm("run-1")
+
+    assert received[0].resume == {"action": "retry"}
+    assert received[1].resume == {"action": "approve"}
