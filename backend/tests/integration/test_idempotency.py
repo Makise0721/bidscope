@@ -548,7 +548,7 @@ async def test_resume_reconciles_partial_fresh_retry_events_with_relational_hist
         def __init__(self) -> None:
             self.phase = 0
             self.state: SimpleNamespace | None = SimpleNamespace(
-                values={"node_events": [old_event]},
+                values={"node_events": [old_event], "event_seq_offset": 0},
                 next=(),
             )
             self.checkpointer = self._Checkpointer(self)
@@ -572,7 +572,7 @@ async def test_resume_reconciles_partial_fresh_retry_events_with_relational_hist
             if self.phase == 0:
                 self.phase += 1
                 self.state = SimpleNamespace(
-                    values={"node_events": [new_event_one]},
+                    values={"node_events": [new_event_one], "event_seq_offset": 1},
                     next=("resume",),
                 )
                 yield self.state.values
@@ -581,7 +581,10 @@ async def test_resume_reconciles_partial_fresh_retry_events_with_relational_hist
             assert self.phase == 1
             self.phase += 1
             self.state = SimpleNamespace(
-                values={"node_events": [new_event_one, new_event_two]},
+                values={
+                    "node_events": [new_event_one, new_event_two],
+                    "event_seq_offset": 1,
+                },
                 next=(),
             )
             yield self.state.values
@@ -637,6 +640,102 @@ async def test_resume_reconciles_partial_fresh_retry_events_with_relational_hist
         "new_event_one",
         "new_event_two",
     ]
+
+
+async def test_event_reconciliation_does_not_match_duplicate_fingerprint_from_old_attempt(
+    session_factory,
+) -> None:
+    """A fresh attempt offset prevents an identical old event from being reused."""
+    from bidscope.graph.executor import _reconcile_event_cursor, create_run
+
+    event = {
+        "node": "same_node",
+        "event": "same_event",
+        "status": "ok",
+        "timestamp": "2026-07-18T09:00:00+00:00",
+        "message": "same",
+        "details": {"kind": "duplicate"},
+    }
+    run_id, created = await create_run("duplicate request", session_factory=session_factory)
+    assert created is True
+    async with session_factory() as session:
+        session.add_all(
+            [
+                RunEvent(
+                    query_run_id=run_id,
+                    seq=0,
+                    timestamp=datetime(2026, 7, 18, 9, 0, tzinfo=UTC),
+                    node=event["node"],
+                    event=event["event"],
+                    status=event["status"],
+                    message=event["message"],
+                    details=event["details"],
+                ),
+                RunEvent(
+                    query_run_id=run_id,
+                    seq=1,
+                    timestamp=datetime(2026, 7, 18, 9, 1, tzinfo=UTC),
+                    node=event["node"],
+                    event=event["event"],
+                    status=event["status"],
+                    message=event["message"],
+                    details=event["details"],
+                ),
+            ]
+        )
+        await session.commit()
+
+    persisted, base = await _reconcile_event_cursor(
+        run_id,
+        [event],
+        session_factory,
+        event_seq_offset=2,
+    )
+    assert persisted == 0
+    assert base == 2
+
+
+async def test_event_reconciliation_rejects_middle_sequence_mismatch(session_factory) -> None:
+    """A mismatch at the expected sequence fails instead of selecting a suffix."""
+    from bidscope.graph.executor import _reconcile_event_cursor, create_run
+
+    def event(name: str) -> dict[str, Any]:
+        return {
+            "node": "node",
+            "event": name,
+            "status": "ok",
+            "timestamp": "2026-07-18T09:00:00+00:00",
+            "message": name,
+            "details": {},
+        }
+
+    local = [event("A"), event("B"), event("C")]
+    history = [event("A"), event("X"), event("C")]
+    run_id, created = await create_run("mismatch request", session_factory=session_factory)
+    assert created is True
+    async with session_factory() as session:
+        for seq, row in enumerate(history, start=4):
+            session.add(
+                RunEvent(
+                    query_run_id=run_id,
+                    seq=seq,
+                    timestamp=datetime(2026, 7, 18, 9, seq - 4, tzinfo=UTC),
+                    node=row["node"],
+                    event=row["event"],
+                    status=row["status"],
+                    message=row["message"],
+                    details=row["details"],
+                )
+            )
+        await session.commit()
+
+    with pytest.raises(RuntimeError, match="sequence 5"):
+        await _reconcile_event_cursor(
+            run_id,
+            local,
+            session_factory,
+            event_seq_offset=4,
+        )
 
 
 async def test_retry_checkpoint_error_cancellation_repairs_after_delayed_status_write(

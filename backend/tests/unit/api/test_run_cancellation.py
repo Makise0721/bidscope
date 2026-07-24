@@ -228,6 +228,7 @@ async def test_retry_passes_retry_resume_action_and_confirm_keeps_approve(
     service = object.__new__(RunService)
     service.fail_next_node = None
     service._claim_run_safely = AsyncMock()
+    service._start_run = AsyncMock()
     service._update_status = AsyncMock()
     service.session_factory = object()
     service.get_run = AsyncMock(

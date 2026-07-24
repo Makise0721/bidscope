@@ -111,6 +111,145 @@ async def test_create_run_concurrent_same_key_returns_one_row(session_factory: A
 
 
 @pytest.mark.asyncio
+async def test_scheduled_run_transitions_to_running_before_graph_work(
+    session_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scheduled run is active before its graph reaches the first await."""
+    from bidscope.api import dependencies
+
+    graph_started = asyncio.Event()
+    release_graph = asyncio.Event()
+
+    async def blocked_execute(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        graph_started.set()
+        await release_graph.wait()
+        return {"status": "completed"}
+
+    monkeypatch.setattr(dependencies, "execute", blocked_execute)
+    service = RunService(
+        session_factory=session_factory,
+        graph=object(),
+        object_store=object(),
+        settings=get_settings(),
+    )
+    run_id, created = await service.create_run("scheduled request", run_key="scheduled-running")
+    assert created is True
+    task = service.schedule_run(run_id, {"user_request": "scheduled request"})
+    await asyncio.wait_for(graph_started.wait(), timeout=1)
+
+    async with session_factory() as session:
+        run = await session.get(QueryRun, run_id)
+    assert run is not None
+    assert run.status == "running"
+
+    stale_before = datetime.now(UTC) - timedelta(seconds=1)
+    assert await mark_stale_runs_retryable(
+        session_factory=session_factory,
+        stale_before=stale_before,
+    ) == 0
+    release_graph.set()
+    assert await task == {"status": "completed"}
+
+
+@pytest.mark.asyncio
+async def test_injected_failure_persists_the_returned_bounded_error(
+    session_factory: Any,
+) -> None:
+    """The test-control failure response and QueryRun.error share one payload."""
+    service = RunService(
+        session_factory=session_factory,
+        graph=object(),
+        object_store=object(),
+        settings=get_settings(),
+    )
+    service.fail_next_node = "parse_intent"
+    run_id, created = await service.create_run("injected request", run_key="injected-error")
+    assert created is True
+
+    result = await service.execute_run(run_id, {"user_request": "injected request"})
+
+    assert result == {
+        "status": "retryable",
+        "errors": [
+            {
+                "code": "graph_node_error",
+                "message": "Test-only injected failure for node 'parse_intent'",
+                "details": {"node": "parse_intent"},
+            }
+        ],
+    }
+    async with session_factory() as session:
+        run = await session.get(QueryRun, run_id)
+    assert run is not None
+    assert run.error == result["errors"][0]
+
+
+@pytest.mark.asyncio
+async def test_retry_claim_status_write_failure_repairs_running_row(
+    session_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed retry-context status write still repairs the claimed row."""
+    run_id = str(uuid.uuid4())
+    async with session_factory() as session:
+        session.add(
+            QueryRun(
+                id=run_id,
+                run_key="retry-context-status-failure",
+                status="retryable",
+                user_request="retry request",
+            )
+        )
+        await session.commit()
+
+    class FailingStateGraph:
+        async def aget_state(self, config: Any) -> None:
+            del config
+            raise RuntimeError("checkpoint unavailable")
+
+    service = RunService(
+        session_factory=session_factory,
+        graph=FailingStateGraph(),
+        object_store=object(),
+        settings=get_settings(),
+    )
+    original_update_status = service._update_status
+    status_started = asyncio.Event()
+    release_status = asyncio.Event()
+    calls = 0
+
+    async def failing_first_status(*args: Any, **kwargs: Any) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            status_started.set()
+            await release_status.wait()
+            raise RuntimeError("status write failed")
+        await original_update_status(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_update_status", failing_first_status)
+    task = asyncio.create_task(service.retry(run_id))
+    await asyncio.wait_for(status_started.wait(), timeout=1)
+    task.cancel()
+    release_status.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    async with session_factory() as session:
+        run = await session.get(QueryRun, run_id)
+    assert run is not None
+    assert run.status == "retryable"
+    assert run.error == {
+        "code": "graph_node_error",
+        "message": "retry checkpoint lookup cancelled",
+        "details": {},
+    }
+    assert calls == 2
+
+
+@pytest.mark.asyncio
 async def test_retry_claims_run_before_concurrent_execution(
     session_factory: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -213,6 +352,16 @@ async def test_retry_reexecutes_fresh_input_for_terminal_checkpoint_and_preserve
         def __init__(self) -> None:
             self.inputs: list[Any] = []
             self.configs: list[Any] = []
+            self.fresh = False
+            self.checkpointer = self._Checkpointer(self)
+
+        class _Checkpointer:
+            def __init__(self, graph: TerminalCheckpointGraph) -> None:
+                self.graph = graph
+
+            async def adelete_thread(self, thread_id: str) -> None:
+                assert thread_id == "same-thread"
+                self.graph.fresh = True
 
         async def aget_state(self, config: Any) -> Any:
             self.configs.append(config)
@@ -225,7 +374,10 @@ async def test_retry_reexecutes_fresh_input_for_terminal_checkpoint_and_preserve
             assert stream_mode == "values"
             self.inputs.append(input_data)
             self.configs.append(config)
-            yield {"status": "completed", "node_events": [old_event, new_event]}
+            if self.fresh:
+                yield {"status": "completed", "node_events": [new_event]}
+            else:
+                yield {"status": "completed", "node_events": [old_event, new_event]}
 
     graph = TerminalCheckpointGraph()
     service = RunService(

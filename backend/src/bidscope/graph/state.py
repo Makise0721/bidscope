@@ -7,9 +7,9 @@ inspected and resumed without ever copying untrusted source text into state.
 
 List fields use an ``operator.add`` reducer so each node can emit a partial
 update (e.g. one node event, one batch of candidate IDs) and LangGraph merges
-it into the accumulated value. The schema is frozen at task 10: later tasks
-populate the fields they own (``verified_opportunities``, ``report``, …) but do
-not add new ones, so this file is not modified after this task.
+it into the accumulated value. The schema is additive: later tasks populate
+fields they own, and durable checkpoint metadata such as ``event_seq_offset``
+may be added without a DB migration.
 """
 
 from __future__ import annotations
@@ -97,6 +97,9 @@ class RunState(BaseModel):
     errors: Annotated[list[SerializableError], operator.add] = Field(default_factory=list)
     retry_count: int = 0
     degraded_modes: Annotated[list[str], operator.add] = Field(default_factory=list)
+    #: Relational ``RunEvent.seq`` base for this checkpoint attempt. ``None``
+    #: preserves compatibility with checkpoints written before Task 3.
+    event_seq_offset: int | None = None
 
 
 __all__ = ["DuplicateGroup", "RetrievalPlan", "RunState"]

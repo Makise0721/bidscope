@@ -93,6 +93,37 @@ async def setup_checkpoints(settings: Settings) -> None:
         await checkpointer.setup()
 
 
+class EventReconciliationError(RuntimeError):
+    """A checkpoint cannot be safely aligned with its relational event attempt."""
+
+
+async def _event_rows(
+    run_id: str,
+    session_factory: Any,
+    *,
+    seq_start: int | None = None,
+    seq_end: int | None = None,
+) -> list[RunEvent]:
+    """Load ordered event rows, optionally bounded to an attempt sequence range."""
+    statement = sa.select(RunEvent).where(RunEvent.query_run_id == str(run_id))
+    if seq_start is not None:
+        statement = statement.where(RunEvent.seq >= seq_start)
+    if seq_end is not None:
+        statement = statement.where(RunEvent.seq <= seq_end)
+    statement = statement.order_by(RunEvent.seq)
+    async with session_factory() as session:
+        return list((await session.scalars(statement)).all())
+
+
+async def _max_event_seq(run_id: str, session_factory: Any) -> int | None:
+    """Return the highest relational event sequence for gap detection."""
+    async with session_factory() as session:
+        maximum = await session.scalar(
+            sa.select(sa.func.max(RunEvent.seq)).where(RunEvent.query_run_id == str(run_id))
+        )
+    return int(maximum) if maximum is not None else None
+
+
 def _event_fingerprint(event: Any) -> tuple[Any, ...]:
     """Return timestamp-independent identity for a streamed or stored event."""
     if isinstance(event, dict):
@@ -116,34 +147,86 @@ async def _reconcile_event_cursor(
     run_id: str,
     checkpoint_events: list[dict[str, Any]],
     session_factory: Any,
+    *,
+    event_seq_offset: int | None = None,
 ) -> tuple[int, int]:
-    """Find checkpoint events in ordered relational history and return its cursor."""
-    async with session_factory() as session:
-        rows = list(
-            (
-                await session.scalars(
-                    sa.select(RunEvent)
-                    .where(RunEvent.query_run_id == str(run_id))
-                    .order_by(RunEvent.seq)
-                )
-            ).all()
-        )
+    """Align local events to exact relational sequences without history guessing.
 
-    if not rows or not checkpoint_events:
-        next_seq = rows[-1].seq + 1 if rows else 0
-        return 0, next_seq
+    New checkpoints carry an attempt base. Legacy checkpoints without one are
+    accepted only when their local events are an exact prefix of sequences
+    ``0..N-1``; any other shape raises rather than selecting a suffix from a
+    different attempt.
+    """
+    if event_seq_offset is None:
+        if not checkpoint_events:
+            if await _max_event_seq(run_id, session_factory) is not None:
+                raise EventReconciliationError(
+                    "legacy checkpoint has no events but relational history is non-empty"
+                )
+            return 0, 0
+        local = [_event_fingerprint(event) for event in checkpoint_events]
+        rows = await _event_rows(
+            run_id,
+            session_factory,
+            seq_start=0,
+            seq_end=len(local) - 1,
+        )
+        by_seq = {row.seq: row for row in rows}
+        for index, fingerprint in enumerate(local):
+            row = by_seq.get(index)
+            if row is None:
+                raise EventReconciliationError(
+                    f"legacy checkpoint is missing relational sequence {index}"
+                )
+            if _event_fingerprint(row) != fingerprint:
+                raise EventReconciliationError(
+                    f"legacy checkpoint conflicts at relational sequence {index}"
+                )
+        return len(local), 0
+
+    if event_seq_offset < 0:
+        raise EventReconciliationError("event sequence offset must be non-negative")
 
     local = [_event_fingerprint(event) for event in checkpoint_events]
-    history = [_event_fingerprint(row) for row in rows]
-    length = len(local)
-    if history[:length] == local:
-        return length, rows[0].seq
+    rows = await _event_rows(
+        run_id,
+        session_factory,
+        seq_start=event_seq_offset,
+        seq_end=event_seq_offset + len(local),
+    )
+    by_seq = {row.seq: row for row in rows}
+    matched = 0
+    for index, fingerprint in enumerate(local):
+        expected_seq = event_seq_offset + index
+        row = by_seq.get(expected_seq)
+        if row is None:
+            later = [seq for seq in by_seq if seq > expected_seq]
+            if later:
+                raise EventReconciliationError(
+                    f"relational event history skips expected sequence {expected_seq}"
+                )
+            break
+        if _event_fingerprint(row) != fingerprint:
+            raise EventReconciliationError(
+                f"checkpoint event conflicts at relational sequence {expected_seq}"
+            )
+        matched += 1
 
-    for start in range(len(history) - length, -1, -1):
-        if history[start : start + length] == local:
-            return length, rows[start].seq
+    expected_next = event_seq_offset + matched
+    if not local and by_seq.get(expected_next) is not None:
+        raise EventReconciliationError(
+            f"checkpoint has no event to validate relational sequence {expected_next}"
+        )
+    return matched, event_seq_offset
 
-    return 0, rows[-1].seq + 1
+
+async def _next_event_seq(run_id: str, session_factory: Any) -> int:
+    """Return the next relational sequence for a fresh checkpoint attempt."""
+    async with session_factory() as session:
+        maximum = await session.scalar(
+            sa.select(sa.func.max(RunEvent.seq)).where(RunEvent.query_run_id == str(run_id))
+        )
+    return int(maximum) + 1 if maximum is not None else 0
 
 
 async def execute(
@@ -177,18 +260,28 @@ async def execute(
     if not force_fresh and existing and existing.values and not existing.next:
         return dict(existing.values)
 
-    reset = (
+    fresh_offset: int | None = None
+    if force_fresh:
+        fresh_offset = await _next_event_seq(run_id, session_factory)
         await _reset_checkpoint_state(graph, config)
+
+    checkpoint_values = (existing.values or {}) if existing else {}
+    checkpoint_events = [] if force_fresh else list(checkpoint_values.get("node_events", []))
+    event_seq_offset = (
+        fresh_offset
         if force_fresh
-        else False
+        else checkpoint_values.get("event_seq_offset")
     )
-    checkpoint_events = [] if reset else list(
-        (existing.values or {}).get("node_events", []) if existing else []
-    )
+    if event_seq_offset is None and not checkpoint_values:
+        event_seq_offset = 0
+    if isinstance(input, dict):
+        input = {**input, "event_seq_offset": event_seq_offset}
+
     persisted, persisted_seq_offset = await _reconcile_event_cursor(
         run_id,
         checkpoint_events,
         session_factory,
+        event_seq_offset=event_seq_offset,
     )
 
     async for state in graph.astream(input, config, stream_mode="values"):
@@ -229,7 +322,7 @@ async def _append_events(
     *,
     seq_offset: int = 0,
 ) -> None:
-    """Persist ``events[start:]`` with contiguous ``seq`` numbers."""
+    """Persist ``events[start:]`` and heartbeat the owning query run."""
     if start >= len(events):
         return
     async with session_factory() as session:
@@ -247,6 +340,11 @@ async def _append_events(
                     details=event.get("details", {}),
                 )
             )
+        await session.execute(
+            sa.update(QueryRun)
+            .where(QueryRun.id == str(run_id))
+            .values(updated_at=datetime.now(UTC))
+        )
         await session.commit()
 
 

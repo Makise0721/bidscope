@@ -13,7 +13,7 @@ from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, is_dataclass
-from typing import Any
+from typing import Any, cast
 
 import sqlalchemy as sa
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -152,6 +152,12 @@ class RunQueryResult:
     @classmethod
     def from_row(cls, row: QueryRun) -> RunQueryResult:
         return cls(id=row.id, status=row.status, user_request=row.user_request)
+
+
+class _ClaimRepairedCancellation(asyncio.CancelledError):
+    """Cancellation that already restored a claimed run's retry eligibility."""
+
+    claim_repaired = True
 
 
 class RunService:
@@ -355,20 +361,18 @@ class RunService:
         *,
         force_fresh: bool = False,
     ) -> dict[str, Any]:  # noqa: ANN401
+        await self._start_run(run_id)
         fail_node = self.fail_next_node
         if fail_node is not None:
             self.fail_next_node = None
-            await self._update_status(run_id, "retryable")
-            return {
-                "status": "retryable",
-                "fail_next_node": fail_node,
-                "errors": [
-                    {
-                        "code": "INJECTED_NODE_FAILURE",
-                        "message": (f"Test-only injected failure for node {fail_node!r}"),
-                    }
-                ],
-            }
+            error = SerializableError(
+                code=BidScopeErrorCode.GRAPH_NODE_ERROR,
+                message=f"Test-only injected failure for node {fail_node!r}",
+                details={"node": fail_node},
+            ).model_dump(mode="json")
+            result = {"status": "retryable", "errors": [error]}
+            await self._update_status(run_id, "retryable", error=error)
+            return result
 
         run = await self.get_run(run_id)
         checkpoint_thread_id = run.checkpoint_thread_id if run is not None else run_id
@@ -392,8 +396,18 @@ class RunService:
 
         status = result.get("status")
         if status:
-            await self._update_status(run_id, status, result=result)
+            await self._update_status(run_id, cast(str, status), result=result)
         return result
+
+    async def _start_run(self, run_id: str) -> None:
+        """Atomically activate a newly scheduled pending run."""
+        async with self.session_factory() as session:
+            await session.execute(
+                sa.update(QueryRun)
+                .where(QueryRun.id == run_id, QueryRun.status == "pending")
+                .values(status="running", updated_at=self.clock.now())
+            )
+            await session.commit()
 
     async def get_run(self, run_id: str) -> QueryRun | None:
         async with self.session_factory() as session:
@@ -424,6 +438,8 @@ class RunService:
         try:
             context = await self._retry_context(run_id)
         except asyncio.CancelledError as cancellation_error:
+            if getattr(cancellation_error, "claim_repaired", False):
+                raise
             repair = asyncio.create_task(
                 self._repair_cancelled_claim(run_id, "retry checkpoint lookup cancelled")
             )
@@ -478,10 +494,31 @@ class RunService:
                 await asyncio.shield(status_update)
             except asyncio.CancelledError as cancellation_error:
                 try:
-                    await _drain_task_preserving_cancellation(status_update)
+                    applied = await _drain_task_preserving_cancellation(status_update)
                 except BaseException as status_error:
-                    raise cancellation_error from status_error
-                raise
+                    repair = asyncio.create_task(
+                        self._repair_cancelled_claim(
+                            run_id,
+                            "retry checkpoint lookup cancelled",
+                        )
+                    )
+                    try:
+                        await _drain_task_preserving_cancellation(repair)
+                    except BaseException as repair_error:
+                        raise cancellation_error from repair_error
+                    raise _ClaimRepairedCancellation(str(cancellation_error)) from status_error
+                if not applied:
+                    repair = asyncio.create_task(
+                        self._repair_cancelled_claim(
+                            run_id,
+                            "retry checkpoint lookup cancelled",
+                        )
+                    )
+                    try:
+                        await _drain_task_preserving_cancellation(repair)
+                    except BaseException as repair_error:
+                        raise cancellation_error from repair_error
+                raise _ClaimRepairedCancellation(str(cancellation_error)) from None
             return {"status": "retryable", "errors": [serializable_error]}
         return run, state
 
@@ -564,7 +601,7 @@ class RunService:
         error: dict[str, Any] | None = None,
         result: dict[str, Any] | None = None,
         expected_status: str | None = None,
-    ) -> None:
+    ) -> bool:
         async with self.session_factory() as session:
             if expected_status is not None:
                 values: dict[str, Any] = {
@@ -575,7 +612,7 @@ class RunService:
                     values["error"] = error
                 if str(status) == "completed":
                     values["completed_at"] = self.clock.now()
-                await session.execute(
+                update_result = await session.execute(
                     sa.update(QueryRun)
                     .where(
                         QueryRun.id == run_id,
@@ -584,7 +621,7 @@ class RunService:
                     .values(**values)
                 )
                 await session.commit()
-                return
+                return bool(getattr(update_result, "rowcount", 0))
 
             run = await session.get(QueryRun, run_id)
             if run is not None:
@@ -607,6 +644,8 @@ class RunService:
                 if str(status) == "completed":
                     run.completed_at = self.clock.now()
                 await session.commit()
+                return True
+            return False
 
 
 def _json_safe(value: Any) -> Any:
