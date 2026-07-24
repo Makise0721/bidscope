@@ -212,6 +212,8 @@ async def test_shutdown_cancels_and_drains_scheduled_runs_before_disposal(
 
     started = asyncio.Event()
     never_finishes = asyncio.Event()
+    status_update_started = asyncio.Event()
+    release_status_update = asyncio.Event()
 
     async def blocking_execute(*args: Any, **kwargs: Any) -> dict[str, Any]:
         del args, kwargs
@@ -226,12 +228,24 @@ async def test_shutdown_cancels_and_drains_scheduled_runs_before_disposal(
         object_store=object(),
         settings=get_settings(),
     )
+    update_status = service._update_status
+
+    async def delayed_update_status(*args: Any, **kwargs: Any) -> None:
+        status_update_started.set()
+        await release_status_update.wait()
+        await update_status(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_update_status", delayed_update_status)
     run_id, created = await service.create_run("shutdown request", run_key="shutdown")
     assert created is True
 
     task = service.schedule_run(run_id, {"user_request": "shutdown request"})
     await asyncio.wait_for(started.wait(), timeout=1)
-    await asyncio.wait_for(service.shutdown(), timeout=1)
+    shutdown_task = asyncio.create_task(service.shutdown())
+    await asyncio.wait_for(status_update_started.wait(), timeout=1)
+    task.cancel()
+    release_status_update.set()
+    await asyncio.wait_for(shutdown_task, timeout=1)
 
     assert task.cancelled()
     assert not service._run_tasks
@@ -282,6 +296,74 @@ async def test_retry_checkpoint_state_failure_leaves_run_eligible_for_retry(
     second = await service.retry(run_id)
 
     assert first["status"] == "retryable"
+    assert second["status"] == "retryable"
+    assert graph.calls == 2
+    async with session_factory() as session:
+        run = await session.get(QueryRun, run_id)
+    assert run is not None
+    assert run.status == "retryable"
+    assert run.error == {
+        "code": "graph_node_error",
+        "message": "checkpoint unavailable",
+        "details": {},
+    }
+
+
+@pytest.mark.asyncio
+async def test_cancelled_retry_checkpoint_lookup_repairs_run_for_next_retry(
+    session_factory: Any,
+) -> None:
+    """Cancellation during checkpoint lookup restores retryable eligibility."""
+    class CancelledStateGraph:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.never_finishes = asyncio.Event()
+            self.calls = 0
+
+        async def aget_state(self, config: Any) -> None:
+            del config
+            self.calls += 1
+            if self.calls == 1:
+                self.started.set()
+                await self.never_finishes.wait()
+            raise RuntimeError("checkpoint unavailable")
+
+    run_id = str(uuid.uuid4())
+    async with session_factory() as session:
+        session.add(QueryRun(
+            id=run_id,
+            run_key="cancelled-retry-state",
+            status="retryable",
+            user_request="retry request",
+        ))
+        await session.commit()
+
+    graph = CancelledStateGraph()
+    service = RunService(
+        session_factory=session_factory,
+        graph=graph,
+        object_store=object(),
+        settings=get_settings(),
+    )
+
+    retry_task = asyncio.create_task(service.retry(run_id))
+    await asyncio.wait_for(graph.started.wait(), timeout=1)
+    retry_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await retry_task
+
+    async with session_factory() as session:
+        cancelled_run = await session.get(QueryRun, run_id)
+    assert cancelled_run is not None
+    assert cancelled_run.status == "retryable"
+    assert cancelled_run.error == {
+        "code": "graph_node_error",
+        "message": "retry checkpoint lookup cancelled",
+        "details": {},
+    }
+
+    second = await service.retry(run_id)
+
     assert second["status"] == "retryable"
     assert graph.calls == 2
     async with session_factory() as session:

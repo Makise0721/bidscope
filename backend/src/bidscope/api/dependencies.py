@@ -198,14 +198,73 @@ class RunService:
     async def _persist_cancellation(
         self, run_id: str, error: dict[str, Any]
     ) -> None:
-        """Best-effort cancellation persistence while shared resources remain open."""
+        """Persist a retryable cancellation without losing the caller's cancel."""
         task = asyncio.create_task(self._update_status(run_id, "retryable", error=error))
+        current = asyncio.current_task()
+        cancellation_count = current.cancelling() if current is not None else 0
+        if current is not None:
+            for _ in range(cancellation_count):
+                current.uncancel()
+
+        deadline = asyncio.get_running_loop().time() + 5
+        status_error: BaseException | None = None
+        timed_out = False
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=5)
-        except BaseException:
-            if not task.done():
+            while not task.done():
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+                except asyncio.CancelledError:
+                    if current is not None:
+                        new_cancellations = current.cancelling()
+                        cancellation_count += new_cancellations
+                        for _ in range(new_cancellations):
+                            current.uncancel()
+                    continue
+                except TimeoutError:
+                    timed_out = True
+                    break
+                except Exception as error:
+                    status_error = error
+                    break
+
+            if timed_out and not task.done():
                 task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    if current is not None:
+                        new_cancellations = current.cancelling()
+                        cancellation_count += new_cancellations
+                        for _ in range(new_cancellations):
+                            current.uncancel()
+
+            while True:
+                try:
+                    child_result = await asyncio.gather(task, return_exceptions=True)
+                except asyncio.CancelledError:
+                    if current is not None:
+                        new_cancellations = current.cancelling()
+                        cancellation_count += new_cancellations
+                        for _ in range(new_cancellations):
+                            current.uncancel()
+                    continue
+                break
+            child_error = child_result[0]
+            if isinstance(child_error, Exception) and status_error is None:
+                status_error = child_error
+        finally:
+            if current is not None:
+                for _ in range(cancellation_count):
+                    current.cancel()
+
+        if status_error is not None:
+            raise asyncio.CancelledError() from status_error
 
     async def _execute_run(self, run_id: str, input: Any) -> dict[str, Any]:  # noqa: ANN401
         fail_node = self.fail_next_node
@@ -274,6 +333,12 @@ class RunService:
                 else None
             )
         except asyncio.CancelledError:
+            serializable_error = SerializableError(
+                code=BidScopeErrorCode.GRAPH_NODE_ERROR,
+                message="retry checkpoint lookup cancelled",
+                details={},
+            ).model_dump(mode="json")
+            await self._persist_cancellation(run_id, serializable_error)
             raise
         except Exception as error:  # noqa: BLE001 - checkpoint recovery boundary
             serializable_error = SerializableError(
