@@ -261,6 +261,125 @@ async def test_shutdown_cancels_and_drains_scheduled_runs_before_disposal(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_retry_after_claim_repairs_run_for_next_retry(
+    session_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation after the claim commits restores retryable eligibility."""
+    run_id = str(uuid.uuid4())
+    async with session_factory() as session:
+        session.add(QueryRun(
+            id=run_id,
+            run_key="cancelled-retry-claim",
+            status="retryable",
+            user_request="retry request",
+        ))
+        await session.commit()
+
+    class FailingStateGraph:
+        async def aget_state(self, config: Any) -> None:
+            del config
+            raise RuntimeError("checkpoint unavailable")
+
+    service = RunService(
+        session_factory=session_factory,
+        graph=FailingStateGraph(),
+        object_store=object(),
+        settings=get_settings(),
+    )
+    original_claim = service._claim_run
+    claim_committed = asyncio.Event()
+    release_claim = asyncio.Event()
+
+    async def delayed_claim(
+        claimed_run_id: str, eligible_status: str, status_name: str,
+    ) -> bool:
+        claimed = await original_claim(claimed_run_id, eligible_status, status_name)
+        claim_committed.set()
+        await release_claim.wait()
+        return claimed
+
+    monkeypatch.setattr(service, "_claim_run", delayed_claim)
+    retry_task = asyncio.create_task(service.retry(run_id))
+    await asyncio.wait_for(claim_committed.wait(), timeout=1)
+    retry_task.cancel()
+    release_claim.set()
+    with pytest.raises(asyncio.CancelledError):
+        await retry_task
+
+    async with session_factory() as session:
+        cancelled_run = await session.get(QueryRun, run_id)
+    assert cancelled_run is not None
+    assert cancelled_run.status == "retryable"
+    assert cancelled_run.error == {
+        "code": "graph_node_error",
+        "message": "retry claim cancelled",
+        "details": {},
+    }
+
+    second = await service.retry(run_id)
+    assert second["status"] == "retryable"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_retry_get_run_repairs_run_for_next_retry(
+    session_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation during the post-claim row lookup restores eligibility."""
+    run_id = str(uuid.uuid4())
+    async with session_factory() as session:
+        session.add(QueryRun(
+            id=run_id,
+            run_key="cancelled-retry-get-run",
+            status="retryable",
+            user_request="retry request",
+        ))
+        await session.commit()
+
+    class FailingStateGraph:
+        async def aget_state(self, config: Any) -> None:
+            del config
+            raise RuntimeError("checkpoint unavailable")
+
+    service = RunService(
+        session_factory=session_factory,
+        graph=FailingStateGraph(),
+        object_store=object(),
+        settings=get_settings(),
+    )
+    original_get_run = service.get_run
+    get_run_started = asyncio.Event()
+    release_get_run = asyncio.Event()
+
+    async def delayed_get_run(looked_up_run_id: str) -> Any:
+        get_run_started.set()
+        await release_get_run.wait()
+        return await original_get_run(looked_up_run_id)
+
+    monkeypatch.setattr(service, "get_run", delayed_get_run)
+    retry_task = asyncio.create_task(service.retry(run_id))
+    await asyncio.wait_for(get_run_started.wait(), timeout=1)
+    retry_task.cancel()
+    release_get_run.set()
+    with pytest.raises(asyncio.CancelledError):
+        await retry_task
+
+    async with session_factory() as session:
+        cancelled_run = await session.get(QueryRun, run_id)
+    assert cancelled_run is not None
+    assert cancelled_run.status == "retryable"
+    assert cancelled_run.error == {
+        "code": "graph_node_error",
+        "message": "retry checkpoint lookup cancelled",
+        "details": {},
+    }
+
+    second = await service.retry(run_id)
+    assert second["status"] == "retryable"
+
+
+@pytest.mark.asyncio
 async def test_retry_checkpoint_state_failure_leaves_run_eligible_for_retry(
     session_factory: Any,
 ) -> None:

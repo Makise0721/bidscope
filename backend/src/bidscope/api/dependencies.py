@@ -83,6 +83,33 @@ def _to_sync_dsn(async_url: str) -> str:
     return async_url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
 
 
+async def _drain_task_preserving_cancellation[T](task: asyncio.Future[T]) -> T:
+    """Drain ``task`` while remembering every cancellation of the caller."""
+    current = asyncio.current_task()
+    cancellation_count = current.cancelling() if current is not None else 0
+    if current is not None:
+        for _ in range(cancellation_count):
+            current.uncancel()
+
+    try:
+        while True:
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if task.done():
+                    return task.result()
+                if current is None:
+                    raise
+                new_cancellations = current.cancelling()
+                cancellation_count += new_cancellations
+                for _ in range(new_cancellations):
+                    current.uncancel()
+    finally:
+        if current is not None:
+            for _ in range(cancellation_count):
+                current.cancel()
+
+
 def build_demo_graph(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
@@ -196,10 +223,21 @@ class RunService:
             raise
 
     async def _persist_cancellation(
-        self, run_id: str, error: dict[str, Any]
+        self,
+        run_id: str,
+        error: dict[str, Any],
+        *,
+        expected_status: str | None = None,
     ) -> None:
         """Persist a retryable cancellation without losing the caller's cancel."""
-        task = asyncio.create_task(self._update_status(run_id, "retryable", error=error))
+        task = asyncio.create_task(
+            self._update_status(
+                run_id,
+                "retryable",
+                error=error,
+                expected_status=expected_status,
+            )
+        )
         current = asyncio.current_task()
         cancellation_count = current.cancelling() if current is not None else 0
         if current is not None:
@@ -227,7 +265,7 @@ class RunService:
                 except TimeoutError:
                     timed_out = True
                     break
-                except Exception as error:
+                except BaseException as error:
                     status_error = error
                     break
 
@@ -256,7 +294,11 @@ class RunService:
                     continue
                 break
             child_error = child_result[0]
-            if isinstance(child_error, Exception) and status_error is None:
+            if (
+                isinstance(child_error, BaseException)
+                and not isinstance(child_error, asyncio.CancelledError)
+                and status_error is None
+            ):
                 status_error = child_error
         finally:
             if current is not None:
@@ -314,31 +356,36 @@ class RunService:
 
     async def confirm(self, run_id: str) -> dict[str, Any]:
         """Resume an awaiting-confirmation run. Raises if not confirmable."""
-        await self._claim_run(run_id, "awaiting_confirmation", "awaiting confirmation")
+        await self._claim_run_safely(
+            run_id,
+            "awaiting_confirmation",
+            "awaiting confirmation",
+            "confirmation claim cancelled",
+        )
         return await self.execute_run(run_id, Command(resume={"action": "approve"}))
 
     async def retry(self, run_id: str) -> dict[str, Any]:
         """Resume a retryable checkpoint or restart the original request."""
-        await self._claim_run(run_id, "retryable", "retryable")
-        run = await self.get_run(run_id)
-        if run is None:
-            raise _RunError(404, "run not found")
-
-        thread_id = run.checkpoint_thread_id or str(run.id)
-        get_state = getattr(self.graph, "aget_state", None)
+        await self._claim_run_safely(
+            run_id,
+            "retryable",
+            "retryable",
+            "retry claim cancelled",
+        )
         try:
+            run = await self.get_run(run_id)
+            if run is None:
+                raise _RunError(404, "run not found")
+
+            thread_id = run.checkpoint_thread_id or str(run.id)
+            get_state = getattr(self.graph, "aget_state", None)
             state = (
                 await get_state({"configurable": {"thread_id": thread_id}})
                 if get_state
                 else None
             )
         except asyncio.CancelledError:
-            serializable_error = SerializableError(
-                code=BidScopeErrorCode.GRAPH_NODE_ERROR,
-                message="retry checkpoint lookup cancelled",
-                details={},
-            ).model_dump(mode="json")
-            await self._persist_cancellation(run_id, serializable_error)
+            await self._repair_cancelled_claim(run_id, "retry checkpoint lookup cancelled")
             raise
         except Exception as error:  # noqa: BLE001 - checkpoint recovery boundary
             serializable_error = SerializableError(
@@ -352,7 +399,42 @@ class RunService:
             return await self.execute_run(run_id, Command(resume={"action": "approve"}))
         return await self.execute_run(run_id, {"user_request": run.user_request})
 
-    async def _claim_run(self, run_id: str, eligible_status: str, status_name: str) -> None:
+    async def _claim_run_safely(
+        self,
+        run_id: str,
+        eligible_status: str,
+        status_name: str,
+        cancellation_message: str,
+    ) -> None:
+        """Claim a run without leaving a committed claim stranded on cancellation."""
+        claim = asyncio.create_task(
+            self._claim_run(run_id, eligible_status, status_name),
+        )
+        try:
+            await asyncio.shield(claim)
+        except asyncio.CancelledError as cancellation_error:
+            try:
+                claimed = await _drain_task_preserving_cancellation(claim)
+            except BaseException as claim_error:
+                raise cancellation_error from claim_error
+            if claimed:
+                await self._repair_cancelled_claim(run_id, cancellation_message)
+            raise
+
+    async def _repair_cancelled_claim(self, run_id: str, message: str) -> None:
+        """Restore only the run still owned by this claim to retryable."""
+        serializable_error = SerializableError(
+            code=BidScopeErrorCode.GRAPH_NODE_ERROR,
+            message=message[:1000],
+            details={},
+        ).model_dump(mode="json")
+        await self._persist_cancellation(
+            run_id,
+            serializable_error,
+            expected_status="running",
+        )
+
+    async def _claim_run(self, run_id: str, eligible_status: str, status_name: str) -> bool:
         """Atomically move an eligible run to ``running`` or raise a lifecycle error."""
         async with self.session_factory() as session:
             result = await session.execute(
@@ -365,7 +447,7 @@ class RunService:
             await session.commit()
 
         if claimed_id is not None:
-            return
+            return True
 
         run = await self.get_run(run_id)
         if run is None:
@@ -389,8 +471,29 @@ class RunService:
         *,
         error: dict[str, Any] | None = None,
         result: dict[str, Any] | None = None,
+        expected_status: str | None = None,
     ) -> None:
         async with self.session_factory() as session:
+            if expected_status is not None:
+                values: dict[str, Any] = {
+                    "status": str(status),
+                    "updated_at": self.clock.now(),
+                }
+                if error is not None:
+                    values["error"] = error
+                if str(status) == "completed":
+                    values["completed_at"] = self.clock.now()
+                await session.execute(
+                    sa.update(QueryRun)
+                    .where(
+                        QueryRun.id == run_id,
+                        QueryRun.status == expected_status,
+                    )
+                    .values(**values)
+                )
+                await session.commit()
+                return
+
             run = await session.get(QueryRun, run_id)
             if run is not None:
                 run.status = str(status)
