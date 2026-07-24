@@ -210,19 +210,21 @@ async def _reconcile_event_cursor(
         run_id,
         session_factory,
         seq_start=event_seq_offset,
-        seq_end=event_seq_offset + len(local),
     )
     by_seq = {row.seq: row for row in rows}
+    if by_seq:
+        expected_sequences = list(range(event_seq_offset, max(by_seq) + 1))
+        missing = next((seq for seq in expected_sequences if seq not in by_seq), None)
+        if missing is not None:
+            raise EventReconciliationError(
+                f"relational event history skips expected sequence {missing}"
+            )
+
     matched = 0
     for index, fingerprint in enumerate(local):
         expected_seq = event_seq_offset + index
         row = by_seq.get(expected_seq)
         if row is None:
-            later = [seq for seq in by_seq if seq > expected_seq]
-            if later:
-                raise EventReconciliationError(
-                    f"relational event history skips expected sequence {expected_seq}"
-                )
             break
         if _event_fingerprint(row) != fingerprint:
             raise EventReconciliationError(
@@ -230,14 +232,9 @@ async def _reconcile_event_cursor(
             )
         matched += 1
 
-    expected_next = event_seq_offset + matched
-    if by_seq.get(expected_next) is not None:
-        if matched < len(local):
-            raise EventReconciliationError(
-                f"checkpoint has no event to validate relational sequence {expected_next}"
-            )
+    if max(by_seq, default=event_seq_offset - 1) >= event_seq_offset + len(local):
         raise EventReconciliationError(
-            f"relational event history has trailing sequence {expected_next}"
+            f"relational event history has trailing sequence {event_seq_offset + len(local)}"
         )
     return matched, event_seq_offset
 
@@ -273,6 +270,7 @@ async def execute(
     checkpoint_thread_id: str | None = None,
     force_fresh: bool = False,
     ensure_active: Callable[[Any | None], Awaitable[None]] | None = None,
+    execution_token: str | None = None,
 ) -> dict[str, Any]:
     """Drive ``graph`` from ``input`` and persist each new node event.
 
@@ -335,6 +333,7 @@ async def execute(
                 session_factory,
                 seq_offset=persisted_seq_offset,
                 ensure_active=ensure_active,
+                execution_token=execution_token,
             )
             persisted = new_count
 
@@ -363,11 +362,25 @@ async def _append_events(
     *,
     seq_offset: int = 0,
     ensure_active: Callable[[Any | None], Awaitable[None]] | None = None,
+    execution_token: str | None = None,
 ) -> None:
     """Persist ``events[start:]`` and heartbeat the owning query run."""
     if start >= len(events):
         return
     async with session_factory() as session:
+        if execution_token is not None:
+            ownership = await session.execute(
+                sa.update(QueryRun)
+                .where(
+                    QueryRun.id == str(run_id),
+                    QueryRun.status == "running",
+                    QueryRun.execution_token == execution_token,
+                )
+                .values(updated_at=datetime.now(UTC))
+            )
+            if not bool(getattr(ownership, "rowcount", 0)):
+                await session.rollback()
+                raise RunOwnershipLostError(f"run ownership lost: {run_id}")
         await _ensure_active(ensure_active, session)
         for index in range(start, len(events)):
             event = events[index]
@@ -446,9 +459,11 @@ async def mark_stale_runs_retryable(
         if stale_before is not None:
             statement = statement.where(QueryRun.updated_at < stale_before)
         result = await session.execute(
-            statement.values(status="retryable", updated_at=datetime.now(UTC)).returning(
-                QueryRun.id
-            )
+            statement.values(
+                status="retryable",
+                execution_token=None,
+                updated_at=datetime.now(UTC),
+            ).returning(QueryRun.id)
         )
         ids = result.scalars().all()
         await session.commit()

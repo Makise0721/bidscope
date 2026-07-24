@@ -175,6 +175,7 @@ class QueryRun(Base, TimestampMixin):
     error: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     token_usage: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     checkpoint_thread_id: Mapped[str | None] = mapped_column(sa.Text)
+    execution_token: Mapped[str | None] = mapped_column(sa.Text, index=True)
     completed_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
 
 

@@ -9,6 +9,7 @@ exposes the run lifecycle operations the routes call.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -176,6 +177,10 @@ class RunService:
         "bidscope_claimed_run_ids",
         default=frozenset(),
     )
+    _claimed_run_tokens: ContextVar[frozenset[tuple[int, str, str]]] = ContextVar(
+        "bidscope_claimed_run_tokens",
+        default=frozenset(),
+    )
 
     def __init__(
         self,
@@ -207,6 +212,26 @@ class RunService:
     def _remove_claimed_run_id(self, run_id: str) -> None:
         """Drop a relational claim from only the current task's context."""
         self._claimed_run_ids.set(self._claimed_run_ids.get() - {(id(self), run_id)})
+        self._claimed_run_tokens.set(
+            frozenset(
+                claim
+                for claim in self._claimed_run_tokens.get()
+                if not (claim[0] == id(self) and claim[1] == run_id)
+            )
+        )
+
+    def _add_claimed_run_token(self, run_id: str, token: str) -> None:
+        """Record the token for a claim in only the current task's context."""
+        self._claimed_run_tokens.set(
+            self._claimed_run_tokens.get() | {(id(self), run_id, token)}
+        )
+
+    def _claimed_token(self, run_id: str) -> str | None:
+        """Return this task's token for a claimed run, if any."""
+        for service_id, claimed_id, token in self._claimed_run_tokens.get():
+            if service_id == id(self) and claimed_id == run_id:
+                return token
+        return None
 
     async def create_run(
         self, user_request: str, *, run_key: str | None = None
@@ -285,6 +310,7 @@ class RunService:
                 input,
                 force_fresh=force_fresh,
                 claimed=(id(self), run_id) in self._claimed_run_ids.get(),
+                execution_token=self._claimed_token(run_id),
             )
         except asyncio.CancelledError:
             error = SerializableError(
@@ -292,8 +318,15 @@ class RunService:
                 message="run execution cancelled",
                 details={},
             ).model_dump(mode="json")
-            await self._persist_cancellation(run_id, error, expected_status="running")
+            await self._persist_cancellation(
+                run_id,
+                error,
+                expected_status="running",
+                execution_token=self._claimed_token(run_id),
+            )
             raise
+        finally:
+            self._remove_claimed_run_id(run_id)
 
     async def _persist_cancellation(
         self,
@@ -301,6 +334,7 @@ class RunService:
         error: dict[str, Any],
         *,
         expected_status: str | None = None,
+        execution_token: str | None = None,
     ) -> None:
         """Persist a retryable cancellation without losing the caller's cancel."""
         task = asyncio.create_task(
@@ -309,6 +343,7 @@ class RunService:
                 "retryable",
                 error=error,
                 expected_status=expected_status,
+                execution_token=execution_token,
             )
         )
         current = asyncio.current_task()
@@ -388,13 +423,19 @@ class RunService:
         *,
         force_fresh: bool = False,
         claimed: bool = False,
+        execution_token: str | None = None,
     ) -> dict[str, Any]:  # noqa: ANN401
         if claimed:
-            self._remove_claimed_run_id(run_id)
-        else:
-            started = await self._start_run(run_id)
-            if started is False:
+            if execution_token is None:
                 return {"status": "retryable"}
+            self._claimed_run_ids.set(
+                self._claimed_run_ids.get() - {(id(self), run_id)}
+            )
+        else:
+            execution_token = await self._start_run(run_id)
+            if execution_token is None:
+                return {"status": "retryable"}
+            self._add_claimed_run_token(run_id, execution_token)
 
         async with self.session_factory() as owner_session:
             owner_connection = await owner_session.connection()
@@ -403,12 +444,17 @@ class RunService:
                 {"key": run_lock_key(run_id)},
             )
             lock_acquired = bool(lock_result.scalar_one())
+            if lock_acquired:
+                # Session-level advisory locks survive commit; end the implicit
+                # transaction so graph execution never holds it open.
+                await owner_connection.commit()
             if not lock_acquired:
                 await owner_connection.rollback()
                 await self._update_status(
                     run_id,
                     "retryable",
                     expected_status="running",
+                    execution_token=execution_token,
                 )
                 return {"status": "retryable"}
 
@@ -418,14 +464,22 @@ class RunService:
                     async with self.session_factory() as heartbeat_session:
                         heartbeat_result = await heartbeat_session.execute(
                             sa.update(QueryRun)
-                            .where(QueryRun.id == run_id, QueryRun.status == "running")
+                            .where(
+                                QueryRun.id == run_id,
+                                QueryRun.status == "running",
+                                QueryRun.execution_token == execution_token,
+                            )
                             .values(updated_at=self.clock.now())
                         )
                         await heartbeat_session.commit()
                 else:
                     heartbeat_result = await session.execute(
                         sa.update(QueryRun)
-                        .where(QueryRun.id == run_id, QueryRun.status == "running")
+                        .where(
+                            QueryRun.id == run_id,
+                            QueryRun.status == "running",
+                            QueryRun.execution_token == execution_token,
+                        )
                         .values(updated_at=self.clock.now())
                     )
                 if not bool(getattr(heartbeat_result, "rowcount", 0)):
@@ -446,6 +500,7 @@ class RunService:
                         "retryable",
                         error=error,
                         expected_status="running",
+                        execution_token=execution_token,
                     ):
                         return {"status": "retryable"}
                     return result
@@ -461,6 +516,7 @@ class RunService:
                         checkpoint_thread_id=checkpoint_thread_id,
                         force_fresh=force_fresh,
                         ensure_active=ensure_active,
+                        execution_token=execution_token,
                     )
                 except RunOwnershipLostError:
                     return {"status": "retryable"}
@@ -475,6 +531,7 @@ class RunService:
                         "retryable",
                         error=serializable_error,
                         expected_status="running",
+                        execution_token=execution_token,
                     )
                     return {"status": "retryable", "errors": [serializable_error]}
                 except Exception as error:  # noqa: BLE001 - detached route task boundary
@@ -488,6 +545,7 @@ class RunService:
                         "retryable",
                         error=serializable_error,
                         expected_status="running",
+                        execution_token=execution_token,
                     ):
                         return {"status": "retryable"}
                     return {"status": "retryable", "errors": [serializable_error]}
@@ -504,6 +562,7 @@ class RunService:
                         error=result_error,
                         result=result,
                         expected_status="running",
+                        execution_token=execution_token,
                     ):
                         return {"status": "retryable"}
                 return result
@@ -519,16 +578,22 @@ class RunService:
                     asyncio.create_task(owner_connection.commit())
                 )
 
-    async def _start_run(self, run_id: str) -> bool:
-        """Atomically activate a pending run and report whether it is owned."""
+    async def _start_run(self, run_id: str) -> str | None:
+        """Atomically activate a pending run and return its fresh ownership token."""
         async with self.session_factory() as session:
-            update_result = await session.execute(
+            result = await session.execute(
                 sa.update(QueryRun)
                 .where(QueryRun.id == run_id, QueryRun.status == "pending")
-                .values(status="running", updated_at=self.clock.now())
+                .values(
+                    status="running",
+                    execution_token=sa.cast(sa.func.gen_random_uuid(), sa.Text),
+                    updated_at=self.clock.now(),
+                )
+                .returning(QueryRun.execution_token)
             )
+            claimed_token = result.scalar_one_or_none()
             await session.commit()
-            return bool(getattr(update_result, "rowcount", 0))
+            return str(claimed_token) if claimed_token is not None else None
 
     async def get_run(self, run_id: str) -> QueryRun | None:
         async with self.session_factory() as session:
@@ -536,24 +601,26 @@ class RunService:
 
     async def confirm(self, run_id: str) -> dict[str, Any]:
         """Resume an awaiting-confirmation run. Raises if not confirmable."""
-        await self._claim_run_safely(
+        token = await self._claim_run_safely(
             run_id,
             "awaiting_confirmation",
             "awaiting confirmation",
             "confirmation claim cancelled",
         )
         self._add_claimed_run_id(run_id)
+        self._add_claimed_run_token(run_id, token)
         return await self.execute_run(run_id, Command(resume={"action": "approve"}))
 
     async def retry(self, run_id: str) -> dict[str, Any]:
         """Resume a retryable checkpoint or restart the original request."""
-        await self._claim_run_safely(
+        token = await self._claim_run_safely(
             run_id,
             "retryable",
             "retryable",
             "retry claim cancelled",
         )
         self._add_claimed_run_id(run_id)
+        self._add_claimed_run_token(run_id, token)
         return await self._retry_after_claim_safely(run_id)
 
     async def _retry_after_claim_safely(self, run_id: str) -> dict[str, Any]:
@@ -565,7 +632,11 @@ class RunService:
                 self._remove_claimed_run_id(run_id)
                 raise
             repair = asyncio.create_task(
-                self._repair_cancelled_claim(run_id, "retry checkpoint lookup cancelled")
+                self._repair_claim_with_token(
+                    run_id,
+                    "retry checkpoint lookup cancelled",
+                    self._claimed_token(run_id),
+                )
             )
             try:
                 await _drain_task_preserving_cancellation(repair)
@@ -615,6 +686,7 @@ class RunService:
                     "retryable",
                     error=serializable_error,
                     expected_status="running",
+                    execution_token=self._claimed_token(run_id),
                 )
             )
             try:
@@ -624,9 +696,10 @@ class RunService:
                     applied = await _drain_task_preserving_cancellation(status_update)
                 except BaseException as status_error:
                     repair = asyncio.create_task(
-                        self._repair_cancelled_claim(
+                        self._repair_claim_with_token(
                             run_id,
                             "retry checkpoint lookup cancelled",
+                            self._claimed_token(run_id),
                         )
                     )
                     try:
@@ -636,9 +709,10 @@ class RunService:
                     raise _ClaimRepairedCancellation(str(cancellation_error)) from status_error
                 if not applied:
                     repair = asyncio.create_task(
-                        self._repair_cancelled_claim(
+                        self._repair_claim_with_token(
                             run_id,
                             "retry checkpoint lookup cancelled",
+                            self._claimed_token(run_id),
                         )
                     )
                     try:
@@ -655,30 +729,52 @@ class RunService:
         eligible_status: str,
         status_name: str,
         cancellation_message: str,
-    ) -> None:
-        """Claim a run without leaving a committed claim stranded on cancellation."""
+    ) -> str:
+        """Claim a run without leaving a committed token stranded on cancellation."""
         claim = asyncio.create_task(
             self._claim_run(run_id, eligible_status, status_name),
         )
         try:
-            await asyncio.shield(claim)
+            return await asyncio.shield(claim)
         except asyncio.CancelledError as cancellation_error:
             try:
-                claimed = await _drain_task_preserving_cancellation(claim)
+                token = await _drain_task_preserving_cancellation(claim)
             except BaseException as claim_error:
                 raise cancellation_error from claim_error
-            if claimed:
+            if token:
+                self._add_claimed_run_token(run_id, str(token))
                 repair = asyncio.create_task(
-                    self._repair_cancelled_claim(run_id, cancellation_message),
+                    self._repair_claim_with_token(run_id, cancellation_message, str(token)),
                 )
                 try:
                     await _drain_task_preserving_cancellation(repair)
                 except BaseException as repair_error:
                     raise cancellation_error from repair_error
+                finally:
+                    self._remove_claimed_run_id(run_id)
             raise cancellation_error
 
-    async def _repair_cancelled_claim(self, run_id: str, message: str) -> None:
+    async def _repair_claim_with_token(
+        self,
+        run_id: str,
+        message: str,
+        execution_token: str | None,
+    ) -> None:
+        """Call the repair hook with a token while tolerating legacy test hooks."""
+        repair = self._repair_cancelled_claim
+        if len(inspect.signature(repair).parameters) < 3:
+            await repair(run_id, message)
+        else:
+            await repair(run_id, message, execution_token)
+
+    async def _repair_cancelled_claim(
+        self,
+        run_id: str,
+        message: str,
+        execution_token: str | None = None,
+    ) -> None:
         """Restore only the run still owned by this claim to retryable."""
+        execution_token = execution_token or self._claimed_token(run_id)
         serializable_error = SerializableError(
             code=BidScopeErrorCode.GRAPH_NODE_ERROR,
             message=message[:1000],
@@ -688,22 +784,27 @@ class RunService:
             run_id,
             serializable_error,
             expected_status="running",
+            execution_token=execution_token,
         )
 
-    async def _claim_run(self, run_id: str, eligible_status: str, status_name: str) -> bool:
-        """Atomically move an eligible run to ``running`` or raise a lifecycle error."""
+    async def _claim_run(self, run_id: str, eligible_status: str, status_name: str) -> str:
+        """Atomically move an eligible run to ``running`` with a fresh token."""
         async with self.session_factory() as session:
             result = await session.execute(
                 sa.update(QueryRun)
                 .where(QueryRun.id == run_id, QueryRun.status == eligible_status)
-                .values(status="running", updated_at=self.clock.now())
-                .returning(QueryRun.id)
+                .values(
+                    status="running",
+                    execution_token=sa.cast(sa.func.gen_random_uuid(), sa.Text),
+                    updated_at=self.clock.now(),
+                )
+                .returning(QueryRun.execution_token)
             )
-            claimed_id = result.scalar_one_or_none()
+            claimed_token = result.scalar_one_or_none()
             await session.commit()
 
-        if claimed_id is not None:
-            return True
+        if claimed_token is not None:
+            return str(claimed_token)
 
         run = await self.get_run(run_id)
         if run is None:
@@ -728,7 +829,10 @@ class RunService:
         error: dict[str, Any] | None = None,
         result: dict[str, Any] | None = None,
         expected_status: str | None = None,
+        execution_token: str | None = None,
     ) -> bool:
+        if expected_status == "running" and execution_token is None:
+            return False
         async with self.session_factory() as session:
             if expected_status is not None:
                 values: dict[str, Any] = {
@@ -751,13 +855,16 @@ class RunService:
                     values["error"] = error
                 if str(status) == "completed":
                     values["completed_at"] = self.clock.now()
+                if str(status) != "running":
+                    values["execution_token"] = None
+                predicates = [
+                    QueryRun.id == run_id,
+                    QueryRun.status == expected_status,
+                ]
+                if execution_token is not None:
+                    predicates.append(QueryRun.execution_token == execution_token)
                 update_result = await session.execute(
-                    sa.update(QueryRun)
-                    .where(
-                        QueryRun.id == run_id,
-                        QueryRun.status == expected_status,
-                    )
-                    .values(**values)
+                    sa.update(QueryRun).where(*predicates).values(**values)
                 )
                 await session.commit()
                 return bool(getattr(update_result, "rowcount", 0))
@@ -766,6 +873,8 @@ class RunService:
             if run is not None:
                 run.status = str(status)
                 run.updated_at = self.clock.now()
+                if str(status) != "running":
+                    run.execution_token = None
                 if result is not None:
                     intent = result.get("search_intent")
                     if intent is not None:

@@ -18,7 +18,13 @@ import pytest
 import sqlalchemy as sa
 from bidscope.api.dependencies import RunService
 from bidscope.config import get_settings
-from bidscope.graph.executor import create_run, mark_stale_runs_retryable
+from bidscope.graph.executor import (
+    RunOwnershipLostError,
+    _append_events,
+    create_run,
+    mark_stale_runs_retryable,
+    run_lock_key,
+)
 from bidscope.persistence.models import QueryRun, RunEvent
 
 
@@ -46,6 +52,7 @@ async def test_mark_stale_runs_retryable(session_factory: Any) -> None:
                     status=status,
                     user_request="x",
                     updated_at=stale_at,
+                    execution_token="old-running-token" if run_id == running_id else None,
                 )
             )
         await session.commit()
@@ -58,17 +65,142 @@ async def test_mark_stale_runs_retryable(session_factory: Any) -> None:
 
     async with session_factory() as session:
         result = await session.execute(
-            sa.select(QueryRun.id, QueryRun.status).where(
+            sa.select(QueryRun.id, QueryRun.status, QueryRun.execution_token).where(
                 QueryRun.id.in_([running_id, pending_id, completed_id, awaiting_id])
             )
         )
         # ``QueryRun.id`` is a UUID column; normalise keys to strings for lookup.
-        by_id = {str(run_id): status for run_id, status in result.all()}
+        by_id = {
+            str(run_id): (status, execution_token)
+            for run_id, status, execution_token in result.all()
+        }
 
-    assert by_id[running_id] == "retryable"
-    assert by_id[pending_id] == "retryable"
-    assert by_id[completed_id] == "completed"
-    assert by_id[awaiting_id] == "awaiting_confirmation"
+    assert by_id[running_id] == ("retryable", None)
+    assert by_id[pending_id] == ("retryable", None)
+    assert by_id[completed_id] == ("completed", None)
+    assert by_id[awaiting_id] == ("awaiting_confirmation", None)
+
+
+@pytest.mark.asyncio
+async def test_released_old_lock_cannot_write_after_retry_claims_new_token(
+    session_factory: Any,
+) -> None:
+    """A retry token fences a worker that lost its session advisory lock."""
+    run_id, created = await create_run(
+        "fenced retry request",
+        run_key="released-lock-token-fencing",
+        session_factory=session_factory,
+    )
+    assert created is True
+    old_service = RunService(
+        session_factory=session_factory,
+        graph=object(),
+        object_store=object(),
+        settings=get_settings(),
+    )
+    old_token = await old_service._start_run(run_id)
+    assert old_token is not None
+
+    async with session_factory() as old_owner_session:
+        old_connection = await old_owner_session.connection()
+        acquired = await old_connection.scalar(
+            sa.text("SELECT pg_try_advisory_lock(:key)"),
+            {"key": run_lock_key(run_id)},
+        )
+        assert acquired is True
+        await old_connection.commit()
+
+        # Startup recovery invalidates the old claim before another worker retries.
+        async with session_factory() as session:
+            await session.execute(
+                sa.update(QueryRun)
+                .where(QueryRun.id == run_id)
+                .values(updated_at=datetime(2020, 1, 1, tzinfo=UTC))
+            )
+            await session.commit()
+        assert await mark_stale_runs_retryable(
+            session_factory=session_factory,
+            stale_before=datetime(2021, 1, 1, tzinfo=UTC),
+        ) == 1
+
+        async with session_factory() as session:
+            stale_run = await session.get(QueryRun, run_id)
+        assert stale_run is not None
+        assert stale_run.status == "retryable"
+        assert stale_run.execution_token is None
+
+        released = await old_connection.scalar(
+            sa.text("SELECT pg_advisory_unlock(:key)"),
+            {"key": run_lock_key(run_id)},
+        )
+        assert released is True
+        await old_connection.commit()
+
+    new_service = RunService(
+        session_factory=session_factory,
+        graph=object(),
+        object_store=object(),
+        settings=get_settings(),
+    )
+    new_token = await new_service._claim_run(run_id, "retryable", "retryable")
+    assert new_token is not None
+    assert new_token != old_token
+
+    async with session_factory() as new_owner_session:
+        new_connection = await new_owner_session.connection()
+        acquired = await new_connection.scalar(
+            sa.text("SELECT pg_try_advisory_lock(:key)"),
+            {"key": run_lock_key(run_id)},
+        )
+        assert acquired is True
+        await new_connection.commit()
+
+        with pytest.raises(RunOwnershipLostError):
+            await _append_events(
+                run_id,
+                [
+                    {
+                        "timestamp": "2026-07-18T09:00:00+00:00",
+                        "node": "stale",
+                        "event": "must_not_persist",
+                        "status": "ok",
+                    }
+                ],
+                0,
+                session_factory,
+                execution_token=old_token,
+            )
+        assert not await old_service._update_status(
+            run_id,
+            "completed",
+            expected_status="running",
+            execution_token=old_token,
+        )
+        assert await new_service._update_status(
+            run_id,
+            "completed",
+            expected_status="running",
+            execution_token=new_token,
+        )
+
+        released = await new_connection.scalar(
+            sa.text("SELECT pg_advisory_unlock(:key)"),
+            {"key": run_lock_key(run_id)},
+        )
+        assert released is True
+        await new_connection.commit()
+
+    async with session_factory() as session:
+        run = await session.get(QueryRun, run_id)
+        events = list(
+            await session.scalars(
+                sa.select(RunEvent).where(RunEvent.query_run_id == run_id)
+            )
+        )
+    assert run is not None
+    assert run.status == "completed"
+    assert run.execution_token is None
+    assert events == []
 
 
 @pytest.mark.asyncio
@@ -923,7 +1055,7 @@ async def test_claim_cancellation_reinjected_after_drain_restores_eligibility(
         "message": cancellation_message,
         "details": {},
     }
-    assert await original_claim(run_id, "retryable", "retryable") is True
+    assert await original_claim(run_id, "retryable", "retryable")
 
 
 @pytest.mark.asyncio

@@ -18,6 +18,8 @@ from bidscope.clock import FixedClock
 from bidscope.config import get_settings
 from bidscope.graph.builder import GraphDeps, build_graph
 from bidscope.graph.executor import (
+    EventReconciliationError,
+    _reconcile_event_cursor,
     _to_plain_dsn,
     create_run,
     execute,
@@ -141,6 +143,92 @@ async def test_checkpoint_cleanup_allows_a_reused_thread_to_execute_fresh_events
 
     assert fresh_result["status"] == "completed"
     assert await _count_events(run_id, session_factory) > 0
+
+
+def _checkpoint_event(node: str) -> dict[str, Any]:
+    return {
+        "node": node,
+        "event": "emitted",
+        "status": "ok",
+        "message": None,
+        "details": {},
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_seq_offset", "persisted", "checkpoint_events"),
+    [
+        (
+            0,
+            [(0, "first"), (2, "third")],
+            [_checkpoint_event("first"), _checkpoint_event("second")],
+        ),
+        (
+            0,
+            [(0, "first"), (1, "second"), (2, "trailing")],
+            [_checkpoint_event("first"), _checkpoint_event("second")],
+        ),
+        (
+            4,
+            [(4, "first"), (6, "third")],
+            [_checkpoint_event("first"), _checkpoint_event("second")],
+        ),
+        (
+            4,
+            [(4, "first"), (5, "second"), (6, "trailing")],
+            [_checkpoint_event("first"), _checkpoint_event("second")],
+        ),
+        (
+            0,
+            [(0, "first"), (1, "second"), (3, "far_trailing")],
+            [_checkpoint_event("first"), _checkpoint_event("second")],
+        ),
+        (
+            4,
+            [(4, "first"), (5, "second"), (7, "far_trailing")],
+            [_checkpoint_event("first"), _checkpoint_event("second")],
+        ),
+    ],
+)
+async def test_reconcile_event_cursor_rejects_gaps_and_trailing_attempt_rows(
+    session_factory: Any,
+    event_seq_offset: int,
+    persisted: list[tuple[int, str]],
+    checkpoint_events: list[dict[str, Any]],
+) -> None:
+    """Every row from an attempt base must exactly match its checkpoint prefix."""
+    run_id = str(uuid.uuid4())
+    async with session_factory() as session:
+        session.add(
+            QueryRun(
+                id=run_id,
+                run_key=f"reconcile-{event_seq_offset}-{uuid.uuid4()}",
+                status="running",
+                user_request="reconcile",
+            )
+        )
+        for seq, node in persisted:
+            session.add(
+                RunEvent(
+                    query_run_id=run_id,
+                    seq=seq,
+                    timestamp=datetime(2026, 7, 18, 9, 0, tzinfo=UTC),
+                    node=node,
+                    event="emitted",
+                    status="ok",
+                    details={},
+                )
+            )
+        await session.commit()
+
+    with pytest.raises(EventReconciliationError):
+        await _reconcile_event_cursor(
+            run_id,
+            checkpoint_events,
+            session_factory,
+            event_seq_offset=event_seq_offset,
+        )
 
 
 async def _assert_timestamps_persisted(run_id: str, session_factory: Any) -> None:
