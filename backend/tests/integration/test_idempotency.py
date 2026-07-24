@@ -14,6 +14,7 @@ test passes; where it is missing it fails, exposing the gap.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import uuid
@@ -24,6 +25,8 @@ from typing import Any
 import pytest
 import pytest_asyncio
 import sqlalchemy as sa
+from bidscope.api.dependencies import RunService
+from bidscope.config import get_settings
 from bidscope.delivery.objects import LocalObjectStore
 from bidscope.domain.reports import Report
 from bidscope.persistence.models import (
@@ -361,3 +364,205 @@ async def test_graph_event_deduplication(
     assert after_second == after_first, (
         f"gap: second execute duplicated events ({after_first} -> {after_second})"
     )
+
+
+async def test_force_fresh_retry_resets_checkpoint_state_but_appends_events(
+    session_factory,
+) -> None:
+    """Fresh retry keeps the thread and old events while discarding old state."""
+    from bidscope.clock import FixedClock
+    from bidscope.domain.runs import SerializableError
+    from bidscope.graph.builder import GraphDeps, build_graph
+    from bidscope.graph.executor import create_run, execute
+    from bidscope.graph.state import DuplicateGroup
+    from bidscope.llm.fake import FakeDuplicateModel, FakeIntentModel, FakeReportModel
+    from bidscope.llm.types import ModelUsage, VerifiedOpportunity
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    class _FakeSearcher:
+        async def search(self, query, filters=None):  # type: ignore[no-untyped-def]
+            from bidscope.retrieval.search import RetrievalResult
+
+            return RetrievalResult(
+                query=query,
+                candidates=[],
+                degraded_modes=[],
+                filters_applied={},
+            )
+
+    def _views(ids):  # type: ignore[no-untyped-def]
+        return {}
+
+    deps = GraphDeps(
+        intent_model=FakeIntentModel(),
+        duplicate_model=FakeDuplicateModel(),
+        report_model=FakeReportModel(),
+        searcher=_FakeSearcher(),  # type: ignore[arg-type]
+        clock=FixedClock(datetime(2026, 7, 18, 9, 0, tzinfo=UTC)),
+        load_notice_views=_views,
+        report_persistence=FakeReportPersistence(),
+    )
+    checkpointer = InMemorySaver()
+    graph = build_graph(deps, checkpointer=checkpointer)
+    run_id, created = await create_run("四川服务器招标", session_factory=session_factory)
+    assert created is True
+    thread_id = "retry-thread"
+    config = {"configurable": {"thread_id": thread_id}}
+    old_event = {
+        "node": "old_node",
+        "event": "old_event",
+        "status": "error",
+        "timestamp": "2026-07-18T09:00:00+00:00",
+    }
+    old_error = SerializableError(
+        code="graph_node_error", message="old error", details={}
+    )
+    old_opportunity = VerifiedOpportunity(notice_id="old-opportunity", title="old")
+    old_usage = ModelUsage(
+        model="old-model",
+        prompt_tokens=9,
+        completion_tokens=9,
+        latency_ms=9.0,
+        pricing_snapshot="old",
+    )
+    old_group = DuplicateGroup(
+        representative_id="old-representative",
+        member_ids=("old-member",),
+        decision="exact",
+    )
+    await execute(
+        graph,
+        run_id,
+        {"user_request": "old request"},
+        session_factory=session_factory,
+        checkpoint_thread_id=thread_id,
+    )
+    await graph.aupdate_state(
+        config,
+        {
+            "candidate_notice_ids": ["old-candidate"],
+            "duplicate_groups": [old_group],
+            "errors": [old_error],
+            "verified_opportunities": [old_opportunity],
+            "node_events": [old_event],
+            "token_usage": [old_usage],
+            "retry_count": 7,
+            "degraded_modes": ["old-mode"],
+        },
+    )
+    async with session_factory() as session:
+        run = await session.get(QueryRun, run_id)
+        assert run is not None
+        run.status = "retryable"
+        run.checkpoint_thread_id = thread_id
+        old_event_seq = await session.scalar(
+            sa.select(sa.func.count()).where(RunEvent.query_run_id == run_id)
+        )
+        assert old_event_seq is not None
+        session.add(RunEvent(
+            query_run_id=run_id,
+            seq=old_event_seq,
+            timestamp=datetime(2026, 7, 18, 9, 0, tzinfo=UTC),
+            node="old_node",
+            event="old_event",
+            status="error",
+        ))
+        await session.commit()
+
+    service = RunService(
+        session_factory=session_factory,
+        graph=graph,
+        object_store=object(),
+        settings=get_settings(),
+    )
+    result = await service.retry(run_id)
+
+    assert result["status"] == "completed", result
+    assert result["candidate_notice_ids"] == []
+    assert result["duplicate_groups"] == []
+    assert result["errors"] == []
+    assert result["verified_opportunities"] == []
+    assert result["token_usage"]
+    assert all(usage != old_usage for usage in result["token_usage"])
+    assert result.get("retry_count", 0) == 0
+    assert result["degraded_modes"] == []
+    assert all(event["event"] != "old_event" for event in result["node_events"])
+    state = await graph.aget_state(config)
+    assert state.values["candidate_notice_ids"] == []
+    assert state.values["duplicate_groups"] == []
+    assert state.values["errors"] == []
+    assert state.values["verified_opportunities"] == []
+    assert state.values["token_usage"]
+    assert all(usage != old_usage for usage in state.values["token_usage"])
+    assert state.values.get("retry_count", 0) == 0
+    assert state.values["degraded_modes"] == []
+    async with session_factory() as session:
+        stored_run = await session.get(QueryRun, run_id)
+        assert stored_run is not None
+        assert stored_run.checkpoint_thread_id == thread_id
+        events = await session.scalars(
+            sa.select(RunEvent).where(RunEvent.query_run_id == run_id).order_by(RunEvent.seq)
+        )
+        rows = list(events)
+    assert [event.seq for event in rows] == list(range(len(rows)))
+    assert all(event.event != "old_event" for event in rows[:old_event_seq])
+    assert rows[old_event_seq].event == "old_event"
+    assert [event.event for event in rows].count("old_event") == 1
+    assert len(rows) > old_event_seq + 1
+    assert await checkpointer.aget_tuple(config) is not None
+
+
+async def test_terminal_retry_checkpoint_error_cancellation_repairs_claim(
+    session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation during checkpoint-error persistence leaves retry eligible."""
+    run_id = str(uuid.uuid4())
+    async with session_factory() as session:
+        session.add(QueryRun(
+            id=run_id,
+            run_key="terminal-retry-checkpoint-cancel",
+            status="retryable",
+            user_request="retry request",
+        ))
+        await session.commit()
+
+    class FailingStateGraph:
+        async def aget_state(self, config: Any) -> None:
+            del config
+            raise RuntimeError("checkpoint unavailable")
+
+    service = RunService(
+        session_factory=session_factory,
+        graph=FailingStateGraph(),
+        object_store=object(),
+        settings=get_settings(),
+    )
+    original_update_status = service._update_status
+    update_started = asyncio.Event()
+    release_update = asyncio.Event()
+
+    async def delayed_update_status(*args: Any, **kwargs: Any) -> None:
+        update_started.set()
+        await release_update.wait()
+        await original_update_status(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_update_status", delayed_update_status)
+    retry_task = asyncio.create_task(service.retry(run_id))
+    await asyncio.wait_for(update_started.wait(), timeout=1)
+    retry_task.cancel()
+    release_update.set()
+    with pytest.raises(asyncio.CancelledError):
+        await retry_task
+
+    async with session_factory() as session:
+        run = await session.get(QueryRun, run_id)
+    assert run is not None
+    assert run.status == "retryable"
+    assert run.error == {
+        "code": "graph_node_error",
+        "message": "checkpoint unavailable",
+        "details": {},
+    }
+    second = await service.retry(run_id)
+    assert second["status"] == "retryable"

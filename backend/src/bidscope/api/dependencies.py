@@ -417,27 +417,19 @@ class RunService:
             "retryable",
             "retry claim cancelled",
         )
-        try:
-            run = await self.get_run(run_id)
-            if run is None:
-                raise _RunError(404, "run not found")
+        return await self._retry_after_claim_safely(run_id)
 
-            thread_id = run.checkpoint_thread_id or str(run.id)
-            get_state = getattr(self.graph, "aget_state", None)
-            state = (
-                await get_state({"configurable": {"thread_id": thread_id}}) if get_state else None
-            )
+    async def _retry_after_claim_safely(self, run_id: str) -> dict[str, Any]:
+        """Look up retry state and repair the claim when cancellation interrupts it."""
+        try:
+            context = await self._retry_context(run_id)
         except asyncio.CancelledError:
             await self._repair_cancelled_claim(run_id, "retry checkpoint lookup cancelled")
             raise
-        except Exception as error:  # noqa: BLE001 - checkpoint recovery boundary
-            serializable_error = SerializableError(
-                code=BidScopeErrorCode.GRAPH_NODE_ERROR,
-                message=str(error)[:1000],
-                details={},
-            ).model_dump(mode="json")
-            await self._update_status(run_id, "retryable", error=serializable_error)
-            return {"status": "retryable", "errors": [serializable_error]}
+
+        if isinstance(context, dict):
+            return context
+        run, state = context
         if state and state.next:
             return await self.execute_run(
                 run_id,
@@ -449,6 +441,43 @@ class RunService:
             {"user_request": run.user_request},
             force_fresh=True,
         )
+
+    async def _retry_context(self, run_id: str) -> tuple[QueryRun, Any] | dict[str, Any]:
+        """Load checkpoint state and persist ordinary lookup failures."""
+        try:
+            run = await self.get_run(run_id)
+            if run is None:
+                raise _RunError(404, "run not found")
+
+            thread_id = run.checkpoint_thread_id or str(run.id)
+            get_state = getattr(self.graph, "aget_state", None)
+            state = (
+                await get_state({"configurable": {"thread_id": thread_id}}) if get_state else None
+            )
+        except Exception as error:  # noqa: BLE001 - checkpoint recovery boundary
+            serializable_error = SerializableError(
+                code=BidScopeErrorCode.GRAPH_NODE_ERROR,
+                message=str(error)[:1000],
+                details={},
+            ).model_dump(mode="json")
+            status_update = asyncio.create_task(
+                self._update_status(
+                    run_id,
+                    "retryable",
+                    error=serializable_error,
+                    expected_status="running",
+                )
+            )
+            try:
+                await asyncio.shield(status_update)
+            except asyncio.CancelledError as cancellation_error:
+                try:
+                    await _drain_task_preserving_cancellation(status_update)
+                except BaseException as status_error:
+                    raise cancellation_error from status_error
+                raise
+            return {"status": "retryable", "errors": [serializable_error]}
+        return run, state
 
     async def _claim_run_safely(
         self,

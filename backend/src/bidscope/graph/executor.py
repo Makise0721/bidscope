@@ -134,17 +134,42 @@ async def execute(
         return dict(existing.values)
 
     already_persisted = await _persisted_event_count(run_id, session_factory)
-    persisted = already_persisted
+    reset = (
+        await _reset_checkpoint_state(graph, config)
+        if force_fresh
+        else False
+    )
+    persisted = 0 if reset else already_persisted
+    persisted_seq_offset = already_persisted if reset else 0
 
     async for state in graph.astream(input, config, stream_mode="values"):
         events = state.get("node_events", [])
         new_count = len(events)
         if new_count > persisted:
-            await _append_events(run_id, events, persisted, session_factory)
+            await _append_events(
+                run_id,
+                events,
+                persisted,
+                session_factory,
+                seq_offset=persisted_seq_offset,
+            )
             persisted = new_count
 
     final = await graph.aget_state(config)
     return dict(final.values) if final else {}
+
+
+async def _reset_checkpoint_state(
+    graph: Any,
+    config: RunnableConfig,
+) -> bool:
+    """Clear one thread's checkpoint while leaving relational run events intact."""
+    checkpointer = getattr(graph, "checkpointer", None)
+    delete_thread = getattr(checkpointer, "adelete_thread", None)
+    if delete_thread is None:
+        return False
+    await delete_thread(config["configurable"]["thread_id"])
+    return True
 
 
 async def _append_events(
@@ -152,6 +177,8 @@ async def _append_events(
     events: list[dict[str, Any]],
     start: int,
     session_factory: Any,
+    *,
+    seq_offset: int = 0,
 ) -> None:
     """Persist ``events[start:]`` with contiguous ``seq`` numbers."""
     if start >= len(events):
@@ -162,7 +189,7 @@ async def _append_events(
             session.add(
                 RunEvent(
                     query_run_id=str(run_id),
-                    seq=index,
+                    seq=seq_offset + index,
                     timestamp=_to_datetime(event.get("timestamp")),
                     node=event.get("node", ""),
                     event=event.get("event", ""),
