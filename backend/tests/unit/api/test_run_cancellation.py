@@ -348,12 +348,15 @@ async def test_initial_heartbeat_failure_releases_acquired_run_lock(
     monkeypatch.setattr(dependencies, "_acquire_run_lock", acquire)
     monkeypatch.setattr(dependencies, "_release_run_lock", release)
 
-    assert await service._execute_run(
+    result = await service._execute_run(
         "run-1",
         {"user_request": "request"},
         claimed=True,
         execution_token="token-1",
-    ) == {"status": "retryable"}
+    )
+    assert result["status"] == "retryable"
+    assert result["errors"][0]["details"]["repair_applied"] is False
+    assert result["errors"][0]["details"]["recovery_path"] == "stale_run_recovery"
 
     acquire.assert_awaited_once_with(connection, "run-1")
     release.assert_awaited_once_with(connection, "run-1")

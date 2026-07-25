@@ -391,6 +391,476 @@ async def test_blocked_graph_refreshes_running_heartbeat(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("replacement_status", "replacement_token"),
+    [("completed", None), ("running", "new-owner-token")],
+)
+async def test_heartbeat_ownership_loss_attempts_token_fenced_retryable_repair(
+    session_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_status: str,
+    replacement_token: str | None,
+) -> None:
+    """A stale heartbeat repairs only when its running token still owns the row."""
+    from bidscope.api import dependencies
+
+    graph_started = asyncio.Event()
+    release_graph = asyncio.Event()
+
+    async def blocked_execute(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        graph_started.set()
+        await release_graph.wait()
+        return {"status": "completed"}
+
+    monkeypatch.setattr(dependencies, "execute", blocked_execute)
+    settings = get_settings().model_copy(update={"run_heartbeat_seconds": 0.01})
+    service = RunService(
+        session_factory=session_factory,
+        graph=object(),
+        object_store=object(),
+        settings=settings,
+    )
+    status_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    original_update_status = service._update_status
+    repair_started = asyncio.Event()
+
+    async def recording_update_status(*args: Any, **kwargs: Any) -> bool:
+        status_calls.append((args, kwargs))
+        if len(args) >= 2 and args[1] == "retryable":
+            repair_started.set()
+        return await original_update_status(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_update_status", recording_update_status)
+    run_id, created = await service.create_run(
+        "heartbeat ownership loss",
+        run_key="heartbeat-ownership-loss",
+    )
+    assert created is True
+    task = service.schedule_run(run_id, {"user_request": "heartbeat ownership loss"})
+    await asyncio.wait_for(graph_started.wait(), timeout=1)
+
+    async with session_factory() as session:
+        original_token = await session.scalar(
+            sa.select(QueryRun.execution_token).where(QueryRun.id == run_id)
+        )
+        assert original_token is not None
+        await session.execute(
+            sa.update(QueryRun)
+            .where(QueryRun.id == run_id)
+            .values(status=replacement_status, execution_token=replacement_token)
+        )
+        await session.commit()
+    await asyncio.wait_for(repair_started.wait(), timeout=1)
+    release_graph.set()
+    assert (await task)["status"] == "retryable"
+
+    repair_calls = [
+        (args, kwargs)
+        for args, kwargs in status_calls
+        if len(args) >= 2 and args[1] == "retryable"
+    ]
+    assert len(repair_calls) == 1
+    _, repair_kwargs = repair_calls[0]
+    assert repair_kwargs["expected_status"] == "running"
+    assert repair_kwargs["execution_token"] == original_token
+    assert repair_kwargs["error"]["code"] == "graph_node_error"
+    assert len(repair_kwargs["error"]["message"]) <= 1000
+
+    async with session_factory() as session:
+        run = await session.get(QueryRun, run_id)
+    assert run is not None
+    assert run.status == replacement_status
+    assert run.execution_token == replacement_token
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_database_error_repairs_running_row_and_releases_lock(
+    session_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A heartbeat database error leaves a retryable row and a reusable lock."""
+    from bidscope.api import dependencies
+
+    graph_started = asyncio.Event()
+    release_graph = asyncio.Event()
+    original_factory = session_factory
+    heartbeat_failure_armed = asyncio.Event()
+    heartbeat_failure_injected = False
+
+    class FailingSession:
+        def __init__(self) -> None:
+            self._context = original_factory()
+            self._session: Any = None
+
+        async def __aenter__(self) -> FailingSession:
+            self._session = await self._context.__aenter__()
+            return self
+
+        async def __aexit__(self, *args: Any) -> Any:
+            return await self._context.__aexit__(*args)
+
+        async def execute(self, *args: Any, **kwargs: Any) -> Any:
+            nonlocal heartbeat_failure_injected
+            statement = args[0] if args else kwargs.get("statement")
+            if (
+                not heartbeat_failure_injected
+                and graph_started.is_set()
+                and statement is not None
+                and "updated_at" in str(statement)
+                and "execution_token" in str(statement)
+            ):
+                heartbeat_failure_injected = True
+                heartbeat_failure_armed.set()
+                raise sa.exc.OperationalError(
+                    "UPDATE query_runs",
+                    {},
+                    ConnectionError("heartbeat database connection reset"),
+                )
+            return await self._session.execute(*args, **kwargs)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._session, name)
+
+    def failing_factory() -> FailingSession:
+        return FailingSession()
+
+    async def blocked_execute(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        graph_started.set()
+        await release_graph.wait()
+        return {"status": "completed"}
+
+    monkeypatch.setattr(dependencies, "execute", blocked_execute)
+    settings = get_settings().model_copy(update={"run_heartbeat_seconds": 0.01})
+    service = RunService(
+        session_factory=original_factory,
+        graph=object(),
+        object_store=object(),
+        settings=settings,
+    )
+    run_id, created = await service.create_run(
+        "heartbeat database error",
+        run_key="heartbeat-database-error",
+    )
+    assert created is True
+    service.session_factory = failing_factory
+    task = service.schedule_run(run_id, {"user_request": "heartbeat database error"})
+    await asyncio.wait_for(graph_started.wait(), timeout=1)
+    await asyncio.wait_for(heartbeat_failure_armed.wait(), timeout=1)
+    release_graph.set()
+    assert await task == {"status": "retryable"}
+
+    async with original_factory() as session:
+        run = await session.get(QueryRun, run_id)
+    assert run is not None
+    assert run.status == "retryable"
+    assert run.execution_token is None
+    assert run.error is not None
+    assert run.error["code"] == "graph_node_error"
+    assert len(run.error["message"]) <= 1000
+
+    async with original_factory() as session:
+        connection = await session.connection()
+        assert await connection.scalar(
+            sa.text("SELECT pg_try_advisory_lock(:key)"),
+            {"key": run_lock_key(run_id)},
+        ) is True
+        await connection.commit()
+        assert await connection.scalar(
+            sa.text("SELECT pg_advisory_unlock(:key)"),
+            {"key": run_lock_key(run_id)},
+        ) is True
+        await connection.commit()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_zero_row_for_original_owner_repairs_running_row(
+    session_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A zero-row heartbeat repairs the still-running original owner."""
+    from bidscope.api import dependencies
+
+    graph_started = asyncio.Event()
+    heartbeat_zero_row = asyncio.Event()
+    repair_attempted = asyncio.Event()
+    release_graph = asyncio.Event()
+    original_factory = session_factory
+    zero_row_injected = False
+
+    class ZeroRowSession:
+        def __init__(self) -> None:
+            self._context = original_factory()
+            self._session: Any = None
+
+        async def __aenter__(self) -> ZeroRowSession:
+            self._session = await self._context.__aenter__()
+            return self
+
+        async def __aexit__(self, *args: Any) -> Any:
+            return await self._context.__aexit__(*args)
+
+        async def execute(self, *args: Any, **kwargs: Any) -> Any:
+            nonlocal zero_row_injected
+            statement = args[0] if args else kwargs.get("statement")
+            if (
+                not zero_row_injected
+                and graph_started.is_set()
+                and statement is not None
+                and "updated_at" in str(statement)
+                and "execution_token" in str(statement)
+            ):
+                zero_row_injected = True
+                heartbeat_zero_row.set()
+                return SimpleNamespace(rowcount=0)
+            return await self._session.execute(*args, **kwargs)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._session, name)
+
+    def zero_row_factory() -> ZeroRowSession:
+        return ZeroRowSession()
+
+    async def blocked_execute(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        graph_started.set()
+        await release_graph.wait()
+        return {"status": "completed"}
+
+    monkeypatch.setattr(dependencies, "execute", blocked_execute)
+    settings = get_settings().model_copy(update={"run_heartbeat_seconds": 0.01})
+    service = RunService(
+        session_factory=original_factory,
+        graph=object(),
+        object_store=object(),
+        settings=settings,
+    )
+    original_update_status = service._update_status
+
+    async def recording_update_status(*args: Any, **kwargs: Any) -> bool:
+        if len(args) >= 2 and args[1] == "retryable":
+            repair_attempted.set()
+        return await original_update_status(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_update_status", recording_update_status)
+    run_id, created = await service.create_run(
+        "heartbeat zero row",
+        run_key="heartbeat-zero-row-original-owner",
+    )
+    assert created is True
+    service.session_factory = zero_row_factory
+    task = service.schedule_run(run_id, {"user_request": "heartbeat zero row"})
+    await asyncio.wait_for(graph_started.wait(), timeout=1)
+    await asyncio.wait_for(heartbeat_zero_row.wait(), timeout=1)
+    await asyncio.wait_for(repair_attempted.wait(), timeout=1)
+    release_graph.set()
+
+    result = await task
+    assert result["status"] == "retryable"
+    assert result["errors"][0]["details"]["repair_applied"] is True
+    async with original_factory() as session:
+        run = await session.get(QueryRun, run_id)
+    assert run is not None
+    assert run.status == "retryable"
+    assert run.execution_token is None
+    assert run.error is not None
+    assert run.error["code"] == "graph_node_error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repair_failure", ["false", "operational_error"])
+async def test_failed_heartbeat_repair_is_observable_and_stale_recoverable(
+    session_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    repair_failure: str,
+) -> None:
+    """An unapplied repair is reported and remains eligible for stale recovery."""
+    from bidscope.api import dependencies
+
+    graph_started = asyncio.Event()
+    heartbeat_zero_row = asyncio.Event()
+    release_graph = asyncio.Event()
+    original_factory = session_factory
+    zero_row_injected = False
+
+    class ZeroRowSession:
+        def __init__(self) -> None:
+            self._context = original_factory()
+            self._session: Any = None
+
+        async def __aenter__(self) -> ZeroRowSession:
+            self._session = await self._context.__aenter__()
+            return self
+
+        async def __aexit__(self, *args: Any) -> Any:
+            return await self._context.__aexit__(*args)
+
+        async def execute(self, *args: Any, **kwargs: Any) -> Any:
+            nonlocal zero_row_injected
+            statement = args[0] if args else kwargs.get("statement")
+            if (
+                not zero_row_injected
+                and graph_started.is_set()
+                and statement is not None
+                and "updated_at" in str(statement)
+                and "execution_token" in str(statement)
+            ):
+                zero_row_injected = True
+                heartbeat_zero_row.set()
+                return SimpleNamespace(rowcount=0)
+            return await self._session.execute(*args, **kwargs)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._session, name)
+
+    def zero_row_factory() -> ZeroRowSession:
+        return ZeroRowSession()
+
+    async def blocked_execute(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        graph_started.set()
+        await release_graph.wait()
+        return {"status": "completed"}
+
+    monkeypatch.setattr(dependencies, "execute", blocked_execute)
+    settings = get_settings().model_copy(update={"run_heartbeat_seconds": 0.01})
+    service = RunService(
+        session_factory=original_factory,
+        graph=object(),
+        object_store=object(),
+        settings=settings,
+    )
+    original_update_status = service._update_status
+    repair_attempted = asyncio.Event()
+
+    async def failing_update_status(*args: Any, **kwargs: Any) -> bool:
+        if len(args) >= 2 and args[1] == "retryable" and kwargs.get("expected_status") == "running":
+            repair_attempted.set()
+            if repair_failure == "false":
+                return False
+            raise sa.exc.OperationalError(
+                "UPDATE query_runs",
+                {},
+                ConnectionError("repair database connection reset"),
+            )
+        return await original_update_status(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_update_status", failing_update_status)
+    run_id, created = await service.create_run(
+        "failed heartbeat repair",
+        run_key=f"failed-heartbeat-repair-{repair_failure}",
+    )
+    assert created is True
+    service.session_factory = zero_row_factory
+    task = service.schedule_run(run_id, {"user_request": "failed heartbeat repair"})
+    await asyncio.wait_for(graph_started.wait(), timeout=1)
+    await asyncio.wait_for(heartbeat_zero_row.wait(), timeout=1)
+    await asyncio.wait_for(repair_attempted.wait(), timeout=1)
+    release_graph.set()
+
+    result = await task
+    assert result["status"] == "retryable"
+    assert result["errors"][0]["details"]["repair_applied"] is False
+    assert result["errors"][0]["details"]["recovery_path"] == "stale_run_recovery"
+
+    stale_before = datetime.now(UTC) + timedelta(seconds=1)
+    async with original_factory() as session:
+        await session.execute(
+            sa.update(QueryRun)
+            .where(QueryRun.id == run_id)
+            .values(updated_at=datetime(2020, 1, 1, tzinfo=UTC))
+        )
+        await session.commit()
+    assert await mark_stale_runs_retryable(
+        session_factory=original_factory,
+        stale_before=stale_before,
+    ) == 1
+    async with original_factory() as session:
+        run = await session.get(QueryRun, run_id)
+    assert run is not None
+    assert run.status == "retryable"
+    assert run.execution_token is None
+
+
+@pytest.mark.asyncio
+async def test_initial_heartbeat_operational_error_repairs_without_running_graph(
+    session_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An initial heartbeat database error is repaired before graph execution."""
+    from bidscope.api import dependencies
+
+    original_factory = session_factory
+    heartbeat_failed = False
+
+    class InitialHeartbeatFailureSession:
+        def __init__(self) -> None:
+            self._context = original_factory()
+            self._session: Any = None
+
+        async def __aenter__(self) -> InitialHeartbeatFailureSession:
+            self._session = await self._context.__aenter__()
+            return self
+
+        async def __aexit__(self, *args: Any) -> Any:
+            return await self._context.__aexit__(*args)
+
+        async def execute(self, *args: Any, **kwargs: Any) -> Any:
+            nonlocal heartbeat_failed
+            statement = args[0] if args else kwargs.get("statement")
+            if (
+                not heartbeat_failed
+                and statement is not None
+                and "gen_random_uuid" not in str(statement)
+                and "updated_at" in str(statement)
+                and "execution_token" in str(statement)
+            ):
+                heartbeat_failed = True
+                raise sa.exc.OperationalError(
+                    "UPDATE query_runs",
+                    {},
+                    ConnectionError("initial heartbeat connection reset"),
+                )
+            return await self._session.execute(*args, **kwargs)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._session, name)
+
+    def failing_factory() -> InitialHeartbeatFailureSession:
+        return InitialHeartbeatFailureSession()
+
+    async def graph_must_not_run(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        raise AssertionError("graph must not execute after initial heartbeat failure")
+
+    monkeypatch.setattr(dependencies, "execute", graph_must_not_run)
+    service = RunService(
+        session_factory=original_factory,
+        graph=object(),
+        object_store=object(),
+        settings=get_settings(),
+    )
+    run_id, created = await service.create_run(
+        "initial heartbeat error",
+        run_key="initial-heartbeat-error",
+    )
+    assert created is True
+    service.session_factory = failing_factory
+
+    result = await service.execute_run(run_id, {"user_request": "initial heartbeat error"})
+    assert result["status"] == "retryable"
+    assert result["errors"][0]["code"] == "graph_node_error"
+    assert result["errors"][0]["details"]["repair_applied"] is True
+
+    async with original_factory() as session:
+        run = await session.get(QueryRun, run_id)
+    assert run is not None
+    assert run.status == "retryable"
+    assert run.execution_token is None
+
+
+@pytest.mark.asyncio
 async def test_cancelled_initial_start_repairs_committed_running_claim(
     session_factory: Any,
     monkeypatch: pytest.MonkeyPatch,

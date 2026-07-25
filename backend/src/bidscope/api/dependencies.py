@@ -467,7 +467,76 @@ class RunService:
                 return {"status": "retryable"}
 
             heartbeat_failure: BaseException | None = None
+            heartbeat_repair_attempted = False
+            heartbeat_repair_task: asyncio.Task[tuple[bool, dict[str, Any]]] | None = None
             heartbeat_stop = asyncio.Event()
+
+            async def repair_ownership_loss(
+                error: BaseException,
+            ) -> tuple[bool, dict[str, Any]]:
+                """Attempt token-fenced repair and report whether it applied."""
+                nonlocal heartbeat_repair_attempted
+                if heartbeat_repair_attempted:
+                    return False, {
+                        "repair_applied": False,
+                        "repair_error": "already attempted",
+                        "recovery_path": "stale_run_recovery",
+                    }
+                heartbeat_repair_attempted = True
+                serializable_error = SerializableError(
+                    code=BidScopeErrorCode.GRAPH_NODE_ERROR,
+                    message=str(error)[:1000],
+                    details={},
+                ).model_dump(mode="json")
+                try:
+                    applied = await self._update_status(
+                        run_id,
+                        "retryable",
+                        error=serializable_error,
+                        expected_status="running",
+                        execution_token=execution_token,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as repair_error:
+                    return False, {
+                        "repair_applied": False,
+                        "repair_error": (
+                            f"{type(repair_error).__name__}: {str(repair_error)[:1000]}"
+                        ),
+                        "recovery_path": "stale_run_recovery",
+                    }
+                if applied:
+                    return True, {"repair_applied": True}
+                return False, {
+                    "repair_applied": False,
+                    "repair_error": "token-fenced status update matched no running owner",
+                    "recovery_path": "stale_run_recovery",
+                }
+
+            async def await_heartbeat_repair() -> tuple[bool, dict[str, Any]]:
+                if heartbeat_repair_task is None:
+                    return False, {
+                        "repair_applied": False,
+                        "repair_error": "repair task was not started",
+                    }
+                try:
+                    return await asyncio.shield(heartbeat_repair_task)
+                except asyncio.CancelledError:
+                    await _drain_task_preserving_cancellation(heartbeat_repair_task)
+                    raise
+
+            async def ownership_loss_result(error: BaseException) -> dict[str, Any]:
+                """Return a bounded, observable ownership-loss result."""
+                if heartbeat_repair_task is None:
+                    return {"status": "retryable"}
+                _, repair_details = await await_heartbeat_repair()
+                serializable_error = SerializableError(
+                    code=BidScopeErrorCode.GRAPH_NODE_ERROR,
+                    message=str(error)[:1000],
+                    details=repair_details,
+                ).model_dump(mode="json")
+                return {"status": "retryable", "errors": [serializable_error]}
 
             async def ensure_active(session: AsyncSession | None = None) -> None:
                 """Heartbeat this worker only while the run remains running."""
@@ -502,7 +571,7 @@ class RunService:
                     raise RunOwnershipLostError(f"run ownership lost: {run_id}")
 
             async def heartbeat() -> None:
-                nonlocal heartbeat_failure
+                nonlocal heartbeat_failure, heartbeat_repair_task
                 try:
                     while not heartbeat_stop.is_set():
                         with suppress(TimeoutError):
@@ -514,8 +583,18 @@ class RunService:
                             return
                         try:
                             await ensure_active()
+                        except asyncio.CancelledError:
+                            raise
                         except BaseException as error:
                             heartbeat_failure = error
+                            heartbeat_repair_task = asyncio.create_task(
+                                repair_ownership_loss(error)
+                            )
+                            try:
+                                await asyncio.shield(heartbeat_repair_task)
+                            except asyncio.CancelledError:
+                                await _drain_task_preserving_cancellation(heartbeat_repair_task)
+                                raise
                             return
                 except asyncio.CancelledError:
                     raise
@@ -524,22 +603,28 @@ class RunService:
             try:
                 try:
                     await ensure_active()
-                except RunOwnershipLostError:
-                    return {"status": "retryable"}
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as error:
+                    heartbeat_failure = error
+                    heartbeat_repair_task = asyncio.create_task(
+                        repair_ownership_loss(error)
+                    )
+                    return await ownership_loss_result(error)
                 heartbeat_task = asyncio.create_task(heartbeat())
                 fail_node = self.fail_next_node
                 if fail_node is not None:
                     self.fail_next_node = None
-                    error = SerializableError(
+                    injected_error = SerializableError(
                         code=BidScopeErrorCode.GRAPH_NODE_ERROR,
                         message=f"Test-only injected failure for node {fail_node!r}",
                         details={"node": fail_node},
                     ).model_dump(mode="json")
-                    result = {"status": "retryable", "errors": [error]}
+                    result = {"status": "retryable", "errors": [injected_error]}
                     if not await self._update_status(
                         run_id,
                         "retryable",
-                        error=error,
+                        error=injected_error,
                         expected_status="running",
                         execution_token=execution_token,
                     ):
@@ -559,8 +644,8 @@ class RunService:
                         ensure_active=ensure_active,
                         execution_token=execution_token,
                     )
-                except RunOwnershipLostError:
-                    return {"status": "retryable"}
+                except RunOwnershipLostError as error:
+                    return await ownership_loss_result(error)
                 except EventReconciliationError as error:
                     serializable_error = SerializableError(
                         code=BidScopeErrorCode.GRAPH_NODE_ERROR,
@@ -595,8 +680,8 @@ class RunService:
                 if status:
                     try:
                         await ensure_active()
-                    except RunOwnershipLostError:
-                        return {"status": "retryable"}
+                    except RunOwnershipLostError as error:
+                        return await ownership_loss_result(error)
                     result_error = None
                     errors = result.get("errors")
                     if errors:
