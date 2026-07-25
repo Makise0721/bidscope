@@ -1320,3 +1320,69 @@ async def test_terminal_retry_checkpoint_error_cancellation_repairs_claim(
     }
     second = await service.retry(run_id)
     assert second["status"] == "retryable"
+
+
+async def test_executor_rejects_tokenless_call_on_retryable_cleared_token_run(
+    session_factory,
+) -> None:
+    """A stale retryable row with cleared token rejects tokenless execution."""
+    from bidscope.graph.executor import RunOwnershipLostError, create_run, execute
+
+    run_id, created = await create_run("tokenless retryable", session_factory=session_factory)
+    assert created is True
+    async with session_factory() as session:
+        run = await session.get(QueryRun, run_id)
+        assert run is not None
+        run.status = "retryable"
+        run.execution_token = None
+        await session.commit()
+
+    class Graph:
+        async def aget_state(self, config: Any) -> Any:
+            del config
+            return SimpleNamespace(values={}, next=("node",))
+
+        async def astream(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("tokenless call must fail before graph execution")
+            yield {}
+
+    with pytest.raises(RunOwnershipLostError):
+        await execute(
+            Graph(),
+            run_id,
+            {"user_request": "tokenless retryable"},
+            session_factory=session_factory,
+        )
+
+
+async def test_append_events_rejects_tokenless_call_on_retryable_cleared_token_run(
+    session_factory,
+) -> None:
+    """A stale retryable row with cleared token rejects tokenless event append."""
+    from bidscope.graph.executor import RunOwnershipLostError, _append_events, create_run
+
+    run_id, created = await create_run(
+        "tokenless append retryable", session_factory=session_factory
+    )
+    assert created is True
+    async with session_factory() as session:
+        run = await session.get(QueryRun, run_id)
+        assert run is not None
+        run.status = "retryable"
+        run.execution_token = None
+        await session.commit()
+
+    with pytest.raises(RunOwnershipLostError):
+        await _append_events(
+            run_id,
+            [
+                {
+                    "timestamp": "2026-07-18T09:00:00+00:00",
+                    "node": "stale",
+                    "event": "must_not_persist",
+                    "status": "ok",
+                }
+            ],
+            0,
+            session_factory,
+        )

@@ -431,7 +431,9 @@ async def _assert_execution_token(
         raise RunOwnershipLostError(f"run ownership lost: {run_id}")
     current_token, current_status = ownership
     if execution_token is None:
-        active = current_token is None
+        active = (
+            current_token is None and current_status not in ("running", "retryable")
+        )
     else:
         active = current_token == execution_token and current_status == "running"
     if not active:
@@ -564,11 +566,22 @@ async def _append_events(
     if start >= len(events):
         return
     async with session_factory() as session:
-        current_token = await session.scalar(
-            sa.select(QueryRun.execution_token).where(QueryRun.id == str(run_id))
-        )
+        ownership = (
+            await session.execute(
+                sa.select(QueryRun.execution_token, QueryRun.status).where(
+                    QueryRun.id == str(run_id)
+                )
+            )
+        ).one_or_none()
+        if ownership is None:
+            await session.rollback()
+            raise RunOwnershipLostError(f"run ownership lost: {run_id}")
+        current_token, current_status = ownership
         if execution_token is None:
-            active = current_token is None
+            active = current_token is None and current_status not in (
+                "running",
+                "retryable",
+            )
         else:
             ownership = await session.execute(
                 sa.update(QueryRun)
