@@ -161,11 +161,75 @@ def build_scheduler(settings: Settings | None = None) -> Any:
     return scheduler
 
 
-def _build_subscription_service(session_factory: Any) -> Any:
-    """Build the subscription service without creating an import cycle."""
+def _build_subscription_service(
+    session_factory: Any,
+    run_service: Any,
+) -> Any:
+    """Build the subscription service with a real run service + report gate.
+
+    The scheduler runs in its own process and cannot share ``app.state``; the
+    caller (``run_scheduler_tick``) builds the process-local :class:`RunService`
+    and the matching :class:`ReportPersistence` gate and passes them here.
+    """
+    from bidscope.delivery.reports import ReportPersistence
     from bidscope.subscriptions.service import SubscriptionService
 
-    return SubscriptionService(session_factory=session_factory)
+    report_persistence = ReportPersistence(
+        session_factory, run_service.object_store,
+    )
+    return SubscriptionService(
+        session_factory=session_factory,
+        run_service=run_service,
+        report_persistence=report_persistence,
+    )
+
+
+def _to_sync_dsn(async_url: str) -> str:
+    """Convert an ``asyncpg`` DSN to a synchronous ``psycopg`` (v3) DSN."""
+    return async_url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
+
+
+async def _run_due_subscriptions(
+    session_factory: Any,
+    due: list[Subscription],
+    run_service: Any,
+) -> dict[str, int]:
+    """Drive each due subscription once, returning the tick counters.
+
+    Extracted from :func:`run_scheduler_tick` so the per-subscription loop and
+    its error accounting stay unit-testable independently of the process-local
+    graph/checkpointer assembly. ``run_service`` is the process-local
+    :class:`~bidscope.api.dependencies.RunService`; the matching
+    :class:`~bidscope.subscriptions.service.SubscriptionService` is built from
+    it on each tick.
+    """
+    service = _build_subscription_service(session_factory, run_service)
+    counters = {"due": len(due), "ran": 0, "skipped": 0, "failed": 0}
+    for subscription in due:
+        scheduled_at = _stored_next_run(subscription)
+        if scheduled_at is None:
+            counters["failed"] += 1
+            continue
+        try:
+            outcome = await service.run_subscription(
+                subscription.id,
+                scheduled_at=scheduled_at,
+                advance_schedule=True,
+            )
+        except Exception:
+            counters["failed"] += 1
+            continue
+
+        if outcome.get("failed"):
+            counters["failed"] += 1
+            continue
+        if outcome.get("skipped"):
+            # The lock owner advances this occurrence atomically in its run.
+            # A skipped worker must not update the schedule.
+            counters["skipped"] += 1
+            continue
+        counters["ran"] += 1
+    return counters
 
 
 async def run_scheduler_tick(
@@ -173,40 +237,47 @@ async def run_scheduler_tick(
     *,
     now: datetime | None = None,
 ) -> dict[str, int]:
-    """Run every due subscription once and return tick counters."""
+    """Run every due subscription once and return tick counters.
+
+    The scheduler is a separate process from the API, so it builds its own
+    durable :class:`~langgraph.checkpoint.postgres.aio.AsyncPostgresSaver`,
+    compiles the real demo graph, and assembles a process-local
+    :class:`~bidscope.api.dependencies.RunService` for the subscription bridge.
+    """
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    from sqlalchemy import orm
+
+    from bidscope.api.dependencies import _build_run_service_components
+    from bidscope.clock import SystemClock
+    from bidscope.delivery.objects import LocalObjectStore
+    from bidscope.graph.executor import _to_plain_dsn
+
     resolved = settings or get_settings()
     reference = _as_utc(now or datetime.now(UTC))
     engine, session_factory = create_engine_and_session(resolved)
-    counters = {"due": 0, "ran": 0, "skipped": 0, "failed": 0}
     try:
         due = await list_due_subscriptions(session_factory, reference)
-        counters["due"] = len(due)
-        service = _build_subscription_service(session_factory)
-        for subscription in due:
-            scheduled_at = _stored_next_run(subscription)
-            if scheduled_at is None:
-                counters["failed"] += 1
-                continue
-            try:
-                outcome = await service.run_subscription(
-                    subscription.id,
-                    scheduled_at=scheduled_at,
-                    advance_schedule=True,
-                )
-            except Exception:
-                counters["failed"] += 1
-                continue
+        if not due:
+            return {"due": 0, "ran": 0, "skipped": 0, "failed": 0}
 
-            if outcome.get("failed"):
-                counters["failed"] += 1
-                continue
-            if outcome.get("skipped"):
-                # The lock owner advances this occurrence atomically in its run.
-                # A skipped worker must not attempt any schedule update.
-                counters["skipped"] += 1
-                continue
-            counters["ran"] += 1
-        return counters
+        # Process-local graph + run service over a dedicated checkpointer.
+        sync_engine = sa.create_engine(_to_sync_dsn(resolved.database_url))
+        sync_session_factory = orm.sessionmaker(bind=sync_engine)
+        object_store = LocalObjectStore(root=resolved.object_store_root)
+        dsn = _to_plain_dsn(resolved.checkpoint_database_url)
+        try:
+            async with AsyncPostgresSaver.from_conn_string(dsn) as checkpointer:
+                run_service = _build_run_service_components(
+                    resolved,
+                    session_factory,
+                    sync_session_factory,
+                    object_store,
+                    SystemClock(),
+                    checkpointer,
+                )
+                return await _run_due_subscriptions(session_factory, due, run_service)
+        finally:
+            sync_engine.dispose()
     finally:
         await engine.dispose()
 

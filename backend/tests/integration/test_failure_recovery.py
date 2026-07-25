@@ -342,12 +342,27 @@ async def test_three_consecutive_failures_pause_subscription(
     subscription to ``paused`` once the count reaches three, so a persistently
     failing subscription stops consuming workers.
     """
+    import uuid as _uuid
+
     from bidscope.subscriptions.service import SubscriptionService
 
     service = SubscriptionService(session_factory)
-    sub = await service.create_subscription(
-        intent={"regions": ["四川"]}, cron_expression="0 9 * * 1",
+    # Seed the subscription row directly: this test exercises ``_record_failure``
+    # in isolation and does not need the create-from-run contract.
+    sub = Subscription(
+        id=str(_uuid.uuid4()),
+        cron_expression="0 9 * * 1",
+        timezone="Asia/Shanghai",
+        normalized_intent={
+            "regions": ["四川"],
+            "__consecutive_failures": 0,
+        },
+        status="active",
+        trigger_key=f"trigger-{_uuid.uuid4()}",
     )
+    async with session_factory() as session:
+        session.add(sub)
+        await session.commit()
 
     for _ in range(3):
         async with session_factory() as session:

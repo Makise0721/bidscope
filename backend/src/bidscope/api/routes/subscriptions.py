@@ -1,9 +1,11 @@
 """Subscription API routes for the BidScope API.
 
 Exposes the subscription lifecycle: list, create, pause, and resume. Creation
-requires an explicit, confirmed intent (a recurring subscription is never
-auto-created). The scheduler process role (``uv run bidscope scheduler``) is
-wired separately in the CLI module.
+is *derived*: a caller posts a completed, confirmed run id and the service
+materializes a subscription from that run's normalized search intent. The
+cron expression and timezone come from the run's ``schedule`` and are never
+overridden by the request body. The scheduler process role
+(``uv run bidscope scheduler``) is wired separately in the CLI module.
 """
 
 from __future__ import annotations
@@ -16,8 +18,13 @@ from pydantic import BaseModel
 
 from bidscope.api.auth import require_admin_token
 from bidscope.api.dependencies import RunService
+from bidscope.delivery.reports import ReportPersistence
 from bidscope.persistence.models import Subscription
-from bidscope.subscriptions.service import SubscriptionService
+from bidscope.subscriptions.service import (
+    SubscriptionCreateError,
+    SubscriptionIntentError,
+    SubscriptionService,
+)
 
 router = APIRouter(
     prefix="/api/subscriptions",
@@ -27,15 +34,25 @@ router = APIRouter(
 
 
 def _subscription_service(request: Request) -> SubscriptionService:
-    """Build a :class:`SubscriptionService` from the app's session factory."""
+    """Build a :class:`SubscriptionService` over the shared run service.
+
+    The service injects the API's :class:`RunService` (for real graph execution
+    on each tick) and a :class:`ReportPersistence` gate (so the API and the
+    scheduler share the same online-report truth).
+    """
     run_service: RunService = request.app.state.run_service
-    return SubscriptionService(session_factory=run_service.session_factory)
+    report_persistence = ReportPersistence(
+        run_service.session_factory, run_service.object_store,
+    )
+    return SubscriptionService(
+        session_factory=run_service.session_factory,
+        run_service=run_service,
+        report_persistence=report_persistence,
+    )
 
 
 class CreateSubscriptionBody(BaseModel):
-    intent: dict[str, Any]
-    cron_expression: str = "0 9 * * 1"
-    timezone: str = "Asia/Shanghai"
+    run_id: str
 
 
 @router.get("")
@@ -70,12 +87,13 @@ async def create_subscription(
     body: CreateSubscriptionBody,
     service: SubscriptionService = Depends(_subscription_service),
 ) -> dict[str, Any]:
-    """Create a confirmed, active subscription."""
-    sub = await service.create_subscription(
-        intent=body.intent,
-        cron_expression=body.cron_expression,
-        timezone=body.timezone,
-    )
+    """Create an active subscription from a completed, confirmed run."""
+    try:
+        sub = await service.create_from_run(body.run_id)
+    except SubscriptionCreateError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except SubscriptionIntentError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     return {"id": sub.id, "status": sub.status, "cron_expression": sub.cron_expression}
 
 

@@ -3,8 +3,9 @@
 A :class:`~bidscope.persistence.models.Subscription` is a confirmed, stored
 schedule. :class:`SubscriptionService` owns the run lifecycle:
 
-* :meth:`create_subscription` persists an active subscription and computes its
-  next run time from the cron expression.
+* :meth:`create_from_run` materializes an active subscription from a
+  completed confirmed run and computes its next run time from the cron
+  expression.
 * :meth:`run_subscription` acquires a PostgreSQL advisory lock (so two workers
   on the same subscription/time bucket run exactly once), retrieves notices for
   the subscription's intent, diffs them against the subscription's seen items,
@@ -24,7 +25,7 @@ import dataclasses
 import re
 from collections.abc import Awaitable
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, Protocol, cast
 from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
@@ -36,15 +37,22 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 
-from bidscope.graph.executor import create_run, execute
+from bidscope.delivery.reports import PersistedReport, ReportPersistence
+from bidscope.domain.intents import SearchIntent
 from bidscope.persistence.models import (
     InboxEvent,
+    NoticeEvidence,
     NoticeVersion,
+    QueryRun,
     SourceNotice,
     Subscription,
     SubscriptionSeenItem,
 )
-from bidscope.retrieval.deduplication import NoticeView
+from bidscope.retrieval.deduplication import (
+    MaterialChange,
+    NoticeView,
+    detect_material_changes,
+)
 from bidscope.subscriptions.scheduler import (
     acquire_advisory_lock,
     release_advisory_lock,
@@ -54,6 +62,10 @@ from bidscope.subscriptions.scheduler import (
 #: they never collide with operator-visible intent fields).
 KEY_NEXT_RUN_AT = "__next_run_at"
 KEY_CONSECUTIVE_FAILURES = "__consecutive_failures"
+#: Run id (of a completed, confirmed run) whose ``search_intent`` seeded this
+#: subscription; also the source of the ``__user_request`` replayed each tick.
+KEY_SOURCE_RUN_ID = "__source_run_id"
+KEY_USER_REQUEST = "__user_request"
 
 
 async def _drain_task[T](task: asyncio.Future[T]) -> T:
@@ -64,6 +76,28 @@ async def _drain_task[T](task: asyncio.Future[T]) -> T:
         except asyncio.CancelledError:
             if task.done():
                 return task.result()
+
+
+class RunServiceLike(Protocol):
+    """The narrow slice of :class:`~bidscope.api.dependencies.RunService` the
+    subscription bridge depends on.
+
+    Declared as a Protocol so the API's :class:`RunService` satisfies it
+    structurally without an import cycle (``api.dependencies`` imports the
+    graph builder; this module stays free of that dependency).
+    """
+
+    session_factory: async_sessionmaker[AsyncSession]
+
+    async def create_run(
+        self, user_request: str, *, run_key: str | None = None,
+    ) -> tuple[str, bool]: ...
+
+    async def execute_run(
+        self, run_id: str, input: Any, *, force_fresh: bool = False,
+    ) -> dict[str, Any]: ...
+
+    async def confirm(self, run_id: str) -> dict[str, Any]: ...
 
 
 async def _await_cleanup_safely[T](coroutine: Awaitable[T]) -> T:
@@ -326,6 +360,28 @@ class _NoticesMatch:
     view: NoticeView
 
 
+class SubscriptionCreateError(LookupError):
+    """The source run for a subscription does not exist."""
+
+    def __init__(self, run_id: str) -> None:
+        super().__init__(f"run not found: {run_id}")
+
+
+class SubscriptionIntentError(ValueError):
+    """The source run cannot seed a subscription (wrong status or no schedule)."""
+
+
+def _scheduled_run_key(subscription_id: str, scheduled_at: datetime) -> str:
+    """Deterministic, idempotent run key for one (subscription, minute) bucket.
+
+    Two concurrent scheduler ticks for the same subscription + scheduled
+    minute resolve to the same key, so :func:`create_run` deduplicates them
+    into a single ``QueryRun`` row.
+    """
+    bucket = scheduled_at.replace(second=0, microsecond=0).isoformat()
+    return f"subscription:{subscription_id}:{bucket}"
+
+
 class SubscriptionService:
     """Run-lifecycle operations for incremental tender subscriptions."""
 
@@ -334,9 +390,20 @@ class SubscriptionService:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         fail_every_run: bool = False,
+        run_service: RunServiceLike | None = None,
+        report_persistence: ReportPersistence | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.fail_every_run = fail_every_run
+        # Injected collaborator that owns the real graph, checkpointer, and run
+        # lifecycle. The scheduler process builds it itself; the API reuses the
+        # one already wired into ``app.state``. ``None`` is permitted only for
+        # legacy adapter tests that never exercise ``_run_locked``'s execution.
+        self.run_service = run_service
+        # Injected report gate. When omitted, the service lazily builds one over
+        # a throw-away no-op object store (sufficient because
+        # ``load_online_report`` only touches the relational session).
+        self._report_persistence = report_persistence
 
     async def _open_lock_connection(self) -> AsyncConnection:
         """Open the dedicated pinned connection for one advisory-lock lifecycle."""
@@ -344,36 +411,89 @@ class SubscriptionService:
 
     # ----------------------------------------------------------- lifecycle
 
-    async def create_subscription(
-        self,
-        intent: dict[str, Any],
-        cron_expression: str,
-        timezone: str = "Asia/Shanghai",
-    ) -> Subscription:
-        """Persist an active subscription and compute its next run time."""
+    async def create_from_run(self, run_id: str) -> Subscription:
+        """Materialize a confirmed subscription from a completed confirmed run.
+
+        Contract:
+
+        * The run must exist (404 otherwise, surfaced as :class:`LookupError`).
+        * The run must be ``completed`` and have an intent carrying a non-empty
+          ``schedule`` (409 otherwise, surfaced as :class:`ValueError`).
+        * The persisted ``normalized_intent`` is the run's normalized
+          :class:`SearchIntent` (re-validated from its stored JSON), plus
+          internal keys recording the source run id, user request, and the
+          computed next run time. ``cron_expression`` / ``timezone`` come from
+          the intent's schedule and are never overridden by the API caller.
+        """
         import uuid
 
-        subscription_id = str(uuid.uuid4())
-        next_run = _compute_next_run(cron_expression, timezone)
-        # Persist computed state under internal keys; keep the visible intent.
-        stored_intent = {
-            **intent,
-            KEY_NEXT_RUN_AT: next_run.isoformat(),
-            KEY_CONSECUTIVE_FAILURES: 0,
-        }
-        sub = Subscription(
-            id=subscription_id,
-            cron_expression=cron_expression,
-            timezone=timezone,
-            normalized_intent=stored_intent,
-            status="active",
-            trigger_key=str(uuid.uuid4()),
-        )
+        if self.run_service is None:
+            raise RuntimeError(
+                "create_from_run requires an injected run_service to confirm "
+                "the source run, but none was supplied",
+            )
+
         async with self.session_factory() as session:
-            session.add(sub)
+            run = await session.get(QueryRun, run_id)
+            if run is None:
+                raise SubscriptionCreateError(run_id)
+            if run.status != "completed":
+                raise SubscriptionIntentError(
+                    f"run is not completed (status={run.status!r})",
+                )
+            intent = self._resolve_intent(run)
+            if intent.schedule is None:
+                raise SubscriptionIntentError(
+                    "run's search_intent carries no schedule; a subscription "
+                    "requires a recurring schedule",
+                )
+            cron_expression = intent.schedule.cron_expression
+            timezone = intent.schedule.timezone
+            user_request = run.user_request
+            next_run = _compute_next_run(cron_expression, timezone)
+            stored_intent: dict[str, Any] = dict(
+                intent.model_dump(mode="json"),
+            )
+            stored_intent[KEY_SOURCE_RUN_ID] = run_id
+            stored_intent[KEY_USER_REQUEST] = user_request
+            stored_intent[KEY_NEXT_RUN_AT] = next_run.isoformat()
+            stored_intent[KEY_CONSECUTIVE_FAILURES] = 0
+            subscription = Subscription(
+                id=str(uuid.uuid4()),
+                cron_expression=cron_expression,
+                timezone=timezone,
+                normalized_intent=stored_intent,
+                status="active",
+                trigger_key=str(uuid.uuid4()),
+            )
+            session.add(subscription)
             await session.commit()
-            await session.refresh(sub)
-        return sub
+            await session.refresh(subscription)
+        return subscription
+
+    @staticmethod
+    def _resolve_intent(run: QueryRun) -> SearchIntent:
+        """Re-validate the run's stored ``search_intent`` into a model.
+
+        Stored intents come from the graph's normalized ``SearchIntent`` (see
+        ``RunService._update_status``), so the round-trip is lossless; this
+        guards against partial writes and surfaces intent corruption loudly
+        (as a 409-shaped :class:`SubscriptionIntentError`, not a 500-shaped
+        pydantic ``ValidationError``).
+        """
+        from pydantic import ValidationError
+
+        stored = run.search_intent or {}
+        if not isinstance(stored, dict) or not stored:
+            raise SubscriptionIntentError(
+                "run's search_intent is empty; nothing to subscribe to",
+            )
+        try:
+            return SearchIntent.model_validate(stored)
+        except ValidationError as error:
+            raise SubscriptionIntentError(
+                f"run's search_intent is corrupted: {error}",
+            ) from error
 
     async def run_subscription(
         self,
@@ -470,7 +590,33 @@ class SubscriptionService:
         *,
         advance_schedule: bool = False,
     ) -> dict[str, Any]:
-        """Execute the run while holding the advisory lock."""
+        """Execute one subscription occurrence while holding the advisory lock.
+
+        Sequence:
+
+        1. Create (or load) the scheduled ``QueryRun`` keyed by
+           :func:`_scheduled_run_key` so concurrent workers contend on a single
+           row, then drive the real graph via the injected run service and
+           auto-resume any ``awaiting_confirmation`` interrupt.
+        2. Gate on the persisted online report; a missing report is a failure.
+        3. Diff the report's notice views against the seen set, emitting
+           ``new_notice`` / ``material_change`` events, and advance the seen
+           cursor only after the run commits.
+
+        Crash-recovery contract for stuck scheduled runs: this method only
+        drives *freshly created* runs (``created=True``). If a prior worker
+        crashed after creating a ``pending``/``retryable``/``awaiting_confirmation``
+        run, the next tick sees ``created=False`` and proceeds to the report
+        gate, which finds no report and records a failure until the run is
+        repaired. Stuck scheduled runs are recovered by the standard
+        stale-run-recovery path (``mark_stale_runs_retryable`` at startup →
+        ``RunService.retry`` for ``retryable`` / the API confirm path for
+        ``awaiting_confirmation``), not by this tick. Dispatching to those
+        state-specific recovery legs here was considered and deferred: it
+        would duplicate the dedicated recovery machinery and risk changing
+        external side effects (e.g. auto-confirming an ``awaiting_confirmation``
+        run on every tick).
+        """
         if self.fail_every_run:
             await self._record_failure(session, sub)
             await session.commit()
@@ -482,62 +628,193 @@ class SubscriptionService:
                 "skipped": False,
             }
 
-        # 1. Create a query run (reuses the executor's run lifecycle so a
-        #    ``QueryRun`` row exists for the dual-worker assertion).
-        run_id, created = await create_run(
-            f"subscription {sub.id}", session_factory=self.session_factory,
-        )
-        if created:
-            await execute(
-                _dummy_graph(), run_id, {"user_request": f"subscription {sub.id}"},
-                session_factory=self.session_factory,
+        if self.run_service is None:
+            raise RuntimeError(
+                "_run_locked requires an injected run_service; the scheduler "
+                "and API must construct SubscriptionService with one",
             )
 
-        # 2. Retrieve notices matching the subscription's intent.
-        notices = await self._retrieve_notices(session, sub)
+        intent = sub.normalized_intent or {}
+        user_request = intent.get(KEY_USER_REQUEST)
+        if not isinstance(user_request, str) or not user_request:
+            # Corrupt state: the subscription was never (or no longer is)
+            # seeded from a confirmed run. Treat this as a failure so the
+            # occurrence is retried after the operator repairs the data.
+            await self._record_failure(session, sub)
+            await session.commit()
+            return {
+                "new_notices": 0,
+                "material_changes": 0,
+                "unchanged": 0,
+                "failed": True,
+                "skipped": False,
+            }
 
-        # 3. Diff against the seen set and emit inbox events.
+        # 1. Idempotent scheduled run + real graph execution.
+        run_id, created = await self.run_service.create_run(
+            user_request, run_key=_scheduled_run_key(sub.id, scheduled_at),
+        )
+        if created:
+            first = await self.run_service.execute_run(
+                run_id, {"user_request": user_request},
+            )
+            # A scheduled query always routes through ``confirm_intent``; the
+            # subscription bridge auto-approves the interrupt so the run
+            # proceeds to retrieval and delivery.
+            if first.get("status") == "awaiting_confirmation":
+                first = await self.run_service.confirm(run_id)
+            status = first.get("status")
+            if status not in ("completed",):
+                # ``retryable`` / ``failed`` are failures: do not advance the
+                # cursor or count this as a success.
+                await self._record_failure(session, sub)
+                await session.commit()
+                return {
+                    "new_notices": 0,
+                    "material_changes": 0,
+                    "unchanged": 0,
+                    "failed": True,
+                    "skipped": False,
+                }
+
+        # 2. Report gate: the persisted online report is the durable proof the
+        #    run actually delivered. A missing report is a failure and never
+        #    advances the seen cursor.
+        persisted = await self._load_persisted_report(run_id)
+        if persisted is None:
+            await self._record_failure(session, sub)
+            await session.commit()
+            return {
+                "new_notices": 0,
+                "material_changes": 0,
+                "unchanged": 0,
+                "failed": True,
+                "skipped": False,
+            }
+
+        # 3. Build the notice views the report references and diff.
+        notices = await self._notice_views_from_report(session, persisted)
+
         stats = await self._diff_and_emit(session, sub, notices)
 
-        # 4. Advance the seen-item cursor only now (after the run commits).
+        # 4. Advance the seen-item cursor only now (after the report commits).
         await self._advance_seen(session, sub, notices)
 
         # 5. Reset the failure counter on success.
         sub.last_successful_run_at = scheduled_at
-        intent = dict(sub.normalized_intent or {})
-        intent[KEY_CONSECUTIVE_FAILURES] = 0
+        new_intent = dict(sub.normalized_intent or {})
+        new_intent[KEY_CONSECUTIVE_FAILURES] = 0
         if advance_schedule:
-            intent[KEY_NEXT_RUN_AT] = _compute_next_run(
+            new_intent[KEY_NEXT_RUN_AT] = _compute_next_run(
                 sub.cron_expression,
                 sub.timezone,
                 after=scheduled_at,
             ).isoformat()
-        sub.normalized_intent = intent
+        sub.normalized_intent = new_intent
         await session.commit()
         return stats
 
-    async def _retrieve_notices(
-        self, session: AsyncSession, sub: Subscription,
-    ) -> list[_NoticesMatch]:
-        """Retrieve the latest version of each matching notice.
+    async def _load_persisted_report(self, run_id: str) -> PersistedReport | None:
+        """Load the durable online report for ``run_id`` via the report bridge.
 
-        When multiple demo batches are imported, a notice may carry several
-        versions; the subscription always diffs against the most recent one.
+        Exposed as an overridable method so adapter tests can stub the gate
+        without reaching into :class:`ReportPersistence` directly.
         """
-        intent = {k: v for k, v in (sub.normalized_intent or {}).items() if not k.startswith("__")}
-        regions = intent.get("regions") or []
-        # Latest version per source_notice_id (greatest created_at).
+        persistence = self._report_persistence
+        if persistence is None:
+            persistence = ReportPersistence(self.session_factory, _NoObjectStore())
+        return await persistence.load_online_report(run_id)
+
+    async def _notice_views_from_report(
+        self,
+        session: AsyncSession,
+        persisted: PersistedReport,
+    ) -> list[_NoticesMatch]:
+        """Materialize the latest :class:`NoticeView` per notice the report cites.
+
+        Each report item references a notice version id; the diff must compare
+        the *latest* version of that source notice (so a re-imported batch is
+        reflected), not the version the original report cited. Evidence texts
+        are attached to support the material-change comparator.
+        """
+        notice_version_ids = [
+            item.notice_id for item in persisted.report.items if item.notice_id
+        ]
+        if not notice_version_ids:
+            return []
+
+        # Map each cited version to its source notice so we can resolve the
+        # latest version per source notice.
+        cited_rows = (
+            await session.execute(
+                sa.select(NoticeVersion.id, NoticeVersion.source_notice_id).where(
+                    NoticeVersion.id.in_(notice_version_ids)
+                )
+            )
+        ).all()
+        source_notice_ids = {str(row.source_notice_id) for row in cited_rows}
+        if not source_notice_ids:
+            return []
+
+        latest_versions = await self._latest_versions(session, source_notice_ids)
+        views: list[_NoticesMatch] = []
+        for source_notice_id, version in latest_versions.items():
+            source = await session.get(SourceNotice, source_notice_id)
+            if source is None:
+                continue
+            evidence_texts = tuple(
+                (
+                    await session.execute(
+                        sa.select(NoticeEvidence.text)
+                        .where(NoticeEvidence.notice_version_id == version.id)
+                        .order_by(NoticeEvidence.id)
+                    )
+                ).scalars()
+            )
+            views.append(_NoticesMatch(
+                source_id=str(source.id),
+                view=self._build_notice_view(source, version, evidence_texts),
+            ))
+        return views
+
+    @staticmethod
+    def _build_notice_view(
+        source: SourceNotice,
+        version: NoticeVersion,
+        evidence_texts: tuple[str, ...],
+    ) -> NoticeView:
+        """Construct the comparison view for one notice + its latest version."""
+        return NoticeView(
+            source=source.source,
+            external_id=source.external_id,
+            canonical_url=source.source_url,
+            project_number=source.project_number,
+            content_hash=version.content_hash,
+            title=version.title,
+            purchaser=version.purchaser,
+            region=version.region,
+            budget_minor_units=version.budget_minor_units,
+            budget_currency=version.budget_currency,
+            deadline=version.deadline,
+            claim_supporting_texts=evidence_texts,
+        )
+
+    @staticmethod
+    async def _latest_versions(
+        session: AsyncSession, source_notice_ids: set[str],
+    ) -> dict[str, NoticeVersion]:
+        """Return the latest :class:`NoticeVersion` per source notice id."""
         latest = (
             sa.select(
                 NoticeVersion.source_notice_id,
                 sa.func.max(NoticeVersion.created_at).label("max_created"),
             )
+            .where(NoticeVersion.source_notice_id.in_(source_notice_ids))
             .group_by(NoticeVersion.source_notice_id)
             .subquery()
         )
         statement = (
-            sa.select(NoticeVersion, SourceNotice)
-            .join(SourceNotice, SourceNotice.id == NoticeVersion.source_notice_id)
+            sa.select(NoticeVersion)
             .join(
                 latest,
                 sa.and_(
@@ -545,35 +822,9 @@ class SubscriptionService:
                     latest.c.max_created == NoticeVersion.created_at,
                 ),
             )
-            .where(SourceNotice.source == "synthetic_demo")
         )
-        if regions:
-            # Region is stored on the version (see demo adapter / importer) as a
-            # full name (e.g. "四川省"); the intent carries a short form (e.g.
-            # "四川"), so match by substring.
-            statement = statement.where(
-                sa.or_(*(NoticeVersion.region.like(f"%{r}%") for r in regions))
-            )
-        result = await session.execute(statement)
-        views: list[_NoticesMatch] = []
-        for version, source in result.all():
-            views.append(_NoticesMatch(
-                source_id=source.id,
-                view=NoticeView(
-                    source=source.source,
-                    external_id=source.external_id,
-                    canonical_url=source.source_url,
-                    project_number=source.project_number,
-                    content_hash=version.content_hash,
-                    title=version.title,
-                    purchaser=version.purchaser,
-                    region=source.region,
-                    budget_minor_units=version.budget_minor_units,
-                    budget_currency=version.budget_currency,
-                    deadline=version.deadline,
-                ),
-            ))
-        return views
+        rows = (await session.execute(statement)).scalars()
+        return {str(version.source_notice_id): version for version in rows}
 
     async def _diff_and_emit(
         self,
@@ -581,21 +832,28 @@ class SubscriptionService:
         sub: Subscription,
         notices: list[_NoticesMatch],
     ) -> dict[str, Any]:
-        """Diff notices against the seen set and emit inbox events."""
-        result = await session.execute(
-            sa.select(SubscriptionSeenItem).where(
-                SubscriptionSeenItem.subscription_id == sub.id
-            )
-        )
-        seen: dict[str, str] = {
-            item.notice_id: item.version_content_hash for item in result.scalars()
+        """Diff notice views against the seen set and emit inbox events.
+
+        A notice whose content hash differs from its previously seen version
+        is re-checked via :func:`detect_material_changes`: only material
+        fields (deadline/budget/region/purchaser/scope/cancellation/claims)
+        emit a ``material_change`` event. A formatting-only hash change counts
+        as ``unchanged`` and advances the cursor without an event.
+        """
+        # Load the previously seen views so material-change comparison has a
+        # full ``NoticeView`` for the prior version, not just the hash.
+        previous_views = await self._load_seen_views(session, sub.id)
+        seen_hashes: dict[str, str] = {
+            notice_id: view.content_hash
+            for notice_id, view in previous_views.items()
         }
 
         new_notices = 0
         material_changes = 0
         unchanged = 0
         for match in notices:
-            previous_hash = seen.get(match.source_id)
+            previous = previous_views.get(match.source_id)
+            previous_hash = seen_hashes.get(match.source_id)
             if previous_hash is None:
                 new_notices += 1
                 session.add(InboxEvent(
@@ -606,14 +864,27 @@ class SubscriptionService:
                     message=f"New notice: {match.view.title}",
                 ))
             elif previous_hash != match.view.content_hash:
-                material_changes += 1
-                session.add(InboxEvent(
-                    subscription_id=sub.id,
-                    event_type="material_change",
-                    notice_id=match.source_id,
-                    title=match.view.title,
-                    message=f"Material change in: {match.view.title}",
-                ))
+                if previous is not None:
+                    changes = detect_material_changes(previous, match.view)
+                else:
+                    changes = [MaterialChange(
+                        field="content_hash",
+                        before=previous_hash,
+                        after=match.view.content_hash,
+                    )]
+                if changes:
+                    material_changes += 1
+                    session.add(InboxEvent(
+                        subscription_id=sub.id,
+                        event_type="material_change",
+                        notice_id=match.source_id,
+                        title=match.view.title,
+                        message=f"Material change in: {match.view.title}",
+                    ))
+                else:
+                    # Formatting-only content-hash change: no event, treated as
+                    # unchanged for stats but the cursor still advances below.
+                    unchanged += 1
             else:
                 unchanged += 1
         return {
@@ -623,6 +894,55 @@ class SubscriptionService:
             "failed": False,
             "skipped": False,
         }
+
+    async def _load_seen_views(
+        self, session: AsyncSession, subscription_id: str,
+    ) -> dict[str, NoticeView]:
+        """Reconstruct the previously seen :class:`NoticeView`s for the diff.
+
+        ``SubscriptionSeenItem`` stores the content hash at the time of the
+        last successful run, not the full view. For the material-change
+        comparator we need the previously observed material fields; rather
+        than persist them (which would require a schema change), we re-load
+        the source notice / version row whose hash matches the seen item.
+        If the matching version has been deleted (e.g. by a fresh import),
+        we fall back to comparing only the hash so the cursor still advances.
+        """
+        items = (
+            await session.execute(
+                sa.select(SubscriptionSeenItem).where(
+                    SubscriptionSeenItem.subscription_id == subscription_id
+                )
+            )
+        ).scalars()
+        views: dict[str, NoticeView] = {}
+        for item in items:
+            source = await session.get(SourceNotice, item.notice_id)
+            if source is None:
+                continue
+            version = (
+                await session.execute(
+                    sa.select(NoticeVersion).where(
+                        NoticeVersion.source_notice_id == item.notice_id,
+                        NoticeVersion.content_hash == item.version_content_hash,
+                    ).order_by(NoticeVersion.created_at.desc()).limit(1)
+                )
+            ).scalar_one_or_none()
+            if version is None:
+                continue
+            evidence_texts = tuple(
+                (
+                    await session.execute(
+                        sa.select(NoticeEvidence.text)
+                        .where(NoticeEvidence.notice_version_id == version.id)
+                        .order_by(NoticeEvidence.id)
+                    )
+                ).scalars()
+            )
+            views[str(item.notice_id)] = self._build_notice_view(
+                source, version, evidence_texts,
+            )
+        return views
 
     async def _advance_seen(
         self,
@@ -662,15 +982,19 @@ class SubscriptionService:
             sub.status = "paused"
 
 
-def _dummy_graph() -> Any:
-    """A no-op graph; subscription runs persist a ``QueryRun``, not a report."""
+class _NoObjectStore:
+    """Throw-away :class:`~bidscope.delivery.objects.ObjectStore` stand-in.
 
-    class _NoOpGraph:
-        async def astream(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-            return
-            yield  # make this an async generator; never reached (no events)
+    Used only to satisfy :class:`ReportPersistence`'s constructor when no real
+    store has been injected. ``load_online_report`` never touches the store, so
+    every method raises if it is accidentally reached.
+    """
 
-        async def aget_state(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-            return None
+    def put_bytes(self, key: str, data: bytes) -> str:
+        raise RuntimeError("subscription report gate must not write objects")
 
-    return _NoOpGraph()
+    def get_bytes(self, key: str) -> bytes:
+        raise RuntimeError("subscription report gate must not read objects")
+
+    def exists(self, key: str) -> bool:
+        return False

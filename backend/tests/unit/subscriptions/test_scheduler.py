@@ -89,22 +89,18 @@ async def test_list_due_subscriptions_filters_future_and_invalid_rows() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_scheduler_tick_requests_atomic_schedule_advance(
+async def test_run_due_subscriptions_requests_atomic_schedule_advance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    now = datetime(2026, 7, 20, 1, 0, tzinfo=UTC)
+    """The per-tick loop drives each due subscription with ``advance_schedule``.
+
+    ``run_scheduler_tick`` assembles a process-local run service and then
+    delegates here; the loop is the unit-testable boundary for the success /
+    skip / failure accounting.
+    """
     subscription = _subscription("sub-1", "2026-07-20T08:00:00+08:00")
-    monkeypatch.setattr(
-        scheduler, "list_due_subscriptions", AsyncMock(return_value=[subscription]),
-    )
-    engine = Mock()
-    engine.dispose = AsyncMock()
     session_factory = _SessionFactory([])
-    monkeypatch.setattr(
-        scheduler,
-        "create_engine_and_session",
-        Mock(return_value=(engine, session_factory)),
-    )
+    run_service = SimpleNamespace()
     service = SimpleNamespace(
         run_subscription=AsyncMock(return_value={"failed": False, "skipped": False}),
     )
@@ -112,7 +108,9 @@ async def test_run_scheduler_tick_requests_atomic_schedule_advance(
     advance = AsyncMock()
     monkeypatch.setattr(scheduler, "advance_subscription_next_run", advance)
 
-    result = await scheduler.run_scheduler_tick(Settings(), now=now)
+    result = await scheduler._run_due_subscriptions(
+        session_factory, [subscription], run_service,
+    )
 
     assert result == {"due": 1, "ran": 1, "skipped": 0, "failed": 0}
     service.run_subscription.assert_awaited_once_with(
@@ -121,36 +119,26 @@ async def test_run_scheduler_tick_requests_atomic_schedule_advance(
         advance_schedule=True,
     )
     advance.assert_not_awaited()
-    engine.dispose.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_run_scheduler_tick_counts_state_malformed_after_due_list_as_failed(
+async def test_run_due_subscriptions_counts_state_malformed_after_due_list_as_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    now = datetime(2026, 7, 20, 1, 0, tzinfo=UTC)
     malformed = _subscription("malformed", "2026-07-20T08:00:00+08:00")
     valid = _subscription("valid", "2026-07-20T08:00:00+08:00")
 
-    async def list_due(_session_factory: Any, _now: datetime) -> list[Subscription]:
-        malformed.normalized_intent = cast(Any, [])
-        return [malformed, valid]
-
-    monkeypatch.setattr(scheduler, "list_due_subscriptions", list_due)
-    engine = Mock()
-    engine.dispose = AsyncMock()
+    malformed.normalized_intent = cast(Any, [])
     session_factory = _SessionFactory([])
-    monkeypatch.setattr(
-        scheduler,
-        "create_engine_and_session",
-        Mock(return_value=(engine, session_factory)),
-    )
+    run_service = SimpleNamespace()
     service = SimpleNamespace(run_subscription=AsyncMock(return_value={"failed": False}))
     monkeypatch.setattr(scheduler, "_build_subscription_service", Mock(return_value=service))
     advance = AsyncMock()
     monkeypatch.setattr(scheduler, "advance_subscription_next_run", advance)
 
-    result = await scheduler.run_scheduler_tick(Settings(), now=now)
+    result = await scheduler._run_due_subscriptions(
+        session_factory, [malformed, valid], run_service,
+    )
 
     assert result == {"due": 2, "ran": 1, "skipped": 0, "failed": 1}
     service.run_subscription.assert_awaited_once_with(
@@ -159,7 +147,6 @@ async def test_run_scheduler_tick_counts_state_malformed_after_due_list_as_faile
         advance_schedule=True,
     )
     advance.assert_not_awaited()
-    engine.dispose.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -185,24 +172,15 @@ async def test_advance_subscription_next_run_persists_next_cron_occurrence() -> 
 
 
 @pytest.mark.asyncio
-async def test_run_scheduler_tick_advances_successful_and_retains_failed_schedule(
+async def test_run_due_subscriptions_advances_successful_and_retains_failed_schedule(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    now = datetime(2026, 7, 20, 1, 0, tzinfo=UTC)
     due = [
         _subscription("success", "2026-07-20T08:00:00+08:00"),
         _subscription("failure", "2026-07-20T08:00:00+08:00"),
     ]
-    list_due = AsyncMock(return_value=due)
-    monkeypatch.setattr(scheduler, "list_due_subscriptions", list_due)
-    engine = Mock()
-    engine.dispose = AsyncMock()
     session_factory = _SessionFactory([])
-    monkeypatch.setattr(
-        scheduler,
-        "create_engine_and_session",
-        Mock(return_value=(engine, session_factory)),
-    )
+    run_service = SimpleNamespace()
     service = SimpleNamespace(
         run_subscription=AsyncMock(
             side_effect=[
@@ -215,10 +193,9 @@ async def test_run_scheduler_tick_advances_successful_and_retains_failed_schedul
     advance = AsyncMock()
     monkeypatch.setattr(scheduler, "advance_subscription_next_run", advance)
 
-    result = await scheduler.run_scheduler_tick(Settings(), now=now)
+    result = await scheduler._run_due_subscriptions(session_factory, due, run_service)
 
     assert result == {"due": 2, "ran": 1, "skipped": 0, "failed": 1}
-    list_due.assert_awaited_once_with(session_factory, now)
     service.run_subscription.assert_has_awaits([
         call(
             "success",
@@ -232,10 +209,11 @@ async def test_run_scheduler_tick_advances_successful_and_retains_failed_schedul
         ),
     ])
     advance.assert_not_awaited()
+    # A failed run's next_run_at is left untouched (the lock owner advances on
+    # success; failures retain the persisted schedule).
     assert due[1].normalized_intent[scheduler.KEY_NEXT_RUN_AT] == (
         "2026-07-20T08:00:00+08:00"
     )
-    engine.dispose.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -263,22 +241,14 @@ async def test_run_scheduler_tick_disposes_engine_when_due_listing_fails(
 
 
 @pytest.mark.asyncio
-async def test_run_scheduler_tick_disposes_engine_when_service_factory_fails(
+async def test_run_due_subscriptions_disposes_engine_when_service_factory_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    engine = Mock()
-    engine.dispose = AsyncMock()
+    """The loop surfaces a service-assembly failure to ``run_scheduler_tick``,
+    which owns engine disposal."""
+    subscription = _subscription("sub-1", "2026-07-20T08:00:00+08:00")
     session_factory = _SessionFactory([])
-    monkeypatch.setattr(
-        scheduler,
-        "create_engine_and_session",
-        Mock(return_value=(engine, session_factory)),
-    )
-    monkeypatch.setattr(
-        scheduler,
-        "list_due_subscriptions",
-        AsyncMock(return_value=[_subscription("sub-1", "2026-07-20T08:00:00+08:00")]),
-    )
+    run_service = SimpleNamespace()
     monkeypatch.setattr(
         scheduler,
         "_build_subscription_service",
@@ -286,29 +256,19 @@ async def test_run_scheduler_tick_disposes_engine_when_service_factory_fails(
     )
 
     with pytest.raises(RuntimeError, match="factory failed"):
-        await scheduler.run_scheduler_tick(Settings(), now=datetime.now(UTC))
-
-    engine.dispose.assert_awaited_once()
+        await scheduler._run_due_subscriptions(session_factory, [subscription], run_service)
 
 
 @pytest.mark.asyncio
-async def test_run_scheduler_tick_continues_after_run_exception(
+async def test_run_due_subscriptions_continues_after_run_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    now = datetime(2026, 7, 20, 1, 0, tzinfo=UTC)
     due = [
         _subscription("error", "2026-07-20T08:00:00+08:00"),
         _subscription("success", "2026-07-20T08:00:00+08:00"),
     ]
-    monkeypatch.setattr(scheduler, "list_due_subscriptions", AsyncMock(return_value=due))
-    engine = Mock()
-    engine.dispose = AsyncMock()
     session_factory = _SessionFactory([])
-    monkeypatch.setattr(
-        scheduler,
-        "create_engine_and_session",
-        Mock(return_value=(engine, session_factory)),
-    )
+    run_service = SimpleNamespace()
     service = SimpleNamespace(
         run_subscription=AsyncMock(side_effect=[RuntimeError("boom"), {"failed": False}]),
     )
@@ -316,7 +276,7 @@ async def test_run_scheduler_tick_continues_after_run_exception(
     advance = AsyncMock()
     monkeypatch.setattr(scheduler, "advance_subscription_next_run", advance)
 
-    result = await scheduler.run_scheduler_tick(Settings(), now=now)
+    result = await scheduler._run_due_subscriptions(session_factory, due, run_service)
 
     assert result == {"due": 2, "ran": 1, "skipped": 0, "failed": 1}
     assert [call.args[0] for call in service.run_subscription.await_args_list] == [
@@ -328,27 +288,18 @@ async def test_run_scheduler_tick_continues_after_run_exception(
         for invocation in service.run_subscription.await_args_list
     )
     advance.assert_not_awaited()
-    engine.dispose.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_run_scheduler_tick_counts_service_failures_without_advancing(
+async def test_run_due_subscriptions_counts_service_failures_without_advancing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    now = datetime(2026, 7, 20, 1, 0, tzinfo=UTC)
     due = [
         _subscription("service-error", "2026-07-20T08:00:00+08:00"),
         _subscription("service-failure", "2026-07-20T08:00:00+08:00"),
     ]
-    monkeypatch.setattr(scheduler, "list_due_subscriptions", AsyncMock(return_value=due))
-    engine = Mock()
-    engine.dispose = AsyncMock()
     session_factory = _SessionFactory([])
-    monkeypatch.setattr(
-        scheduler,
-        "create_engine_and_session",
-        Mock(return_value=(engine, session_factory)),
-    )
+    run_service = SimpleNamespace()
     service = SimpleNamespace(
         run_subscription=AsyncMock(
             side_effect=[
@@ -361,7 +312,7 @@ async def test_run_scheduler_tick_counts_service_failures_without_advancing(
     advance = AsyncMock()
     monkeypatch.setattr(scheduler, "advance_subscription_next_run", advance)
 
-    result = await scheduler.run_scheduler_tick(Settings(), now=now)
+    result = await scheduler._run_due_subscriptions(session_factory, due, run_service)
 
     assert result == {"due": 2, "ran": 0, "skipped": 0, "failed": 2}
     assert all(
@@ -369,25 +320,16 @@ async def test_run_scheduler_tick_counts_service_failures_without_advancing(
         for invocation in service.run_subscription.await_args_list
     )
     advance.assert_not_awaited()
-    engine.dispose.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_run_scheduler_tick_leaves_lock_skips_for_lock_owner_to_advance(
+async def test_run_due_subscriptions_leaves_lock_skips_for_lock_owner_to_advance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A skipped worker never overwrites the lock owner's schedule update."""
-    now = datetime(2026, 7, 20, 1, 0, tzinfo=UTC)
     due = [_subscription("skipped", "2026-07-20T08:00:00+08:00")]
-    monkeypatch.setattr(scheduler, "list_due_subscriptions", AsyncMock(return_value=due))
-    engine = Mock()
-    engine.dispose = AsyncMock()
     session_factory = _SessionFactory([])
-    monkeypatch.setattr(
-        scheduler,
-        "create_engine_and_session",
-        Mock(return_value=(engine, session_factory)),
-    )
+    run_service = SimpleNamespace()
     service = SimpleNamespace(
         run_subscription=AsyncMock(return_value={"failed": False, "skipped": True}),
     )
@@ -395,7 +337,7 @@ async def test_run_scheduler_tick_leaves_lock_skips_for_lock_owner_to_advance(
     advance = AsyncMock()
     monkeypatch.setattr(scheduler, "advance_subscription_next_run", advance)
 
-    result = await scheduler.run_scheduler_tick(Settings(), now=now)
+    result = await scheduler._run_due_subscriptions(session_factory, due, run_service)
 
     assert result == {"due": 1, "ran": 0, "skipped": 1, "failed": 0}
     service.run_subscription.assert_awaited_once_with(
@@ -404,7 +346,6 @@ async def test_run_scheduler_tick_leaves_lock_skips_for_lock_owner_to_advance(
         advance_schedule=True,
     )
     advance.assert_not_awaited()
-    engine.dispose.assert_awaited_once()
 
 
 def test_scheduler_run_once_delegates_to_async_core_and_reports_counters(

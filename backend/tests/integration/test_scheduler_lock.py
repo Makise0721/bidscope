@@ -13,16 +13,22 @@ import asyncio
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
 import sqlalchemy as sa
+from bidscope.api.dependencies import RunService, build_demo_graph
+from bidscope.clock import FixedClock
+from bidscope.config import Settings
 from bidscope.db import create_engine_and_session
+from bidscope.delivery.objects import LocalObjectStore
+from bidscope.graph.executor import _to_plain_dsn
 from bidscope.persistence.models import InboxEvent, QueryRun, Subscription
 from bidscope.persistence.repositories import SnapshotRepository
 from bidscope.snapshots.importer import SnapshotImporter
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
     AsyncEngine,
@@ -39,6 +45,19 @@ TEST_DB_URL = "postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_te
 TEST_CHECKPOINT_URL = "postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test"
 
 BATCH_1 = Path("data/demo/batch-1")
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _test_settings(tmp_path: Path) -> Settings:
+    return Settings(
+        app_mode="test",
+        database_url=TEST_DB_URL,
+        checkpoint_database_url=TEST_CHECKPOINT_URL,
+        real_model_enabled=False,
+        admin_token="test-admin-token",
+        object_store_root=str(tmp_path / "objects"),
+        test_control_token="test-controls-token",
+    )
 
 
 async def _reset_import_tracking(
@@ -63,14 +82,51 @@ async def _import_bundle(bundle: Path) -> None:
 
 
 def _make_subscription(*, subscription_id: str) -> Subscription:
-    return Subscription(
+    sub = Subscription(
         id=subscription_id,
         cron_expression="0 9 * * 1",
         timezone="Asia/Shanghai",
-        normalized_intent={"regions": ["四川"], "topics": ["服务器"]},
+        normalized_intent={
+            "regions": ["四川"],
+            "topics": ["服务器"],
+            "__source_run_id": "source-run-seed",
+            "__user_request": "四川省服务器招标",
+            "__next_run_at": "2026-07-20T09:00:00+00:00",
+            "__consecutive_failures": 0,
+        },
         status="active",
         trigger_key=f"trigger-{subscription_id}",
     )
+    return sub
+
+
+@pytest_asyncio.fixture()
+async def real_run_service(
+    imported_batch_1: None, tmp_path: Path,
+) -> Any:
+    """A real RunService + Postgres checkpointer for tests that exercise the
+    live execution path of ``_run_locked``.
+
+    The fixture imports batch-1 so the real graph retrieves notices and the
+    scheduled subscription run produces a persisted report.
+    """
+    _, session_factory = create_engine_and_session()
+    settings = _test_settings(tmp_path)
+    object_store = LocalObjectStore(root=settings.object_store_root)
+    dsn = _to_plain_dsn(settings.checkpoint_database_url)
+    async with AsyncPostgresSaver.from_conn_string(dsn) as checkpointer:
+        graph = build_demo_graph(
+            session_factory,
+            settings,
+            checkpointer=checkpointer,
+            clock=FixedClock(datetime(2026, 7, 18, 9, 0, tzinfo=UTC)),
+            object_store=object_store,
+        )
+        service = RunService(
+            session_factory, graph, object_store, settings,
+            clock=FixedClock(datetime(2026, 7, 18, 9, 0, tzinfo=UTC)),
+        )
+        yield service
 
 
 @pytest_asyncio.fixture()
@@ -80,7 +136,7 @@ async def imported_batch_1() -> None:
 
 @pytest.mark.asyncio
 async def test_two_concurrent_triggers_produce_exactly_one_run(
-    imported_batch_1: None,
+    real_run_service: RunService,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Dual-worker lock: concurrent triggers for the same subscription/time
@@ -88,8 +144,10 @@ async def test_two_concurrent_triggers_produce_exactly_one_run(
     from bidscope.subscriptions import service as service_module
     from bidscope.subscriptions.service import SubscriptionService
 
-    _, session_factory = create_engine_and_session()
-    service = SubscriptionService(session_factory=session_factory)
+    session_factory = real_run_service.session_factory
+    service = SubscriptionService(
+        session_factory=session_factory, run_service=real_run_service,
+    )
 
     sub_id = _next_id("sub-lock")
     sub = _make_subscription(subscription_id=sub_id)
@@ -175,7 +233,7 @@ async def test_two_concurrent_triggers_produce_exactly_one_run(
 
 @pytest.mark.asyncio
 async def test_successful_run_releases_lock_before_reusing_data_connection(
-    imported_batch_1: None,
+    real_run_service: RunService,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A released run must not leave its advisory lock on a pooled connection."""
@@ -183,8 +241,11 @@ async def test_successful_run_releases_lock_before_reusing_data_connection(
     from bidscope.subscriptions.scheduler import subscription_lock_key
     from bidscope.subscriptions.service import SubscriptionService
 
-    engine, session_factory = create_engine_and_session()
-    service = SubscriptionService(session_factory=session_factory)
+    session_factory = real_run_service.session_factory
+    engine = cast(AsyncEngine, session_factory.kw["bind"])
+    service = SubscriptionService(
+        session_factory=session_factory, run_service=real_run_service,
+    )
     sub_id = _next_id("sub-release-connection")
     sub = _make_subscription(subscription_id=sub_id)
     async with session_factory() as session:
@@ -652,15 +713,17 @@ async def test_run_subscription_preserves_operation_error_when_release_fails(
 
 @pytest.mark.asyncio
 async def test_run_subscription_normalizes_naive_scheduled_at(
-    imported_batch_1: None,
+    real_run_service: RunService,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A naive scheduled timestamp is normalized to UTC through the run."""
     from bidscope.subscriptions import service as service_module
     from bidscope.subscriptions.service import SubscriptionService
 
-    _, session_factory = create_engine_and_session()
-    service = SubscriptionService(session_factory=session_factory)
+    session_factory = real_run_service.session_factory
+    service = SubscriptionService(
+        session_factory=session_factory, run_service=real_run_service,
+    )
 
     sub_id = _next_id("sub-naive-scheduled-at")
     sub = _make_subscription(subscription_id=sub_id)
@@ -805,12 +868,21 @@ async def test_direct_run_ignores_stale_scheduled_occurrence_guard(
 async def test_run_subscription_advances_schedule_before_releasing_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The successful schedule update is committed while the lock is held."""
+    """The successful schedule update is committed while the lock is held.
+
+    Under the Task 4 execution path, ``_run_locked`` calls the injected
+    ``run_service.create_run(run_key=<scheduled key>)`` and
+    ``run_service.execute_run(...)`` (auto-approving any awaiting-confirmation
+    interrupt), then gates on the persisted online report before committing the
+    schedule update. This test pins those entry points.
+    """
     from bidscope.subscriptions import service as service_module
     from bidscope.subscriptions.service import KEY_NEXT_RUN_AT, SubscriptionService
 
     sub_id = _next_id("sub-atomic-schedule")
     sub = _make_subscription(subscription_id=sub_id)
+    sub.normalized_intent["__source_run_id"] = "source-run-id"
+    sub.normalized_intent["__user_request"] = "subscription run"
     initial_next_run = "2026-07-20T09:00:00+00:00"
     sub.normalized_intent[KEY_NEXT_RUN_AT] = initial_next_run
     scheduled_at = datetime(2026, 7, 20, 9, tzinfo=UTC)
@@ -869,23 +941,52 @@ async def test_run_subscription_advances_schedule_before_releasing_lock(
         lock_held = False
         return True
 
+    class _RecordingRunService:
+        def __init__(self) -> None:
+            self.create_run_calls: list[tuple[str, dict[str, str] | None]] = []
+            self.execute_run_calls: list[tuple[str, dict[str, str]]] = []
+            self.confirm_calls: list[str] = []
+
+        async def create_run(
+            self, user_request: str, *, run_key: str | None = None,
+        ) -> tuple[str, bool]:
+            self.create_run_calls.append((user_request, {"run_key": run_key} if run_key else None))
+            return "scheduled-run-id", True
+
+        async def execute_run(
+            self, run_id: str, input: dict[str, str], *, force_fresh: bool = False,
+        ) -> dict[str, object]:
+            self.execute_run_calls.append((run_id, dict(input)))
+            return {"status": "completed"}
+
+        async def confirm(self, run_id: str) -> dict[str, object]:
+            self.confirm_calls.append(run_id)
+            return {"status": "completed"}
+
+    run_service = _RecordingRunService()
+
     monkeypatch.setattr(service_module, "acquire_advisory_lock", acquire)
     monkeypatch.setattr(service_module, "release_advisory_lock", release)
     monkeypatch.setattr(
-        service_module, "create_run", AsyncMock(return_value=("run-id", True)),
-    )
-    execute = AsyncMock()
-    monkeypatch.setattr(service_module, "execute", execute)
-    monkeypatch.setattr(
         service_module, "_compute_next_run", Mock(return_value=next_run),
     )
-    service = SubscriptionService(_FakeSessionFactory())
+    service = SubscriptionService(
+        _FakeSessionFactory(), run_service=cast(Any, run_service),
+    )
 
     async def open_fake_lock_connection() -> AsyncConnection:
         return cast(AsyncConnection, _FakeLockConnection())
 
     monkeypatch.setattr(service, "_open_lock_connection", open_fake_lock_connection)
-    monkeypatch.setattr(service, "_retrieve_notices", AsyncMock(return_value=[]))
+
+    # The report gate must observe a persisted online report. Inject a stub
+    # loader that returns a non-null report for the scheduled run id.
+    async def _report_loader(run_id: str) -> object:
+        del run_id
+        return object()
+
+    monkeypatch.setattr(service, "_load_persisted_report", _report_loader)
+    monkeypatch.setattr(service, "_notice_views_from_report", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         service,
         "_diff_and_emit",
@@ -904,11 +1005,16 @@ async def test_run_subscription_advances_schedule_before_releasing_lock(
     )
 
     assert result["failed"] is False
-    execute.assert_awaited_once()
-    assert execute.await_args.args[1:] == (
-        "run-id", {"user_request": f"subscription {sub_id}"},
-    )
-    assert execute.await_args.kwargs == {"session_factory": service.session_factory}
+    assert len(run_service.create_run_calls) == 1
+    user_request, kwargs = run_service.create_run_calls[0]
+    assert user_request == "subscription run"
+    # The scheduled run key is deterministic over subscription id + bucket.
+    assert kwargs is not None
+    expected_bucket = scheduled_at.replace(second=0, microsecond=0).isoformat()
+    assert kwargs["run_key"] == f"subscription:{sub_id}:{expected_bucket}"
+    assert run_service.execute_run_calls == [
+        ("scheduled-run-id", {"user_request": "subscription run"}),
+    ]
     assert sub.normalized_intent[KEY_NEXT_RUN_AT] == next_run.isoformat()
     assert events == [
         "acquire",
@@ -922,21 +1028,47 @@ async def test_run_subscription_advances_schedule_before_releasing_lock(
 async def test_subscription_does_not_execute_existing_query_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An idempotent subscription run must not execute an existing query run."""
-    from bidscope.subscriptions import service as service_module
+    """An idempotent subscription run must not execute an existing scheduled run.
+
+    Under Task 4, ``_run_locked`` calls ``run_service.create_run`` first; when
+    the scheduled run key already exists (``created=False``), the run has
+    already been executed and ``execute_run`` must NOT be invoked again — the
+    existing persisted report is the single source of truth.
+    """
     from bidscope.subscriptions.service import SubscriptionService
 
     subscription = _make_subscription(subscription_id=_next_id("sub-existing-run"))
+    subscription.normalized_intent["__source_run_id"] = "source-run-id"
+    subscription.normalized_intent["__user_request"] = "subscription run"
     session = Mock()
     session.commit = AsyncMock()
-    execute = AsyncMock()
-    service = SubscriptionService(cast(async_sessionmaker[AsyncSession], Mock()))
 
-    monkeypatch.setattr(
-        service_module, "create_run", AsyncMock(return_value=("existing-run", False)),
+    class _RecordingRunService:
+        def __init__(self) -> None:
+            self.execute_run_calls: list[tuple] = []
+
+        async def create_run(
+            self, user_request: str, *, run_key: str | None = None,
+        ) -> tuple[str, bool]:
+            return "existing-scheduled-run", False
+
+        async def execute_run(
+            self, run_id: str, input: object, *, force_fresh: bool = False,
+        ) -> dict[str, object]:
+            self.execute_run_calls.append((run_id, input))
+            return {"status": "completed"}
+
+        async def confirm(self, run_id: str) -> dict[str, object]:
+            return {"status": "completed"}
+
+    run_service = _RecordingRunService()
+    service = SubscriptionService(
+        cast(async_sessionmaker[AsyncSession], Mock()),
+        run_service=cast(Any, run_service),
     )
-    monkeypatch.setattr(service_module, "execute", execute)
-    monkeypatch.setattr(service, "_retrieve_notices", AsyncMock(return_value=[]))
+
+    monkeypatch.setattr(service, "_load_persisted_report", AsyncMock(return_value=object()))
+    monkeypatch.setattr(service, "_notice_views_from_report", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         service,
         "_diff_and_emit",
@@ -955,7 +1087,9 @@ async def test_subscription_does_not_execute_existing_query_run(
     )
 
     assert result["failed"] is False
-    execute.assert_not_awaited()
+    assert run_service.execute_run_calls == [], (
+        "an existing scheduled run must not be re-executed"
+    )
 
 
 @pytest.mark.asyncio
@@ -1135,7 +1269,7 @@ async def test_advisory_lock_key_derives_from_subscription_and_time() -> None:
 
 @pytest.mark.asyncio
 async def test_serial_workers_skip_a_consumed_scheduled_occurrence(
-    imported_batch_1: None,
+    real_run_service: RunService,
 ) -> None:
     """A later worker must not replay an occurrence consumed by an earlier one."""
     from bidscope.subscriptions.service import KEY_NEXT_RUN_AT, SubscriptionService
@@ -1146,8 +1280,15 @@ async def test_serial_workers_skip_a_consumed_scheduled_occurrence(
     engine_b: AsyncEngine
     session_factory_b: async_sessionmaker[AsyncSession]
     engine_b, session_factory_b = create_engine_and_session()
-    service_a = SubscriptionService(session_factory=session_factory_a)
-    service_b = SubscriptionService(session_factory=session_factory_b)
+    # Both services share the single real run service so a scheduled run key
+    # created by A is observed by B as ``created=False`` (the relational row is
+    # the cross-worker coordination boundary, alongside the advisory lock).
+    service_a = SubscriptionService(
+        session_factory=session_factory_a, run_service=real_run_service,
+    )
+    service_b = SubscriptionService(
+        session_factory=session_factory_b, run_service=real_run_service,
+    )
     sub_id = _next_id("sub-serial-scheduled-occurrence")
     scheduled_at = datetime(2026, 7, 20, 9, tzinfo=UTC)
     sub = _make_subscription(subscription_id=sub_id)

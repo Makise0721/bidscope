@@ -1106,3 +1106,36 @@ async def create_run_service(
     finally:
         sync_engine.dispose()
         await engine.dispose()
+
+
+def _build_run_service_components(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    sync_session_factory: sessionmaker[Session],
+    object_store: LocalObjectStore,
+    clock: Clock,
+    checkpointer: AsyncPostgresSaver,
+) -> RunService:
+    """Compile the demo graph over a pre-built checkpointer and assemble a
+    :class:`RunService`.
+
+    Shared between the API's :func:`create_run_service` and the subscription
+    scheduler's process-local assembly so the two stay consistent without
+    coupling them through ``app.state``.
+    """
+    graph = build_demo_graph(
+        session_factory,
+        settings,
+        checkpointer=checkpointer,
+        sync_session_factory=sync_session_factory,
+        clock=clock,
+        object_store=object_store,
+    )
+    return RunService(
+        session_factory,
+        graph,
+        object_store,
+        settings,
+        clock=clock,
+        checkpointer_kind="postgres",
+    )
