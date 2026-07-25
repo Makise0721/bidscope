@@ -12,7 +12,7 @@ import asyncio
 import inspect
 from collections import deque
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any, cast
@@ -33,11 +33,13 @@ from bidscope.graph.builder import GraphDeps, build_graph
 from bidscope.graph.executor import (
     Command,
     EventReconciliationError,
+    FencedCheckpointSaver,
     RunOwnershipLostError,
+    _acquire_run_lock,
+    _release_run_lock,
     _to_plain_dsn,
     create_run,
     execute,
-    run_lock_key,
 )
 from bidscope.llm.fake import FakeDuplicateModel, FakeIntentModel, FakeReportModel
 from bidscope.persistence.models import NoticeEvidence, NoticeVersion, QueryRun, RunEvent
@@ -94,6 +96,20 @@ def _to_sync_dsn(async_url: str) -> str:
     return async_url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
 
 
+async def _drain_cancelled_task(task: asyncio.Task[Any]) -> None:
+    """Consume an intentionally cancelled child task without cancelling its parent."""
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        if not task.done():
+            await task
+        else:
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                return
+
+
 async def _drain_task_preserving_cancellation[T](task: asyncio.Future[T]) -> T:
     """Drain ``task`` while remembering every cancellation of the caller."""
     current = asyncio.current_task()
@@ -148,7 +164,7 @@ def build_demo_graph(
         load_notice_views=lambda ids: _load_notice_views(notice_factory, ids),
         report_persistence=ReportPersistence(session_factory, resolved_store),
     )
-    return build_graph(deps, checkpointer=checkpointer)
+    return build_graph(deps, checkpointer=FencedCheckpointSaver(checkpointer))
 
 
 @dataclass
@@ -312,18 +328,19 @@ class RunService:
                 claimed=(id(self), run_id) in self._claimed_run_ids.get(),
                 execution_token=self._claimed_token(run_id),
             )
-        except asyncio.CancelledError:
-            error = SerializableError(
-                code=BidScopeErrorCode.GRAPH_NODE_ERROR,
-                message="run execution cancelled",
-                details={},
-            ).model_dump(mode="json")
-            await self._persist_cancellation(
-                run_id,
-                error,
-                expected_status="running",
-                execution_token=self._claimed_token(run_id),
-            )
+        except asyncio.CancelledError as cancellation_error:
+            if not getattr(cancellation_error, "claim_repaired", False):
+                error = SerializableError(
+                    code=BidScopeErrorCode.GRAPH_NODE_ERROR,
+                    message="run execution cancelled",
+                    details={},
+                ).model_dump(mode="json")
+                await self._persist_cancellation(
+                    run_id,
+                    error,
+                    expected_status="running",
+                    execution_token=self._claimed_token(run_id),
+                )
             raise
         finally:
             self._remove_claimed_run_id(run_id)
@@ -432,24 +449,15 @@ class RunService:
                 self._claimed_run_ids.get() - {(id(self), run_id)}
             )
         else:
-            execution_token = await self._start_run(run_id)
+            execution_token = await self._start_run_safely(run_id)
             if execution_token is None:
                 return {"status": "retryable"}
             self._add_claimed_run_token(run_id, execution_token)
 
         async with self.session_factory() as owner_session:
             owner_connection = await owner_session.connection()
-            lock_result = await owner_connection.execute(
-                sa.text("SELECT pg_try_advisory_lock(:key)"),
-                {"key": run_lock_key(run_id)},
-            )
-            lock_acquired = bool(lock_result.scalar_one())
-            if lock_acquired:
-                # Session-level advisory locks survive commit; end the implicit
-                # transaction so graph execution never holds it open.
-                await owner_connection.commit()
+            lock_acquired = await _acquire_run_lock(owner_connection, run_id)
             if not lock_acquired:
-                await owner_connection.rollback()
                 await self._update_status(
                     run_id,
                     "retryable",
@@ -458,8 +466,16 @@ class RunService:
                 )
                 return {"status": "retryable"}
 
+            heartbeat_failure: BaseException | None = None
+            heartbeat_stop = asyncio.Event()
+
             async def ensure_active(session: AsyncSession | None = None) -> None:
                 """Heartbeat this worker only while the run remains running."""
+                nonlocal heartbeat_failure
+                if heartbeat_failure is not None:
+                    raise RunOwnershipLostError(
+                        f"run ownership lost: {run_id}"
+                    ) from heartbeat_failure
                 if session is None:
                     async with self.session_factory() as heartbeat_session:
                         heartbeat_result = await heartbeat_session.execute(
@@ -485,7 +501,32 @@ class RunService:
                 if not bool(getattr(heartbeat_result, "rowcount", 0)):
                     raise RunOwnershipLostError(f"run ownership lost: {run_id}")
 
+            async def heartbeat() -> None:
+                nonlocal heartbeat_failure
+                try:
+                    while not heartbeat_stop.is_set():
+                        with suppress(TimeoutError):
+                            await asyncio.wait_for(
+                                heartbeat_stop.wait(),
+                                timeout=self.settings.run_heartbeat_seconds,
+                            )
+                        if heartbeat_stop.is_set():
+                            return
+                        try:
+                            await ensure_active()
+                        except BaseException as error:
+                            heartbeat_failure = error
+                            return
+                except asyncio.CancelledError:
+                    raise
+
+            heartbeat_task: asyncio.Task[None] | None = None
             try:
+                try:
+                    await ensure_active()
+                except RunOwnershipLostError:
+                    return {"status": "retryable"}
+                heartbeat_task = asyncio.create_task(heartbeat())
                 fail_node = self.fail_next_node
                 if fail_node is not None:
                     self.fail_next_node = None
@@ -552,6 +593,10 @@ class RunService:
 
                 status = result.get("status")
                 if status:
+                    try:
+                        await ensure_active()
+                    except RunOwnershipLostError:
+                        return {"status": "retryable"}
                     result_error = None
                     errors = result.get("errors")
                     if errors:
@@ -567,16 +612,32 @@ class RunService:
                         return {"status": "retryable"}
                 return result
             finally:
-                release = asyncio.create_task(
-                    owner_connection.execute(
-                        sa.text("SELECT pg_advisory_unlock(:key)"),
-                        {"key": run_lock_key(run_id)},
-                    )
-                )
+                heartbeat_stop.set()
+                if heartbeat_task is not None:
+                    heartbeat_task.cancel()
+                    await _drain_cancelled_task(heartbeat_task)
+                release = asyncio.create_task(_release_run_lock(owner_connection, run_id))
                 await _drain_task_preserving_cancellation(release)
-                await _drain_task_preserving_cancellation(
-                    asyncio.create_task(owner_connection.commit())
+
+    async def _start_run_safely(self, run_id: str) -> str | None:
+        """Shield a committed start claim and repair it when cancellation wins."""
+        claim = asyncio.create_task(self._start_run(run_id))
+        try:
+            return await asyncio.shield(claim)
+        except asyncio.CancelledError as cancellation_error:
+            try:
+                token = await _drain_task_preserving_cancellation(claim)
+            except BaseException as claim_error:
+                raise cancellation_error from claim_error
+            if token is not None:
+                repair = asyncio.create_task(
+                    self._repair_claim_with_token(run_id, "run start cancelled", str(token))
                 )
+                try:
+                    await _drain_task_preserving_cancellation(repair)
+                except BaseException as repair_error:
+                    raise cancellation_error from repair_error
+            raise cancellation_error
 
     async def _start_run(self, run_id: str) -> str | None:
         """Atomically activate a pending run and return its fresh ownership token."""

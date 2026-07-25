@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,9 +29,16 @@ class Settings(BaseSettings):
     #: payloads in local/demo deployments).
     object_store_root: str = "data/objects"
     stale_run_after_seconds: int = Field(default=300, gt=0)
+    run_heartbeat_seconds: int = Field(default=30, gt=0)
     #: Token required by the ``/api/test-controls/*`` routes. Those routes are
     #: only registered when ``app_mode == "test"``, and this token gates them.
     test_control_token: str | None = None
+
+    @model_validator(mode="after")
+    def validate_run_heartbeat_interval(self) -> Settings:
+        if self.run_heartbeat_seconds >= self.stale_run_after_seconds:
+            raise ValueError("run_heartbeat_seconds must be less than stale_run_after_seconds")
+        return self
 
 
 @lru_cache

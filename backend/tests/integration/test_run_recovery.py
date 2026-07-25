@@ -82,6 +82,50 @@ async def test_mark_stale_runs_retryable(session_factory: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_stale_pending_run_recovers_without_advisory_lock_probe(
+    session_factory: Any,
+) -> None:
+    """Pending rows have no graph owner, so an unrelated lock cannot block recovery."""
+    stale_before = datetime(2026, 7, 23, 12, 0, tzinfo=UTC)
+    run_id = str(uuid.uuid4())
+    async with session_factory() as session:
+        session.add(
+            QueryRun(
+                id=run_id,
+                run_key=run_id,
+                status="pending",
+                user_request="pending",
+                updated_at=stale_before - timedelta(seconds=1),
+            )
+        )
+        await session.commit()
+
+    async with session_factory() as lock_session:
+        connection = await lock_session.connection()
+        assert await connection.scalar(
+            sa.text("SELECT pg_try_advisory_lock(:key)"),
+            {"key": run_lock_key(run_id)},
+        ) is True
+        await connection.commit()
+        try:
+            assert await mark_stale_runs_retryable(
+                session_factory=session_factory,
+                stale_before=stale_before,
+            ) == 1
+        finally:
+            assert await connection.scalar(
+                sa.text("SELECT pg_advisory_unlock(:key)"),
+                {"key": run_lock_key(run_id)},
+            ) is True
+            await connection.commit()
+
+    async with session_factory() as session:
+        recovered = await session.get(QueryRun, run_id)
+    assert recovered is not None
+    assert recovered.status == "retryable"
+
+
+@pytest.mark.asyncio
 async def test_released_old_lock_cannot_write_after_retry_claims_new_token(
     session_factory: Any,
 ) -> None:
@@ -110,7 +154,7 @@ async def test_released_old_lock_cannot_write_after_retry_claims_new_token(
         assert acquired is True
         await old_connection.commit()
 
-        # Startup recovery invalidates the old claim before another worker retries.
+        # Recovery sees the stale row but cannot steal it while the worker lock is held.
         async with session_factory() as session:
             await session.execute(
                 sa.update(QueryRun)
@@ -121,13 +165,13 @@ async def test_released_old_lock_cannot_write_after_retry_claims_new_token(
         assert await mark_stale_runs_retryable(
             session_factory=session_factory,
             stale_before=datetime(2021, 1, 1, tzinfo=UTC),
-        ) == 1
+        ) == 0
 
         async with session_factory() as session:
-            stale_run = await session.get(QueryRun, run_id)
-        assert stale_run is not None
-        assert stale_run.status == "retryable"
-        assert stale_run.execution_token is None
+            live_run = await session.get(QueryRun, run_id)
+        assert live_run is not None
+        assert live_run.status == "running"
+        assert live_run.execution_token == old_token
 
         released = await old_connection.scalar(
             sa.text("SELECT pg_advisory_unlock(:key)"),
@@ -135,6 +179,17 @@ async def test_released_old_lock_cannot_write_after_retry_claims_new_token(
         )
         assert released is True
         await old_connection.commit()
+
+        assert await mark_stale_runs_retryable(
+            session_factory=session_factory,
+            stale_before=datetime(2021, 1, 1, tzinfo=UTC),
+        ) == 1
+
+        async with session_factory() as session:
+            stale_run = await session.get(QueryRun, run_id)
+        assert stale_run is not None
+        assert stale_run.status == "retryable"
+        assert stale_run.execution_token is None
 
     new_service = RunService(
         session_factory=session_factory,
@@ -283,6 +338,107 @@ async def test_scheduled_run_transitions_to_running_before_graph_work(
     ) == 0
     release_graph.set()
     assert await task == {"status": "completed"}
+
+
+@pytest.mark.asyncio
+async def test_blocked_graph_refreshes_running_heartbeat(
+    session_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A graph blocked between states still refreshes its relational heartbeat."""
+    from bidscope.api import dependencies
+
+    graph_started = asyncio.Event()
+    release_graph = asyncio.Event()
+
+    async def blocked_execute(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        graph_started.set()
+        await release_graph.wait()
+        return {"status": "completed"}
+
+    monkeypatch.setattr(dependencies, "execute", blocked_execute)
+    settings = get_settings().model_copy(
+        update={"run_heartbeat_seconds": 1, "stale_run_after_seconds": 2}
+    )
+    service = RunService(
+        session_factory=session_factory,
+        graph=object(),
+        object_store=object(),
+        settings=settings,
+    )
+    run_id, created = await service.create_run("heartbeat request", run_key="heartbeat")
+    assert created is True
+    task = service.schedule_run(run_id, {"user_request": "heartbeat request"})
+    await asyncio.wait_for(graph_started.wait(), timeout=1)
+
+    try:
+        async with session_factory() as session:
+            initial = await session.scalar(
+                sa.select(QueryRun.updated_at).where(QueryRun.id == run_id)
+            )
+        await asyncio.sleep(1.2)
+        async with session_factory() as session:
+            refreshed = await session.scalar(
+                sa.select(QueryRun.updated_at).where(QueryRun.id == run_id)
+            )
+        assert initial is not None
+        assert refreshed is not None
+        assert refreshed > initial
+    finally:
+        release_graph.set()
+        assert await task == {"status": "completed"}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_initial_start_repairs_committed_running_claim(
+    session_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation after the pending claim commits restores retryability."""
+    from bidscope.api import dependencies
+
+    service = RunService(
+        session_factory=session_factory,
+        graph=object(),
+        object_store=object(),
+        settings=get_settings(),
+    )
+    run_id, created = await service.create_run("cancelled start", run_key="cancelled-start")
+    assert created is True
+    original_start = service._start_run
+    claim_committed = asyncio.Event()
+    release_start = asyncio.Event()
+
+    async def delayed_start(claimed_run_id: str) -> str | None:
+        token = await original_start(claimed_run_id)
+        claim_committed.set()
+        await release_start.wait()
+        return token
+
+    monkeypatch.setattr(service, "_start_run", delayed_start)
+    monkeypatch.setattr(
+        dependencies,
+        "execute",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("graph must not run")),
+    )
+    task = asyncio.create_task(service.execute_run(run_id, {"user_request": "cancelled start"}))
+    await asyncio.wait_for(claim_committed.wait(), timeout=1)
+    task.cancel()
+    release_start.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    async with session_factory() as session:
+        run = await session.get(QueryRun, run_id)
+    assert run is not None
+    assert run.status == "retryable"
+    assert run.execution_token is None
+    assert run.error == {
+        "code": "graph_node_error",
+        "message": "run start cancelled",
+        "details": {},
+    }
 
 
 @pytest.mark.asyncio

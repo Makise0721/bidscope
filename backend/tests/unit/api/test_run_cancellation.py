@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 from bidscope.api.dependencies import RunService
+from bidscope.clock import SystemClock
+from bidscope.config import get_settings
 
 
 class _ChildAbort(BaseException):
@@ -276,6 +278,88 @@ async def test_retry_lookup_failure_clears_task_local_claim(
 
 
 @pytest.mark.asyncio
+async def test_unlock_failure_closes_connection_when_invalidation_fails() -> None:
+    """A lock-bearing connection is closed when invalidation cannot retire it."""
+    from bidscope.graph.executor import _release_run_lock
+
+    unlock_error = RuntimeError("unlock failed")
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def execute(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+            raise unlock_error
+
+        async def invalidate(self, error: BaseException) -> None:
+            assert error is unlock_error
+            raise RuntimeError("invalidate failed")
+
+        async def close(self) -> None:
+            self.closed = True
+
+    connection = FakeConnection()
+    with pytest.raises(RuntimeError, match="unlock failed"):
+        await _release_run_lock(connection, "run-1")
+
+    assert connection.closed is True
+
+
+@pytest.mark.asyncio
+async def test_initial_heartbeat_failure_releases_acquired_run_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ownership loss after lock acquisition cannot leak the session lock."""
+    from bidscope.api import dependencies
+
+    service = object.__new__(RunService)
+    service.clock = SystemClock()
+    service.settings = get_settings()
+
+    class FakeResult:
+        rowcount = 0
+
+    class FakeConnection:
+        pass
+
+    connection = FakeConnection()
+
+    class FakeSession:
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            del args
+
+        async def connection(self) -> FakeConnection:
+            return connection
+
+        async def execute(self, *args: Any, **kwargs: Any) -> FakeResult:
+            del args, kwargs
+            return FakeResult()
+
+        async def commit(self) -> None:
+            return None
+
+    service.session_factory = FakeSession
+    acquire = AsyncMock(return_value=True)
+    release = AsyncMock()
+    monkeypatch.setattr(dependencies, "_acquire_run_lock", acquire)
+    monkeypatch.setattr(dependencies, "_release_run_lock", release)
+
+    assert await service._execute_run(
+        "run-1",
+        {"user_request": "request"},
+        claimed=True,
+        execution_token="token-1",
+    ) == {"status": "retryable"}
+
+    acquire.assert_awaited_once_with(connection, "run-1")
+    release.assert_awaited_once_with(connection, "run-1")
+
+
+@pytest.mark.asyncio
 async def test_retry_passes_retry_resume_action_and_confirm_keeps_approve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -284,11 +368,15 @@ async def test_retry_passes_retry_resume_action_and_confirm_keeps_approve(
 
     service = object.__new__(RunService)
     service.fail_next_node = None
+    service.clock = SystemClock()
+    service.settings = get_settings()
     service._claim_run_safely = AsyncMock()
     service._start_run = AsyncMock()
     service._update_status = AsyncMock()
 
     class FakeResult:
+        rowcount = 1
+
         def scalar_one(self) -> bool:
             return True
 
@@ -309,6 +397,13 @@ async def test_retry_passes_retry_resume_action_and_confirm_keeps_approve(
 
         async def connection(self) -> FakeConnection:
             return FakeConnection()
+
+        async def execute(self, *args: Any, **kwargs: Any) -> FakeResult:
+            del args, kwargs
+            return FakeResult()
+
+        async def commit(self) -> None:
+            return None
 
     service.session_factory = FakeSession
     service.get_run = AsyncMock(

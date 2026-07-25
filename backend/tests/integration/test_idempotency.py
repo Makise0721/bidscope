@@ -591,7 +591,12 @@ async def test_resume_reconciles_partial_fresh_retry_events_with_relational_hist
 
     run_id, created = await create_run("retry request", session_factory=session_factory)
     assert created is True
+    execution_token = "fresh-retry-token"
     async with session_factory() as session:
+        run = await session.get(QueryRun, run_id)
+        assert run is not None
+        run.status = "running"
+        run.execution_token = execution_token
         session.add(
             RunEvent(
                 query_run_id=run_id,
@@ -614,6 +619,7 @@ async def test_resume_reconciles_partial_fresh_retry_events_with_relational_hist
         session_factory=session_factory,
         checkpoint_thread_id="same-thread",
         force_fresh=True,
+        execution_token=execution_token,
     )
     await execute(
         graph,
@@ -621,6 +627,7 @@ async def test_resume_reconciles_partial_fresh_retry_events_with_relational_hist
         {"user_request": "retry request"},
         session_factory=session_factory,
         checkpoint_thread_id="same-thread",
+        execution_token=execution_token,
     )
 
     async with session_factory() as session:
@@ -693,6 +700,46 @@ async def test_event_reconciliation_does_not_match_duplicate_fingerprint_from_ol
     )
     assert persisted == 0
     assert base == 2
+
+
+async def test_nonterminal_checkpoint_accepts_exact_relational_event_prefix(
+    session_factory,
+) -> None:
+    """A resumable checkpoint can repair events saved just before process loss."""
+    from bidscope.graph.executor import _reconcile_event_cursor, create_run
+
+    first = {
+        "node": "node",
+        "event": "first",
+        "status": "ok",
+        "message": None,
+        "details": {},
+        "timestamp": "2026-07-18T09:00:00+00:00",
+    }
+    second = {**first, "event": "second"}
+    run_id, created = await create_run("checkpoint prefix", session_factory=session_factory)
+    assert created is True
+    async with session_factory() as session:
+        session.add(
+            RunEvent(
+                query_run_id=run_id,
+                seq=4,
+                timestamp=datetime(2026, 7, 18, 9, tzinfo=UTC),
+                node=first["node"],
+                event=first["event"],
+                status=first["status"],
+                message=first["message"],
+                details=first["details"],
+            )
+        )
+        await session.commit()
+
+    assert await _reconcile_event_cursor(
+        run_id,
+        [first, second],
+        session_factory,
+        event_seq_offset=4,
+    ) == (1, 4)
 
 
 async def test_terminal_checkpoint_reconciles_events_before_short_circuit(
@@ -869,6 +916,278 @@ async def test_event_reconciliation_rejects_middle_sequence_mismatch(session_fac
             local,
             session_factory,
             event_seq_offset=4,
+        )
+
+
+async def test_internal_checkpoint_write_rejects_superseded_execution_token(
+    session_factory,
+) -> None:
+    """LangGraph saver writes inherit the active run's ownership fence."""
+    from bidscope.graph.executor import (
+        FencedCheckpointSaver,
+        RunOwnershipLostError,
+        create_run,
+        execute,
+    )
+    from langgraph.checkpoint.base import BaseCheckpointSaver
+
+    run_id, created = await create_run("checkpoint fence", session_factory=session_factory)
+    assert created is True
+    async with session_factory() as session:
+        run = await session.get(QueryRun, run_id)
+        assert run is not None
+        run.status = "running"
+        run.execution_token = "old-token"
+        await session.commit()
+
+    class RecordingSaver(BaseCheckpointSaver[Any]):
+        def __init__(self) -> None:
+            super().__init__()
+            self.put_calls = 0
+
+        async def aput(self, *args: Any, **kwargs: Any) -> Any:
+            del args, kwargs
+            self.put_calls += 1
+            return {"configurable": {"thread_id": run_id}}
+
+    saver = RecordingSaver()
+
+    class Graph:
+        def __init__(self) -> None:
+            self.checkpointer = FencedCheckpointSaver(saver)
+
+        async def aget_state(self, config: Any) -> Any:
+            del config
+            return SimpleNamespace(values={}, next=("node",))
+
+        async def astream(self, *args: Any, **kwargs: Any) -> Any:
+            del args, kwargs
+            async with session_factory() as session:
+                run = await session.get(QueryRun, run_id)
+                assert run is not None
+                run.execution_token = "new-token"
+                await session.commit()
+            await self.checkpointer.aput({}, {}, {}, {})
+            yield {}
+
+    with pytest.raises(RunOwnershipLostError):
+        await execute(
+            Graph(),
+            run_id,
+            {"user_request": "checkpoint fence"},
+            session_factory=session_factory,
+            execution_token="old-token",
+        )
+
+    assert saver.put_calls == 0
+
+
+async def test_force_fresh_requires_execution_token_before_deleting_checkpoint(
+    session_factory,
+) -> None:
+    """Force-fresh checkpoint deletion is never available without ownership."""
+    from bidscope.graph.executor import RunOwnershipLostError, create_run, execute
+
+    run_id, created = await create_run("fresh token required", session_factory=session_factory)
+    assert created is True
+
+    class Checkpointer:
+        def __init__(self) -> None:
+            self.delete_calls = 0
+
+        async def adelete_thread(self, thread_id: str) -> None:
+            del thread_id
+            self.delete_calls += 1
+
+    class Graph:
+        def __init__(self) -> None:
+            self.checkpointer = Checkpointer()
+
+        async def aget_state(self, config: Any) -> Any:
+            del config
+            return SimpleNamespace(values={}, next=("node",))
+
+    graph = Graph()
+    with pytest.raises(RunOwnershipLostError):
+        await execute(
+            graph,
+            run_id,
+            {"user_request": "fresh token required"},
+            session_factory=session_factory,
+            force_fresh=True,
+        )
+
+    assert graph.checkpointer.delete_calls == 0
+
+
+async def test_force_fresh_rejects_old_token_before_deleting_new_checkpoint(
+    session_factory,
+) -> None:
+    """A stale token cannot delete the checkpoint owned by a newer claim."""
+    from bidscope.graph.executor import RunOwnershipLostError, create_run, execute
+
+    run_id, created = await create_run("fresh ownership", session_factory=session_factory)
+    assert created is True
+    async with session_factory() as session:
+        run = await session.get(QueryRun, run_id)
+        assert run is not None
+        run.status = "running"
+        run.execution_token = "new-token"
+        await session.commit()
+
+    class Checkpointer:
+        def __init__(self) -> None:
+            self.delete_calls = 0
+
+        async def adelete_thread(self, thread_id: str) -> None:
+            del thread_id
+            self.delete_calls += 1
+
+    class Graph:
+        def __init__(self) -> None:
+            self.checkpointer = Checkpointer()
+
+        async def aget_state(self, config: Any) -> Any:
+            del config
+            return SimpleNamespace(values={"status": "retryable"}, next=("node",))
+
+        async def astream(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("an old token must fail before graph execution")
+            yield {}
+
+    graph = Graph()
+    with pytest.raises(RunOwnershipLostError):
+        await execute(
+            graph,
+            run_id,
+            {"user_request": "fresh ownership"},
+            session_factory=session_factory,
+            checkpoint_thread_id=run_id,
+            force_fresh=True,
+            execution_token="old-token",
+        )
+
+    assert graph.checkpointer.delete_calls == 0
+
+
+async def test_force_fresh_rejects_cleared_old_token_before_deleting_checkpoint(
+    session_factory,
+) -> None:
+    """A completed claim's old token cannot delete its terminal checkpoint."""
+    from bidscope.graph.executor import RunOwnershipLostError, create_run, execute
+
+    run_id, created = await create_run("cleared ownership", session_factory=session_factory)
+    assert created is True
+    async with session_factory() as session:
+        run = await session.get(QueryRun, run_id)
+        assert run is not None
+        run.status = "completed"
+        run.execution_token = None
+        await session.commit()
+
+    class Checkpointer:
+        def __init__(self) -> None:
+            self.delete_calls = 0
+
+        async def adelete_thread(self, thread_id: str) -> None:
+            del thread_id
+            self.delete_calls += 1
+
+    class Graph:
+        def __init__(self) -> None:
+            self.checkpointer = Checkpointer()
+
+        async def aget_state(self, config: Any) -> Any:
+            del config
+            return SimpleNamespace(values={"status": "completed"}, next=())
+
+        async def astream(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("an old token must fail before graph execution")
+            yield {}
+
+    graph = Graph()
+    with pytest.raises(RunOwnershipLostError):
+        await execute(
+            graph,
+            run_id,
+            {"user_request": "cleared ownership"},
+            session_factory=session_factory,
+            checkpoint_thread_id=run_id,
+            force_fresh=True,
+            execution_token="old-token",
+        )
+
+    assert graph.checkpointer.delete_calls == 0
+
+
+async def test_executor_rejects_missing_token_for_tokenized_run_before_graph_work(
+    session_factory,
+) -> None:
+    """Direct executor calls cannot bypass a committed execution token."""
+    from bidscope.graph.executor import RunOwnershipLostError, create_run, execute
+
+    run_id, created = await create_run("token required", session_factory=session_factory)
+    assert created is True
+    async with session_factory() as session:
+        run = await session.get(QueryRun, run_id)
+        assert run is not None
+        run.status = "running"
+        run.execution_token = "required-token"
+        await session.commit()
+
+    class Graph:
+        async def aget_state(self, config: Any) -> Any:
+            del config
+            return SimpleNamespace(values={}, next=("node",))
+
+        async def astream(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("missing token must fail before graph execution")
+            yield {}
+
+    with pytest.raises(RunOwnershipLostError):
+        await execute(
+            Graph(),
+            run_id,
+            {"user_request": "token required"},
+            session_factory=session_factory,
+        )
+
+
+async def test_terminal_checkpoint_requires_every_nonzero_offset_event(
+    session_factory,
+) -> None:
+    """A terminal checkpoint cannot return when its offset event is missing."""
+    from bidscope.graph.executor import EventReconciliationError, create_run, execute
+
+    run_id, created = await create_run("terminal offset", session_factory=session_factory)
+    assert created is True
+    event = {
+        "node": "node",
+        "event": "done",
+        "status": "ok",
+        "message": None,
+        "details": {},
+        "timestamp": "2026-07-18T09:00:00+00:00",
+    }
+
+    class TerminalGraph:
+        async def aget_state(self, config: Any) -> Any:
+            del config
+            return SimpleNamespace(
+                values={"status": "completed", "node_events": [event], "event_seq_offset": 4},
+                next=(),
+            )
+
+        async def astream(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("terminal checkpoint must not graph-stream")
+            yield {}
+
+    with pytest.raises(EventReconciliationError):
+        await execute(
+            TerminalGraph(),
+            run_id,
+            {"user_request": "terminal offset"},
+            session_factory=session_factory,
         )
 
 

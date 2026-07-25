@@ -46,3 +46,13 @@ def test_settings_requires_a_positive_stale_run_threshold() -> None:
     assert Settings().stale_run_after_seconds == 300
     with pytest.raises(ValidationError):
         Settings(stale_run_after_seconds=0)
+
+
+def test_heartbeat_interval_is_positive_and_shorter_than_stale_threshold() -> None:
+    """Execution heartbeats must run often enough to protect a live claim."""
+    settings = Settings(run_heartbeat_seconds=30, stale_run_after_seconds=60)
+    assert settings.run_heartbeat_seconds == 30
+    with pytest.raises(ValidationError):
+        Settings(run_heartbeat_seconds=0)
+    with pytest.raises(ValidationError):
+        Settings(run_heartbeat_seconds=60, stale_run_after_seconds=60)

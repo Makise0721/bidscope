@@ -31,12 +31,21 @@ import hashlib
 import inspect
 import re
 import selectors
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+from contextlib import suppress
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
 
 import sqlalchemy as sa
 from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.base import (
+    BaseCheckpointSaver,
+    ChannelVersions,
+    Checkpoint,
+    CheckpointMetadata,
+    CheckpointTuple,
+)
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.types import Command
 from sqlalchemy.exc import IntegrityError
@@ -104,10 +113,148 @@ class RunOwnershipLostError(RuntimeError):
     """The worker no longer owns the relational run row."""
 
 
+CheckpointWriteGuard = Callable[[], Awaitable[None]]
+_checkpoint_write_guard: ContextVar[CheckpointWriteGuard | None] = ContextVar(
+    "bidscope_checkpoint_write_guard",
+    default=None,
+)
+
+
+class FencedCheckpointSaver(BaseCheckpointSaver[Any]):
+    """Delegate async checkpoint I/O while fencing every mutation by run ownership."""
+
+    def __init__(self, delegate: BaseCheckpointSaver[Any]) -> None:
+        super().__init__(serde=delegate.serde)
+        self.delegate = delegate
+
+    @property
+    def config_specs(self) -> list[Any]:
+        return self.delegate.config_specs
+
+    def get_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
+        return self.delegate.get_tuple(config)
+
+    def list(
+        self,
+        config: RunnableConfig | None,
+        *,
+        filter: dict[str, Any] | None = None,
+        before: RunnableConfig | None = None,
+        limit: int | None = None,
+    ) -> Iterator[CheckpointTuple]:
+        return self.delegate.list(config, filter=filter, before=before, limit=limit)
+
+    async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
+        return await self.delegate.aget_tuple(config)
+
+    async def alist(
+        self,
+        config: RunnableConfig | None,
+        *,
+        filter: dict[str, Any] | None = None,
+        before: RunnableConfig | None = None,
+        limit: int | None = None,
+    ) -> AsyncIterator[CheckpointTuple]:
+        async for checkpoint in self.delegate.alist(
+            config,
+            filter=filter,
+            before=before,
+            limit=limit,
+        ):
+            yield checkpoint
+
+    async def _ensure_write_allowed(self) -> None:
+        guard = _checkpoint_write_guard.get()
+        if guard is None:
+            raise RunOwnershipLostError("checkpoint mutation requires active run ownership")
+        await guard()
+
+    async def aput(
+        self,
+        config: RunnableConfig,
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        new_versions: ChannelVersions,
+    ) -> RunnableConfig:
+        await self._ensure_write_allowed()
+        return await self.delegate.aput(config, checkpoint, metadata, new_versions)
+
+    async def aput_writes(
+        self,
+        config: RunnableConfig,
+        writes: Sequence[tuple[str, Any]],
+        task_id: str,
+        task_path: str = "",
+    ) -> None:
+        await self._ensure_write_allowed()
+        await self.delegate.aput_writes(config, writes, task_id, task_path)
+
+    async def adelete_thread(self, thread_id: str) -> None:
+        await self._ensure_write_allowed()
+        await self.delegate.adelete_thread(thread_id)
+
+    def get_next_version(self, current: Any | None, channel: None) -> Any:
+        return self.delegate.get_next_version(current, channel)
+
+
 def run_lock_key(run_id: str) -> int:
     """Derive a deterministic signed 64-bit advisory lock key for one run."""
     digest = hashlib.sha256(f"run::{run_id}".encode()).digest()
     return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+async def _invalidate_connection(connection: Any, error: BaseException) -> None:
+    """Retire or close a connection after advisory-lock cleanup is uncertain."""
+    invalidate = getattr(connection, "invalidate", None)
+    if invalidate is not None:
+        try:
+            result = invalidate(error)
+            if inspect.isawaitable(result):
+                await result
+            return
+        except BaseException:
+            pass
+
+    close = getattr(connection, "close", None)
+    if close is not None:
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+
+
+async def _acquire_run_lock(connection: Any, run_id: str) -> bool:
+    """Try a session-level run lock and finish its transaction immediately."""
+    try:
+        result = await connection.execute(
+            sa.text("SELECT pg_try_advisory_lock(:key)"),
+            {"key": run_lock_key(run_id)},
+        )
+        acquired = bool(result.scalar_one())
+        if acquired:
+            await connection.commit()
+        else:
+            await connection.rollback()
+        return acquired
+    except BaseException as error:
+        with suppress(BaseException):
+            await _invalidate_connection(connection, error)
+        raise
+
+
+async def _release_run_lock(connection: Any, run_id: str) -> None:
+    """Unlock a run and commit, invalidating the connection on any failure."""
+    try:
+        result = await connection.execute(
+            sa.text("SELECT pg_advisory_unlock(:key)"),
+            {"key": run_lock_key(run_id)},
+        )
+        if not bool(result.scalar_one()):
+            raise RuntimeError(f"advisory lock was not held at release: {run_id}")
+        await connection.commit()
+    except BaseException as error:
+        with suppress(BaseException):
+            await _invalidate_connection(connection, error)
+        raise
 
 
 async def _event_rows(
@@ -162,6 +309,7 @@ async def _reconcile_event_cursor(
     session_factory: Any,
     *,
     event_seq_offset: int | None = None,
+    require_complete: bool = False,
 ) -> tuple[int, int]:
     """Align local events to exact relational sequences without history guessing.
 
@@ -225,6 +373,10 @@ async def _reconcile_event_cursor(
         expected_seq = event_seq_offset + index
         row = by_seq.get(expected_seq)
         if row is None:
+            if require_complete:
+                raise EventReconciliationError(
+                    f"relational event history is missing expected sequence {expected_seq}"
+                )
             break
         if _event_fingerprint(row) != fingerprint:
             raise EventReconciliationError(
@@ -261,6 +413,31 @@ async def _next_event_seq(run_id: str, session_factory: Any) -> int:
     return int(maximum) + 1 if maximum is not None else 0
 
 
+async def _assert_execution_token(
+    run_id: str,
+    session_factory: Any,
+    execution_token: str | None,
+) -> None:
+    """Reject calls that omit, outlive, or mismatch a committed ownership token."""
+    async with session_factory() as session:
+        ownership = (
+            await session.execute(
+                sa.select(QueryRun.execution_token, QueryRun.status).where(
+                    QueryRun.id == str(run_id)
+                )
+            )
+        ).one_or_none()
+    if ownership is None:
+        raise RunOwnershipLostError(f"run ownership lost: {run_id}")
+    current_token, current_status = ownership
+    if execution_token is None:
+        active = current_token is None
+    else:
+        active = current_token == execution_token and current_status == "running"
+    if not active:
+        raise RunOwnershipLostError(f"run ownership lost: {run_id}")
+
+
 async def execute(
     graph: Any,
     run_id: str,
@@ -289,13 +466,25 @@ async def execute(
     config = _config(checkpoint_thread_id or run_id)
     if isinstance(input, dict) and "run_id" not in input:
         input = {**input, "run_id": str(run_id)}
+    if force_fresh and execution_token is None:
+        raise RunOwnershipLostError(f"run ownership lost: {run_id}")
 
+    await _assert_execution_token(run_id, session_factory, execution_token)
     existing = await graph.aget_state(config)
+
+    async def ensure_checkpoint_write_allowed() -> None:
+        await _assert_execution_token(run_id, session_factory, execution_token)
+        await _ensure_active(ensure_active)
 
     fresh_offset: int | None = None
     if force_fresh:
+        await _ensure_active(ensure_active)
         fresh_offset = await _next_event_seq(run_id, session_factory)
-        await _reset_checkpoint_state(graph, config)
+        write_guard_token = _checkpoint_write_guard.set(ensure_checkpoint_write_allowed)
+        try:
+            await _reset_checkpoint_state(graph, config)
+        finally:
+            _checkpoint_write_guard.reset(write_guard_token)
 
     checkpoint_values = (existing.values or {}) if existing else {}
     checkpoint_events = [] if force_fresh else list(checkpoint_values.get("node_events", []))
@@ -314,6 +503,9 @@ async def execute(
         checkpoint_events,
         session_factory,
         event_seq_offset=event_seq_offset,
+        require_complete=bool(
+            not force_fresh and existing and existing.values and not existing.next
+        ),
     )
 
     if not force_fresh and existing and existing.values and not existing.next:
@@ -322,20 +514,24 @@ async def execute(
 
     await _ensure_active(ensure_active)
 
-    async for state in graph.astream(input, config, stream_mode="values"):
-        events = state.get("node_events", [])
-        new_count = len(events)
-        if new_count > persisted:
-            await _append_events(
-                run_id,
-                events,
-                persisted,
-                session_factory,
-                seq_offset=persisted_seq_offset,
-                ensure_active=ensure_active,
-                execution_token=execution_token,
-            )
-            persisted = new_count
+    write_guard_token = _checkpoint_write_guard.set(ensure_checkpoint_write_allowed)
+    try:
+        async for state in graph.astream(input, config, stream_mode="values"):
+            events = state.get("node_events", [])
+            new_count = len(events)
+            if new_count > persisted:
+                await _append_events(
+                    run_id,
+                    events,
+                    persisted,
+                    session_factory,
+                    seq_offset=persisted_seq_offset,
+                    ensure_active=ensure_active,
+                    execution_token=execution_token,
+                )
+                persisted = new_count
+    finally:
+        _checkpoint_write_guard.reset(write_guard_token)
 
     final = await graph.aget_state(config)
     return dict(final.values) if final else {}
@@ -368,7 +564,12 @@ async def _append_events(
     if start >= len(events):
         return
     async with session_factory() as session:
-        if execution_token is not None:
+        current_token = await session.scalar(
+            sa.select(QueryRun.execution_token).where(QueryRun.id == str(run_id))
+        )
+        if execution_token is None:
+            active = current_token is None
+        else:
             ownership = await session.execute(
                 sa.update(QueryRun)
                 .where(
@@ -378,9 +579,10 @@ async def _append_events(
                 )
                 .values(updated_at=datetime.now(UTC))
             )
-            if not bool(getattr(ownership, "rowcount", 0)):
-                await session.rollback()
-                raise RunOwnershipLostError(f"run ownership lost: {run_id}")
+            active = bool(getattr(ownership, "rowcount", 0))
+        if not active:
+            await session.rollback()
+            raise RunOwnershipLostError(f"run ownership lost: {run_id}")
         await _ensure_active(ensure_active, session)
         for index in range(start, len(events)):
             event = events[index]
@@ -453,21 +655,49 @@ async def mark_stale_runs_retryable(
     intact.
     """
     async with session_factory() as session:
-        statement = sa.update(QueryRun).where(
-            QueryRun.status.in_(("pending", "running")),
-        )
+        pending_update = sa.update(QueryRun).where(QueryRun.status == "pending")
+        running_select = sa.select(QueryRun.id).where(QueryRun.status == "running")
         if stale_before is not None:
-            statement = statement.where(QueryRun.updated_at < stale_before)
-        result = await session.execute(
-            statement.values(
+            pending_update = pending_update.where(QueryRun.updated_at < stale_before)
+            running_select = running_select.where(QueryRun.updated_at < stale_before)
+        pending_result = await session.execute(
+            pending_update.values(
                 status="retryable",
                 execution_token=None,
                 updated_at=datetime.now(UTC),
-            ).returning(QueryRun.id)
+            )
         )
-        ids = result.scalars().all()
+        candidate_ids = [
+            str(run_id) for run_id in (await session.scalars(running_select)).all()
+        ]
         await session.commit()
-        return len(ids)
+
+    changed = int(getattr(pending_result, "rowcount", 0) or 0)
+    for candidate_id in candidate_ids:
+        async with session_factory() as candidate_session:
+            connection = await candidate_session.connection()
+            acquired = await _acquire_run_lock(connection, candidate_id)
+            if not acquired:
+                continue
+            try:
+                update = sa.update(QueryRun).where(
+                    QueryRun.id == candidate_id,
+                    QueryRun.status == "running",
+                )
+                if stale_before is not None:
+                    update = update.where(QueryRun.updated_at < stale_before)
+                result = await connection.execute(
+                    update.values(
+                        status="retryable",
+                        execution_token=None,
+                        updated_at=datetime.now(UTC),
+                    )
+                )
+                await connection.commit()
+                changed += int(getattr(result, "rowcount", 0) or 0)
+            finally:
+                await _release_run_lock(connection, candidate_id)
+    return changed
 
 
 def run_setup_checkpoints(settings: Settings) -> None:
