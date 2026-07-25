@@ -150,6 +150,7 @@ def snapshots_import(
     json_output: Annotated[bool, typer.Option("--json", help="Print JSON output.")] = False,
 ) -> None:
     """Import a verified snapshot bundle idempotently."""
+    configure_windows_selector_event_loop_policy()
     try:
         record = asyncio.run(_run_import(bundle))
     except SnapshotImportError as error:
