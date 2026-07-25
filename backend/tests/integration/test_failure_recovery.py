@@ -21,7 +21,6 @@ import pytest
 import pytest_asyncio
 import sqlalchemy as sa
 from bidscope.domain.reports import Report, ReportClaim, ReportItem
-from graph_fakes import FakeReportPersistence
 from bidscope.domain.types import BidScopeErrorCode
 from bidscope.llm.types import ModelUsage, ReportDraft, VerifiedOpportunity
 from bidscope.persistence.models import (
@@ -31,6 +30,7 @@ from bidscope.persistence.models import (
 from bidscope.persistence.models import (
     Report as ReportModel,
 )
+from graph_fakes import FakeReportPersistence
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # ---------------------------------------------------------------------------

@@ -13,13 +13,13 @@ from datetime import UTC, datetime
 from bidscope.clock import FixedClock
 from bidscope.domain.enums import RunStatus
 from bidscope.graph.builder import GraphDeps, build_graph
-from graph_fakes import FakeReportPersistence
 from bidscope.llm.fake import FakeDuplicateModel, FakeIntentModel, FakeReportModel
 from bidscope.retrieval.search import (
     RetrievalCandidate,
     RetrievalFilter,
     RetrievalResult,
 )
+from graph_fakes import FakeReportPersistence
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 

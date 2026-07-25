@@ -92,7 +92,7 @@ jobs:
 
     env:
       BIDSCOPE_DATABASE_URL: postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test
-      BIDSCOPE_CHECKPOINT_DATABASE_URL: postgresql://bidscope:bidscope@localhost:5432/bidscope_test
+      BIDSCOPE_CHECKPOINT_DATABASE_URL: postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test
       BIDSCOPE_APP_MODE: test
 
     steps:
