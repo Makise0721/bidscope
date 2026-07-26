@@ -28,6 +28,21 @@ async def test_async_test_after_sync_test_uses_session_loop(
     assert asyncio.get_event_loop() is _session_event_loop
 
 
+def test_restore_event_loop_after_teardown_installs_fresh_loop() -> None:
+    """The next pytest-asyncio test sees a loop after integration cleanup."""
+    from . import conftest
+
+    asyncio.run(asyncio.sleep(0))
+    assert conftest._current_event_loop() is None
+
+    loop = conftest._restore_event_loop_after_teardown()
+
+    assert conftest._current_event_loop() is loop
+    assert not loop.is_closed()
+    loop.close()
+    asyncio.set_event_loop(None)
+
+
 def test_ensure_current_event_loop_repairs_policy_loop() -> None:
     """The helper installs a usable current loop after asyncio.run clears it."""
     from . import conftest

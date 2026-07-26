@@ -43,6 +43,11 @@ def _ensure_current_event_loop() -> asyncio.AbstractEventLoop:
     return loop
 
 
+def _restore_event_loop_after_teardown() -> asyncio.AbstractEventLoop:
+    """Install a fresh selector loop for pytest-asyncio's next test."""
+    return _ensure_current_event_loop()
+
+
 def _close_owned_event_loops() -> None:
     """Close only loops created by this integration harness."""
     current_loop = _current_event_loop()
@@ -67,6 +72,16 @@ def _close_owned_event_loops() -> None:
         )
 
 
+@pytest.hookimpl(tryfirst=True, hookwrapper=True)
+def pytest_runtest_protocol(
+    item: pytest.Item, nextitem: pytest.Item | None
+) -> Iterator[None]:
+    """Ensure a loop exists before pytest-asyncio's runtest protocol starts."""
+    _ = item, nextitem
+    _ensure_current_event_loop()
+    yield
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item: pytest.Item) -> None:
     """Repair the policy loop before pytest-asyncio prepares an async test."""
@@ -81,6 +96,7 @@ def pytest_runtest_teardown(
     """Close harness loops after all per-test fixture finalizers have run."""
     _ = item, nextitem
     _close_owned_event_loops()
+    _restore_event_loop_after_teardown()
 
 
 def _restore_event_loop(
