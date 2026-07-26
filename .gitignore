@@ -52,6 +52,9 @@ playwright-report/
 test-results/
 e2e/data/
 
+# Internal development documentation
+/docs/
+
 # IDE and OS files
 .vscode/
 .idea/
