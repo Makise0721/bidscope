@@ -260,7 +260,11 @@ The API is available at `http://localhost:8000`. Healthcheck at `GET /healthz`.
 - **Zero-cost is a fixture.** The CNY 0.00 pricing is an offline snapshot, not a live cost measurement.
 - **Latency is committed, not measured.** P95 latency comes from the e2e dataset's `latency_ms` field, not from live timing.
 - **Live-model runs are not reproducible.** Enabling a real model provider breaks determinism and incurs real cost.
-- **Playwright E2E flows are disabled** in the P0 snapshot-only build (`test:e2e` is a no-op).
+- **Playwright E2E covers the full interactive + subscription flow** against a real API and the `bidscope_e2e` database. Run it locally with Postgres up:
+  ```bash
+  BIDSCOPE_TEST_CONTROL_TOKEN="e2e-$(date +%s)" npm run test:e2e
+  ```
+  The webServer step builds the SPA, resets+migrates+seeds `bidscope_e2e`, and starts `bidscope api serve`. Both desktop (1440×900) and mobile (390×844) projects run (12 tests total).
 - **DeepSeek is the only supported live provider.** Other OpenAI-compatible providers may work but are not tested.
 
 ---

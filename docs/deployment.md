@@ -246,3 +246,27 @@ If port 8000, 5432, 9000, or 9001 is already in use:
 - Replace the compose `minio` service with a production S3-compatible endpoint.
 - Run the scheduler as a separate deployment with replica count 1.
 - The image runs as non-root (UID 1000) and exposes only port 8000.
+
+---
+
+## End-to-End Tests (Playwright)
+
+The Playwright E2E suite exercises the full interactive + subscription flow against a real API server and a dedicated `bidscope_e2e` database (distinct from `bidscope_test`, so E2E never collides with the pytest integration suite).
+
+### Prerequisites
+
+- A running PostgreSQL with `pgvector` and a `bidscope_e2e` database (the `scripts/postgres-init/01_create_test_db.sql` init script creates it; for an already-running instance, `CREATE DATABASE bidscope_e2e` once).
+- Node 22+ and the Playwright Chromium browser (`npx playwright install chromium`).
+
+### Running locally
+
+```bash
+BIDSCOPE_TEST_CONTROL_TOKEN="e2e-$(date +%s)" npm run test:e2e
+```
+
+The webServer step (defined in `e2e/playwright.config.ts`) chains: build the SPA → reset+migrate+seed `bidscope_e2e` (`e2e/db-setup.mjs`) → start `bidscope api serve --host 127.0.0.1 --port 8001`. Both the `desktop` (1440×900) and `mobile` (390×844) projects run — 12 tests total. The token gates the test-only `/api/test-controls/*` routes (registered only in `test` mode).
+
+### CI
+
+The `e2e` job in `.github/workflows/ci.yml` provisions `bidscope_e2e`, installs Chromium, runs the suite, and uploads the HTML report + test results on any outcome.
+

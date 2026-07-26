@@ -66,8 +66,8 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
-      - name: Run unit & contract tests
-        run: uv run pytest backend/tests/unit backend/tests/contract -q
+      - name: Run unit, contract & security tests
+        run: uv run pytest backend/tests/unit backend/tests/contract backend/tests/security -q
 
   # --- Integration tests --------------------------------------------------
   integration:
@@ -143,9 +143,25 @@ jobs:
 
   # --- Docker build -------------------------------------------------------
   docker:
-    name: Docker build
+    name: Docker build & smoke
     runs-on: ubuntu-latest
     needs: [integration, eval]
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_DB: bidscope_test
+          POSTGRES_USER: bidscope
+          POSTGRES_PASSWORD: bidscope
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bidscope -d bidscope_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
 
@@ -166,14 +182,42 @@ jobs:
         run: |
           docker run --rm bidscope:ci --help
 
-  # --- Web frontend tests -------------------------------------------------
+      - name: Smoke-test the API server in the image
+        env:
+          BIDSCOPE_APP_MODE: test
+          BIDSCOPE_DATABASE_URL: postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test
+          BIDSCOPE_CHECKPOINT_DATABASE_URL: postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test
+        run: |
+          # Start the API server detached using the canonical serve command,
+          # then poll /healthz. The host network lets the container reach the
+          # runner's postgres service.
+          docker run -d --name bidscope-smoke --network host \
+            -e BIDSCOPE_APP_MODE=test \
+            bidscope:ci bidscope api serve --host 127.0.0.1 --port 8000
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8000/healthz >/dev/null; then
+              echo "healthz OK"
+              docker rm -f bidscope-smoke >/dev/null
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::API server did not become healthy"
+          docker logs bidscope-smoke
+          docker rm -f bidscope-smoke >/dev/null
+          exit 1
+
+      - name: Run migrations in the image
+        run: |
+          docker run --rm --network host \
+            -e BIDSCOPE_CHECKPOINT_DATABASE_URL=postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test \
+            bidscope:ci uv run alembic upgrade head
+
+  # --- Web frontend tests + build ----------------------------------------
   web:
-    name: Web frontend tests
+    name: Web frontend tests & build
     runs-on: ubuntu-latest
     needs: [unit]
-    defaults:
-      run:
-        working-directory: web
     steps:
       - uses: actions/checkout@v4
 
@@ -185,7 +229,91 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - name: Install dependencies
-        run: npm ci
+        run: npm --prefix web ci
 
       - name: Run web tests
-        run: npm run test:unit
+        run: npm run test:web -- --run
+
+      - name: Build web (tsc + vite + copy static)
+        run: npm run build:web
+
+  # --- End-to-end tests ---------------------------------------------------
+  e2e:
+    name: Playwright E2E
+    runs-on: ubuntu-latest
+    needs: [integration, web]
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          # The GHA services postgres only creates POSTGRES_DB; bidscope_e2e is
+          # provisioned in a step below via the init script.
+          POSTGRES_DB: bidscope_test
+          POSTGRES_USER: bidscope
+          POSTGRES_PASSWORD: bidscope
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bidscope -d bidscope_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      BIDSCOPE_TEST_CONTROL_TOKEN: e2e-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Provision bidscope_e2e database
+        env:
+          PGPASSWORD: bidscope
+        # Idempotent: re-runs of this job (or a leftover DB) must not fail the
+        # CREATE. Postgres has no CREATE DATABASE IF NOT EXISTS, so gate on a
+        # pg_database probe via \gexec (same pattern as the init script).
+        run: |
+          psql -h localhost -U bidscope -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          SELECT 'CREATE DATABASE bidscope_e2e'
+          WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'bidscope_e2e')\gexec
+          SQL
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: latest
+
+      - name: Install backend dependencies
+        run: uv sync --frozen
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies
+        run: npm --prefix web ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright E2E
+        run: npm run test:e2e
+
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 30
+
+      - name: Upload Playwright test results
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-test-results
+          path: test-results/
+          retention-days: 7
