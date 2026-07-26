@@ -1,41 +1,33 @@
-import { test, expect } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /**
- * Flow: Complete a run, click the DOCX download button, verify the downloaded
- * file is a valid .docx (check magic bytes PK\x03\x04).
+ * Flow: complete an unscheduled run, click the DOCX download link, verify the
+ * downloaded file is a valid Office Open XML (.docx) archive.
+ *
+ * The representative query auto-confirms, so no Approve click is needed. The
+ * DOCX asset is produced by the delivery node and fetched via an ``<a>`` link;
+ * we assert the report is present before triggering the download.
  */
 test.describe("DOCX download", () => {
   test("downloads a valid DOCX file for a completed run", async ({ page }) => {
     await page.goto("/");
 
-    // Create a run and let it complete.
-    const input = page.locator("#query-input");
+    const input = page.getByLabel("Enter your request");
     await input.fill("四川服务器招标");
     await page.getByRole("button", { name: "Search" }).click();
 
-    // Approve confirmation and wait for the report page.
-    const confirmation = page.getByRole("region", { name: "confirm intent" });
-    await confirmation
-      .waitFor({ state: "visible", timeout: 15_000 })
-      .then(() => confirmation.getByRole("button", { name: "Approve" }).click())
-      .catch(() => {
-        // Confirmation may not appear for auto-confirmed runs.
-      });
-    await page.waitForURL(/#\/runs\/[0-9a-f-]+$/, { timeout: 30_000 });
+    // The run completes and the report renders inline with its download link.
+    const report = page.getByRole("region", { name: "report" });
+    await expect(report).toBeVisible({ timeout: 30_000 });
 
-    // Click the Download DOCX button.
-    const downloadButton = page.getByRole("button", { name: /Download DOCX/ });
-    // Fallback: the download link may render as an <a> with aria-label.
-    const downloadLink = page.getByRole("link", { name: /Download DOCX/ });
-    const downloadTarget =
-      (await downloadButton.count()) > 0 ? downloadButton : downloadLink;
-    await expect(downloadTarget).toBeVisible();
+    const downloadLink = page.getByRole("link", { name: "Download DOCX" });
+    await expect(downloadLink).toBeVisible();
 
     const downloadPromise = page.waitForEvent("download");
-    await downloadTarget.click();
+    await downloadLink.click();
     const download = await downloadPromise;
 
     // Save the download to a temp file and verify the magic bytes.

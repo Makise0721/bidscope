@@ -6,7 +6,9 @@
   "scripts": {
     "dev:web": "npm --prefix web run dev",
     "test:web": "npm --prefix web run test:unit",
-    "build:web": "npm --prefix web run build",
+    "build:web": "npm --prefix web run build && npm run copy:static",
+    "copy:static": "node -e \"const fs=require('fs'),p=require('path');const src=p.join('web','dist');const dest=p.join('backend','src','bidscope','static');fs.rmSync(dest,{recursive:true,force:true});fs.cpSync(src,dest,{recursive:true});console.log('copied web/dist -> '+dest);\"",
+    "e2e:db-setup": "node e2e/db-setup.mjs",
     "test:e2e": "playwright test --config=e2e/playwright.config.ts"
   },
   "devDependencies": {

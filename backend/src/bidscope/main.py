@@ -13,7 +13,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -82,13 +82,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # Serve the built SPA. Mounted AFTER all API routes so it never shadows
     # them; the catch-all falls back to index.html for client-side routing.
+    # ``/api/`` paths are deliberately excluded: an unmatched API request (e.g.
+    # a POST to a test-controls route that is only registered in test mode)
+    # must return a clean 404, not a 405 from the SPA's otherwise-GET-only
+    # catch-all. The route accepts all methods so a non-GET ``/api/`` request
+    # reaches this handler and is mapped to 404 instead of being rejected as
+    # 405 by Starlette's method matching.
     if STATIC_DIR.exists():
         application.mount(
             "/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets"
         )
 
-        @application.get("/{full_path:path}")
+        @application.api_route(
+            "/{full_path:path}",
+            methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+            include_in_schema=False,
+        )
         async def serve_spa(full_path: str) -> FileResponse:  # noqa: ARG001
+            if full_path.startswith("api/"):
+                raise HTTPException(status_code=404, detail="Not Found")
             index_file = STATIC_DIR / "index.html"
             if index_file.exists():
                 return FileResponse(index_file)

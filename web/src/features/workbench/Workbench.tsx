@@ -113,7 +113,16 @@ export function Workbench() {
         });
       },
       (status) => {
-        const terminalPhase = status === "completed" ? "completed" : "failed";
+        // ``awaiting_confirmation`` is a pausing terminal state: the run will
+        // not progress until the operator approves, so the SSE stream closes
+        // with that status and we surface the confirmation panel. ``completed``
+        // fetches the report; anything else is a failure surface.
+        const terminalPhase =
+          status === "completed"
+            ? "completed"
+            : status === "awaiting_confirmation"
+              ? "awaiting_confirmation"
+              : "failed";
         setPhase(terminalPhase);
         if (status === "completed") {
           void getReport(id).then(setReport).catch(() => setPhase("failed"));

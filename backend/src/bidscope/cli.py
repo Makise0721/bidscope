@@ -225,7 +225,28 @@ def api_serve(
     from bidscope.main import app
 
     configure_windows_selector_event_loop_policy()
-    uvicorn.run(app, host=host, port=port)
+    # uvicorn's default ``loop="auto"`` hard-codes ``ProactorEventLoop`` on
+    # Windows, ignoring the policy set above. The Postgres checkpointer uses
+    # psycopg, which cannot run on the proactor loop. Pass an explicit factory
+    # so uvicorn runs on a selector loop on Windows (selector is already the
+    # default on POSIX, so this is a no-op there).
+    uvicorn.run(app, host=host, port=port, loop=_selector_loop_factory())
+
+
+def _selector_loop_factory() -> Any:
+    """Return a uvicorn loop factory that always builds a selector event loop.
+
+    On POSIX this matches uvicorn's default. On Windows it overrides the
+    proactor loop that uvicorn would otherwise force via ``loop="auto"``, which
+    is incompatible with psycopg's async mode (used by the LangGraph Postgres
+    checkpointer).
+    """
+    import asyncio
+
+    def factory() -> asyncio.AbstractEventLoop:
+        return asyncio.SelectorEventLoop()
+
+    return factory
 
 
 # --- scheduler ---------------------------------------------------------------

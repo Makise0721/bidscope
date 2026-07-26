@@ -1,9 +1,13 @@
-import { test, expect } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 
 /**
- * Flow: Complete a run, navigate to the report, verify items/claims/citations
- * are displayed, verify source URLs are plain text (not clickable) for
- * synthetic records.
+ * Flow: complete an unscheduled run, verify report items render with synthetic
+ * provenance and that the synthetic source URL is plain text (not a link).
+ *
+ * The representative query auto-confirms, so no Approve click is needed. The
+ * synthetic label and plain-url assertions are unconditional: every demo
+ * notice is synthetic_demo and example.invalid URLs are never allow-listed, so
+ * they always render as ``<span class="plain-url">``.
  */
 test.describe("Report inspection", () => {
   test("displays report items with plain-text synthetic URLs", async ({
@@ -11,37 +15,29 @@ test.describe("Report inspection", () => {
   }) => {
     await page.goto("/");
 
-    // Create a run and let it complete.
-    const input = page.locator("#query-input");
+    const input = page.getByLabel("Enter your request");
     await input.fill("四川服务器招标");
     await page.getByRole("button", { name: "Search" }).click();
-    await confirmationApprove(page);
-    await page.waitForURL(/#\/runs\/[0-9a-f-]+$/, { timeout: 30_000 });
 
-    // The report region is visible with opportunity items.
+    // The run completes and the report renders inline.
     const report = page.getByRole("region", { name: "report" });
-    await expect(report).toBeVisible();
+    await expect(report).toBeVisible({ timeout: 30_000 });
+
+    // The report lists at least one opportunity.
     const items = report.locator(".opportunity-list .opportunity");
     await expect(items.first()).toBeVisible();
 
-    // Synthetic records render their source URL as plain text (not a link).
+    // Synthetic records carry the synthetic label.
     const syntheticLabel = page.locator("[data-testid='synthetic-label']");
-    if (await syntheticLabel.count()) {
-      // The synthetic label is present; the URL next to it must be a <span>,
-      // not an <a> tag.
-      const plainUrl = report.locator(".plain-url");
-      await expect(plainUrl.first()).toBeVisible();
-    }
+    await expect(syntheticLabel.first()).toBeVisible();
+    await expect(syntheticLabel.first()).toContainText("合成演示数据");
+
+    // Synthetic source URLs render as plain text (a <span>, not an <a>).
+    const plainUrl = report.locator(".plain-url");
+    await expect(plainUrl.first()).toBeVisible();
+    await expect(plainUrl.first()).toContainText("example.invalid");
+
+    // Each opportunity offers an evidence drawer trigger.
+    await expect(page.getByRole("button", { name: "Open evidence" }).first()).toBeVisible();
   });
 });
-
-/** Approve the intent confirmation panel if it appears. */
-async function confirmationApprove(page: import("@playwright/test").Page) {
-  const confirmation = page.getByRole("region", { name: "confirm intent" });
-  await confirmation
-    .waitFor({ state: "visible", timeout: 15_000 })
-    .then(() => confirmation.getByRole("button", { name: "Approve" }).click())
-    .catch(() => {
-      // Confirmation may not appear for auto-confirmed runs.
-    });
-}

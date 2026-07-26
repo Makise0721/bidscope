@@ -25,8 +25,26 @@ router = APIRouter(
 
 #: Seconds between heartbeat comments while waiting for terminal state.
 HEARTBEAT_INTERVAL = 15.0
-#: Terminal statuses after which the stream closes.
-TERMINAL_STATUSES = {"completed", "failed", "evidence_insufficient", "retryable"}
+#: Poll cadence for new events / terminal status. Kept short so a run that
+#: reaches a terminal state is surfaced to the SSE client within ~POLL_INTERVAL
+#: seconds rather than waiting up to HEARTBEAT_INTERVAL. The heartbeat comment
+#: (which keeps proxies from dropping the idle connection) is still emitted at
+#: HEARTBEAT_INTERVAL; the two cadences are deliberately decoupled.
+POLL_INTERVAL = 0.5
+#: Terminal/pausing statuses after which the stream closes. A run that pauses
+#: at ``awaiting_confirmation`` is effectively terminal from the SSE client's
+#: perspective: the run will not progress until ``POST /confirm`` resumes it, so
+#: the stream emits a terminal marker (carrying the status) and closes. This
+#: matches the web client's contract (see ``web/src/test/mockServer.ts``): the
+#: Workbench's terminal handler maps the status to its ``awaiting_confirmation``
+#: phase and renders the confirmation panel.
+TERMINAL_STATUSES = {
+    "completed",
+    "failed",
+    "evidence_insufficient",
+    "retryable",
+    "awaiting_confirmation",
+}
 
 
 def get_run_service(request: Request) -> RunService:
@@ -62,6 +80,7 @@ async def stream_events(
 
     async def event_generator() -> Any:
         after_seq = last_event_id
+        next_heartbeat_at = asyncio.get_running_loop().time() + HEARTBEAT_INTERVAL
         while True:
             events = await service.list_events(run_id, after_seq=after_seq)
             for event in events:
@@ -74,9 +93,15 @@ async def stream_events(
                 payload = json.dumps({"status": fresh.status, "terminal": True})
                 yield {"id": "terminal", "event": "terminal", "data": payload}
                 return
-            # Otherwise wait briefly for new events (with a heartbeat).
+            # Wait briefly for new events. Poll tightly so terminal state is
+            # surfaced quickly, and emit a heartbeat comment at the slower
+            # HEARTBEAT_INTERVAL so idle connections are not dropped by proxies.
+            now = asyncio.get_running_loop().time()
+            if now >= next_heartbeat_at:
+                yield {"comment": "heartbeat"}
+                next_heartbeat_at = now + HEARTBEAT_INTERVAL
             try:
-                await asyncio.sleep(HEARTBEAT_INTERVAL)
+                await asyncio.sleep(POLL_INTERVAL)
             except asyncio.CancelledError:
                 return
 

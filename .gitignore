@@ -33,6 +33,25 @@ eval/results/*.json
 node_modules/
 .npm/
 
+# Built SPA bundle copied into the FastAPI static dir by `npm run copy:static`
+# (mirrors the Dockerfile's `COPY --from=web-build` step). It is a build
+# artifact regenerated on every `build:web`, so it must not be committed and
+# should not leak into the backend test environment.
+backend/src/bidscope/static/
+
+# Local object-store outputs (DOCX reports, snapshot payloads) written by the
+# LocalObjectStore at runtime. Generated during E2E/serve; never committed.
+data/objects/
+
+# Playwright E2E artifacts: HTML report, per-run test output, and the
+# object-store working directory the E2E API server writes into. The webServer
+# runs with CWD=e2e/ (Playwright sets CWD to the config dir), so the default
+# `data/objects` object-store root resolves under e2e/data/. All are
+# regenerated on every `npm run test:e2e` run.
+playwright-report/
+test-results/
+e2e/data/
+
 # IDE and OS files
 .vscode/
 .idea/

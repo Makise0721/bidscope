@@ -8,6 +8,9 @@ controls used by the integration test suite:
   node failure (for recovery/retry regression tests).
 * ``POST /api/test-controls/import-batch-2`` — trigger import of the
   synthetic-demo Batch 2 bundle.
+* ``POST /api/test-controls/run-scheduler-tick`` — run one subscription
+  scheduler tick with a far-future ``now`` so every active subscription is due,
+  exercising the inbox pipeline without waiting for the next cron occurrence.
 
 In demo, development, or production mode these routes are never registered, so
 requests return 404.
@@ -86,3 +89,29 @@ async def import_batch_2(
         "status": record.status,
         "import_id": str(record.id),
     }
+
+
+@router.post("/run-scheduler-tick")
+async def run_scheduler_tick(
+    request: Request,
+    _token: None = Depends(_require_test_token),
+) -> dict[str, Any]:
+    """Run one subscription scheduler tick immediately (test-only).
+
+    Drives ``run_scheduler_tick`` with ``now`` set far in the future so every
+    active subscription is considered due, regardless of its cron schedule.
+    This lets E2E exercise the subscription/inbox pipeline (advisory lock,
+    graph execution, notice diff, inbox events) without waiting for the next
+    cron occurrence or coupling the test to the persisted ``__next_run_at``.
+
+    Returns the tick counters (``due``, ``ran``, ``skipped``, ``failed``).
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from bidscope.subscriptions.scheduler import run_scheduler_tick as _tick
+
+    settings = request.app.state.settings
+    # A far-future reference forces every active subscription to be due.
+    far_future = datetime.now(UTC) + timedelta(days=365)
+    counters = await _tick(settings, now=far_future)
+    return {"run_scheduler_tick": "ok", **counters}
