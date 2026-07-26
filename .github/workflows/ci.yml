@@ -180,7 +180,7 @@ jobs:
 
       - name: Verify image runs
         run: |
-          docker run --rm bidscope:ci --help
+          docker run --rm bidscope:ci bidscope --help
 
       - name: Initialize schema and checkpoints in the image
         run: |
