@@ -84,11 +84,23 @@ async def stream_events(
 
 
 def _parse_last_event_id(request: Request) -> int:
-    """Extract the resume ``seq`` from the ``Last-Event-ID`` header (default -1)."""
+    """Extract the resume ``seq`` to start streaming after.
+
+    The primary source is the SSE ``Last-Event-ID`` header. Browser
+    ``EventSource`` cannot set custom headers, so we also honour an
+    ``?after_seq=`` query parameter as a fallback when the header is absent;
+    the header always wins when both are present.
+    """
     header = request.headers.get("Last-Event_ID") or request.headers.get("Last-Event-ID")
-    if header is None:
-        return -1
-    try:
-        return int(header)
-    except ValueError:
-        return -1
+    if header is not None:
+        try:
+            return int(header)
+        except ValueError:
+            return -1
+    query = request.query_params.get("after_seq")
+    if query is not None:
+        try:
+            return int(query)
+        except ValueError:
+            return -1
+    return -1

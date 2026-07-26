@@ -4,7 +4,7 @@ import { RunHistory } from "../features/runs/RunHistory";
 import { SourcesView } from "../features/sources/SourcesView";
 import { SubscriptionsView } from "../features/subscriptions/SubscriptionsView";
 import { Workbench } from "../features/workbench/Workbench";
-import { RunReport } from "../features/workbench/RunReport";
+import { RunReportRoute } from "../features/workbench/RunReport";
 import "../styles/workbench.css";
 
 export function App() {
@@ -25,7 +25,7 @@ export function App() {
         <Routes>
           <Route path="/" element={<Workbench />} />
           <Route path="/runs" element={<RunHistory />} />
-          <Route path="/runs/:runId" element={<RunReport />} />
+          <Route path="/runs/:runId" element={<RunReportRoute />} />
           <Route path="/subscriptions" element={<SubscriptionsView />} />
           <Route path="/sources" element={<SourcesView />} />
           <Route path="/evaluation" element={<EvaluationView />} />

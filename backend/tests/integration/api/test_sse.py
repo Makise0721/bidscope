@@ -114,6 +114,39 @@ def test_sse_honors_last_event_id(demo_client: TestClient, sse_run_id: str) -> N
     assert [e["event"] for e in events] == ["intent_valid", "run_completed"]
 
 
+def test_sse_honors_after_seq_query_param(demo_client: TestClient, sse_run_id: str) -> None:
+    """``?after_seq=`` resumes like Last-Event-ID for browser EventSource clients.
+
+    Browser ``EventSource`` cannot set the ``Last-Event-ID`` header on the
+    initial request, so resumption relies on the query parameter fallback.
+    """
+    with demo_client.stream(
+        "GET", f"/api/runs/{sse_run_id}/events?after_seq=0"
+    ) as response:
+        assert response.status_code == 200
+        body = response.read().decode("utf-8")
+
+    events = _parse_sse(body)
+    assert [e["event"] for e in events] == ["intent_valid", "run_completed"]
+
+
+def test_sse_header_takes_precedence_over_after_seq(
+    demo_client: TestClient, sse_run_id: str
+) -> None:
+    """When both are present, ``Last-Event-ID`` wins."""
+    with demo_client.stream(
+        "GET",
+        f"/api/runs/{sse_run_id}/events?after_seq=1",
+        headers={"Last-Event-ID": "0"},
+    ) as response:
+        assert response.status_code == 200
+        body = response.read().decode("utf-8")
+
+    events = _parse_sse(body)
+    # Header value 0 wins → only seq 1 and 2 are emitted.
+    assert [e["event"] for e in events] == ["intent_valid", "run_completed"]
+
+
 def test_sse_returns_404_for_unknown_run(demo_client: TestClient) -> None:
     """An unknown run id returns 404."""
     with demo_client.stream(

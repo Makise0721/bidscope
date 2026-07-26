@@ -142,6 +142,195 @@ body {
   }
 }
 
+/* Two-column workbench layout: left = query + report/confirmation,
+   right = trace + evidence. Breakpoint is 1049px (deliberately one shy of the
+   existing 1050px report-header stack — this grid is a separate layout system
+   and should collapse just before the report header does). */
+.workbench-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 24px;
+  padding: var(--space);
+  align-items: start;
+}
+
+.workbench-main {
+  min-width: 0;
+}
+
+.workbench-side {
+  display: grid;
+  gap: 16px;
+  padding: var(--space);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-panel);
+  position: sticky;
+  top: var(--space);
+}
+
+.run-timeline h3 {
+  margin: 0 0 12px;
+  font-size: 14px;
+}
+
+.timeline-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.timeline-item {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) auto;
+  gap: 4px 8px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--color-border);
+  background: var(--color-bg);
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.timeline-item.timeline-ok {
+  border-left-color: var(--color-accent);
+}
+
+.timeline-item.timeline-error,
+.timeline-item.timeline-failed {
+  border-left-color: #a33a32;
+}
+
+.timeline-node {
+  font-weight: 600;
+}
+
+.timeline-event {
+  color: var(--color-muted);
+  font-family: ui-monospace, "Cascadia Code", monospace;
+}
+
+.timeline-message {
+  grid-column: 1 / -1;
+  font-size: 12px;
+}
+
+.evidence-drawer-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 100;
+}
+
+.evidence-drawer {
+  width: min(420px, 100vw);
+  height: 100vh;
+  max-height: 100vh;
+  overflow-y: auto;
+  background: var(--color-panel);
+  border-left: 1px solid var(--color-border);
+  padding: var(--space);
+  box-shadow: -12px 0 32px rgba(0, 0, 0, 0.08);
+}
+
+.evidence-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.evidence-section {
+  padding: 12px 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.evidence-section:first-of-type {
+  border-top: 0;
+}
+
+.evidence-section h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--color-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.evidence-synthetic {
+  margin: 0 0 8px;
+}
+
+.provenance-detail dt {
+  color: var(--color-muted);
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+.provenance-detail dd {
+  margin: 2px 0 0;
+  font-size: 14px;
+  word-break: break-all;
+}
+
+.citation-list,
+.claim-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.citation {
+  padding: 8px 0;
+  border-left: 3px solid var(--color-accent-weak);
+  padding-left: 10px;
+}
+
+.citation-label {
+  font-weight: 600;
+  font-size: 13px;
+  margin: 0 0 4px;
+}
+
+.citation-excerpt {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+
+.citation-meta {
+  font-size: 12px;
+  font-family: ui-monospace, "Cascadia Code", monospace;
+}
+
+.claim-citations {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.status-warning {
+  color: #8a5a00;
+}
+
+@media (max-width: 1049px) {
+  .workbench-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .workbench-side {
+    position: static;
+    order: 2;
+  }
+}
+
 .app-header {
   display: flex;
   align-items: center;

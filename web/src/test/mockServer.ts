@@ -7,12 +7,75 @@ export const REPRESENTATIVE_QUERY =
 
 export const RUN_ID = "11111111-1111-1111-1111-111111111111";
 
+/**
+ * A report payload matching the full backend DTO (`_serialize_report` in
+ * `backend/src/bidscope/api/routes/reports.py`): provenance, citations, and
+ * claims included. The synthetic capture_kind and example.invalid URL exercise
+ * the synthetic-demo labelling + plain-text URL rules.
+ */
+export const reportWithEvidence = {
+  id: "report-1",
+  run_id: "run-1",
+  export_key: "export-1",
+  conditions: { region: "四川", budget: "≥500万" },
+  freshness_window: "7d",
+  source_availability: ["ccgp"],
+  completeness_warning: null,
+  generated_at: "2026-07-18T00:00:00+00:00",
+  items: [
+    {
+      title: "四川省智算中心服务器采购招标公告",
+      source: "ccgp",
+      url: "https://example.invalid/demo-001",
+      retrieved_at: "2026-07-18T00:00:00+00:00",
+      hash_prefix: "aaaaaaaa",
+      freshness_days: "2",
+      known_fields: {
+        region: "四川",
+        budget: "5000000",
+        budget_currency: "CNY",
+        deadline: "2026-08-30",
+      },
+      unknown_fields: ["foo"],
+      relevance_reason: "Matches 智算中心 and 服务器 keywords.",
+      risk_note: "Short deadline.",
+      provenance: {
+        source: "ccgp",
+        source_title: "四川省智算中心服务器采购招标公告",
+        source_url: "https://example.invalid/demo-001",
+        capture_kind: "synthetic_fixture",
+        source_version_id: "version-1",
+        parser_version: "ccgp-v1",
+      },
+      citations: [
+        {
+          evidence_id: "evidence-1",
+          span_hash: "span-1",
+          start: 0,
+          end: 42,
+          excerpt: "本项目预算金额为人民币 500 万元整。",
+          label: "预算金额证据",
+        },
+      ],
+      claims: [
+        {
+          text: "预算金额为 500 万元",
+          citation_ids: ["evidence-1"],
+        },
+      ],
+    },
+  ],
+};
+
 export const handlers = [
   http.post("/api/runs", async () => {
     await delay(0);
     return HttpResponse.json({
       id: RUN_ID,
-      status: "pending",
+      // Honest status: this representative query needs confirmation before the
+      // run proceeds. The Workbench branches on this status rather than
+      // assuming every run requires confirmation.
+      status: "awaiting_confirmation",
       user_request: REPRESENTATIVE_QUERY,
     });
   }),
@@ -33,11 +96,27 @@ export const handlers = [
 
   http.get("/api/runs/:id/events", async () => {
     await delay(0);
-    return HttpResponse.json({
-      events: [
-        { seq: 0, node: "parse_intent", event: "intent_parsed", status: "ok" },
-        { seq: 1, node: "confirm_intent", event: "needs_confirmation", status: "ok" },
-      ],
+    // Serve a syntactically valid SSE stream so any test that drives a real
+    // ``running`` phase through MSW (without installing the per-test
+    // FakeEventSource) receives ``text/event-stream`` rather than a JSON body
+    // that would trip EventSource's onerror. Per-test stubs replace the
+    // EventSource constructor directly and bypass this handler.
+    const body = [
+      "event: intent_parsed",
+      "id: 0",
+      'data: {"seq":0,"node":"parse_intent","event":"intent_parsed","status":"ok","message":null,"details":null}',
+      "",
+      "event: needs_confirmation",
+      "id: 1",
+      'data: {"seq":1,"node":"confirm_intent","event":"needs_confirmation","status":"ok","message":null,"details":null}',
+      "",
+      "event: terminal",
+      "id: terminal",
+      'data: {"status":"awaiting_confirmation","terminal":true}',
+      "",
+    ].join("\n");
+    return new HttpResponse(body, {
+      headers: { "content-type": "text/event-stream" },
     });
   }),
 
