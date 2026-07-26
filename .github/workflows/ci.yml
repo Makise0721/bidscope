@@ -182,17 +182,29 @@ jobs:
         run: |
           docker run --rm bidscope:ci --help
 
+      - name: Initialize schema and checkpoints in the image
+        run: |
+          # The image installs Alembic and the BidScope CLI system-wide. Run
+          # the direct binaries as UID 1000; `uv run` would try to create
+          # /app/.venv, which is intentionally not writable in the image.
+          docker run --rm --network host \
+            -e BIDSCOPE_DATABASE_URL=postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test \
+            -e BIDSCOPE_CHECKPOINT_DATABASE_URL=postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test \
+            bidscope:ci alembic upgrade head
+          docker run --rm --network host \
+            -e BIDSCOPE_DATABASE_URL=postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test \
+            -e BIDSCOPE_CHECKPOINT_DATABASE_URL=postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test \
+            bidscope:ci bidscope checkpoints setup
+
       - name: Smoke-test the API server in the image
-        env:
-          BIDSCOPE_APP_MODE: test
-          BIDSCOPE_DATABASE_URL: postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test
-          BIDSCOPE_CHECKPOINT_DATABASE_URL: postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test
         run: |
           # Start the API server detached using the canonical serve command,
           # then poll /healthz. The host network lets the container reach the
           # runner's postgres service.
           docker run -d --name bidscope-smoke --network host \
             -e BIDSCOPE_APP_MODE=test \
+            -e BIDSCOPE_DATABASE_URL=postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test \
+            -e BIDSCOPE_CHECKPOINT_DATABASE_URL=postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test \
             bidscope:ci bidscope api serve --host 127.0.0.1 --port 8000
           for i in $(seq 1 30); do
             if curl -sf http://127.0.0.1:8000/healthz >/dev/null; then
@@ -206,12 +218,6 @@ jobs:
           docker logs bidscope-smoke
           docker rm -f bidscope-smoke >/dev/null
           exit 1
-
-      - name: Run migrations in the image
-        run: |
-          docker run --rm --network host \
-            -e BIDSCOPE_CHECKPOINT_DATABASE_URL=postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test \
-            bidscope:ci alembic upgrade head
 
   # --- Web frontend tests + build ----------------------------------------
   web:
@@ -292,6 +298,9 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: web/package-lock.json
+
+      - name: Install root dependencies
+        run: npm ci
 
       - name: Install web dependencies
         run: npm --prefix web ci
