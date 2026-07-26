@@ -43,7 +43,9 @@ def _sha256(path: Path) -> str:
 def _safe_relative(base: Path, candidate: str) -> Path | None:
     """Return the resolved path for a declared file, or None if it escapes base.
 
-    Rejects path traversal that would land outside the bundle directory.
+    Rejects path traversal that would land outside the bundle directory. Symlink
+    rejection happens before this helper resolves the path so callers can report
+    symlinks as an invalid file type rather than treating their targets as files.
     """
     if ".." in candidate.split("/") or candidate.startswith("/"):
         return None
@@ -51,6 +53,22 @@ def _safe_relative(base: Path, candidate: str) -> Path | None:
     if base.resolve() != resolved and base.resolve() not in resolved.parents:
         return None
     return resolved
+
+
+def _contains_symlink(base: Path, candidate: str) -> bool:
+    """Return whether a declared path or any parent component is a symlink."""
+    raw_path = base / candidate
+    try:
+        relative_parts = raw_path.relative_to(base).parts
+    except ValueError:
+        return False
+
+    current = base
+    for part in relative_parts:
+        current /= part
+        if current.is_symlink():
+            return True
+    return False
 
 
 def _convert_manifest_errors(data: dict[str, Any]) -> list[InspectionError]:
@@ -136,6 +154,15 @@ def inspect_bundle(bundle_path: Path) -> InspectionResult:
     )
 
     for name, expected_hash in declared.items():
+        if _contains_symlink(bundle_path, name):
+            errors.append(
+                InspectionError(
+                    "invalid_file_type",
+                    f"declared file must be a regular file, got: {name}",
+                    name,
+                )
+            )
+            continue
         target = _safe_relative(bundle_path, name)
         if target is None:
             errors.append(
@@ -145,10 +172,9 @@ def inspect_bundle(bundle_path: Path) -> InspectionResult:
         if not target.exists():
             errors.append(InspectionError("missing_file", f"declared file missing: {name}", name))
             continue
-        # Reject anything that is not a regular file: directories, symlinks,
-        # FIFOs, devices, etc. Symlinks are checked explicitly because a symlink
-        # resolving to a regular file would otherwise pass ``is_file()``.
-        if target.is_symlink() or not target.is_file():
+        # Reject anything that is not a regular file: directories, FIFOs,
+        # devices, etc.
+        if not target.is_file():
             errors.append(
                 InspectionError(
                     "invalid_file_type",
