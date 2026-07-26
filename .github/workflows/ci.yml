@@ -211,7 +211,7 @@ jobs:
         run: |
           docker run --rm --network host \
             -e BIDSCOPE_CHECKPOINT_DATABASE_URL=postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test \
-            bidscope:ci uv run alembic upgrade head
+            bidscope:ci alembic upgrade head
 
   # --- Web frontend tests + build ----------------------------------------
   web:
