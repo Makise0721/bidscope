@@ -63,12 +63,18 @@ All application configuration uses the `BIDSCOPE_` prefix. Defaults are loaded f
 |---|---|---|
 | `BIDSCOPE_APP_MODE` | `demo` | Runtime mode: `demo`, `development`, `production`, or `test`. Test-only routes are registered only when this is `test`. |
 | `BIDSCOPE_DATABASE_URL` | `postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope` | Async SQLAlchemy URL for the main application engine. |
-| `BIDSCOPE_CHECKPOINT_DATABASE_URL` | `postgresql://bidscope:bidscope@localhost:5432/bidscope` | Sync SQLAlchemy URL for LangGraph checkpoint persistence. |
+| `BIDSCOPE_CHECKPOINT_DATABASE_URL` | `postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope` | Sync SQLAlchemy URL for LangGraph checkpoint persistence. Must use the `psycopg` driver, not bare `postgresql://` (which selects the unmaintained `psycopg2`). |
 | `BIDSCOPE_REAL_MODEL_ENABLED` | `false` | Enable live-model providers. When `false`, the deterministic fake model is used. |
 | `BIDSCOPE_MODEL_BASE_URL` | `https://api.deepseek.com` | OpenAI-compatible base URL for the live-model provider. |
 | `BIDSCOPE_MODEL_NAME` | `deepseek-chat` | Model name passed to the live-model provider. |
 | `BIDSCOPE_MODEL_API_KEY` | (unset) | API key for the live-model provider. Required when `REAL_MODEL_ENABLED=true`. |
-| `BIDSCOPE_OBJECT_STORE_ROOT` | `data/objects` | Root directory for the local object store (used when not in production with S3). |
+| `BIDSCOPE_OBJECT_STORE_TYPE` | `local` | Object-store backend: `local` (filesystem) or `s3` (S3-compatible / MinIO). |
+| `BIDSCOPE_OBJECT_STORE_ROOT` | `data/objects` | Root directory for the local object store (used only when `OBJECT_STORE_TYPE=local`). |
+| `BIDSCOPE_S3_ENDPOINT` | (unset) | S3-compatible endpoint URL (e.g. `http://minio:9000`). Required when `OBJECT_STORE_TYPE=s3`. |
+| `BIDSCOPE_S3_BUCKET` | (unset) | S3 bucket name. Required when `OBJECT_STORE_TYPE=s3`. |
+| `BIDSCOPE_S3_ACCESS_KEY` | (unset) | Static access key. Required when `OBJECT_STORE_TYPE=s3` (the store never falls back to ambient credentials). |
+| `BIDSCOPE_S3_SECRET_KEY` | (unset) | Static secret key paired with `S3_ACCESS_KEY`. Required when `OBJECT_STORE_TYPE=s3`. |
+| `BIDSCOPE_S3_PREFIX` | (empty) | Optional logical key prefix applied to every stored object. |
 | `BIDSCOPE_ADMIN_TOKEN` | (unset) | Optional token for administrative operations. |
 | `BIDSCOPE_TEST_CONTROL_TOKEN` | (unset) | Token required by `/api/test-controls/*` routes (only registered in `test` mode). |
 

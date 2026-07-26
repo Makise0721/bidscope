@@ -21,6 +21,7 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from bidscope.api.dependencies import create_object_store
 from bidscope.config import Settings, get_settings
 from bidscope.db import create_engine_and_session
 from bidscope.persistence.models import Subscription
@@ -249,7 +250,6 @@ async def run_scheduler_tick(
 
     from bidscope.api.dependencies import _build_run_service_components
     from bidscope.clock import SystemClock
-    from bidscope.delivery.objects import LocalObjectStore
     from bidscope.graph.executor import _to_plain_dsn
 
     resolved = settings or get_settings()
@@ -261,9 +261,14 @@ async def run_scheduler_tick(
             return {"due": 0, "ran": 0, "skipped": 0, "failed": 0}
 
         # Process-local graph + run service over a dedicated checkpointer.
+        # The object store is built via the shared ``create_object_store`` factory
+        # (module-level import) so the scheduler process honours
+        # BIDSCOPE_OBJECT_STORE_TYPE (e.g. S3/MinIO in compose) exactly like the
+        # API; hard-coding LocalObjectStore here would write subscription report
+        # payloads to the container filesystem, invisible to the API process.
         sync_engine = sa.create_engine(_to_sync_dsn(resolved.database_url))
         sync_session_factory = orm.sessionmaker(bind=sync_engine)
-        object_store = LocalObjectStore(root=resolved.object_store_root)
+        object_store = create_object_store(resolved)
         dsn = _to_plain_dsn(resolved.checkpoint_database_url)
         try:
             async with AsyncPostgresSaver.from_conn_string(dsn) as checkpointer:

@@ -23,10 +23,10 @@ from typing import Annotated, Any
 
 import typer
 
+from bidscope.api.dependencies import create_object_store
 from bidscope.clock import SystemClock
 from bidscope.config import get_settings
 from bidscope.db import create_engine_and_session
-from bidscope.delivery.objects import LocalObjectStore
 from bidscope.evaluation.datasets import DatasetError
 from bidscope.evaluation.runner import EvaluationExecutionError, run_deterministic
 from bidscope.graph.executor import run_setup_checkpoints
@@ -82,7 +82,7 @@ def _build_importer() -> SnapshotImporter:
     return SnapshotImporter(
         session_factory=session_factory,
         repository_factory=SnapshotRepository,
-        object_store=LocalObjectStore(".data/objects"),
+        object_store=create_object_store(get_settings()),
         clock=SystemClock(),
     )
 

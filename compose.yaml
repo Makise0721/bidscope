@@ -33,11 +33,27 @@ services:
     volumes:
       - minio_data:/data
 
+  # One-shot bucket bootstrap: creates the configured S3 bucket before the API
+  # or scheduler start, so neither has to create it on first request.
+  minio-init:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      # Mirrors the S3 settings the app services consume below; read by mc.
+      BIDSCOPE_S3_BUCKET: bidscope
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set bidscope http://minio:9000 minio minioadmin &&
+      mc mb --ignore-existing bidscope/${BIDSCOPE_S3_BUCKET:-bidscope}
+      "
+
   api:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["bidscope", "api", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["bidscope", "api", "serve", "--host", "0.0.0.0", "--port", "8000"]
     environment:
       BIDSCOPE_APP_MODE: demo
       BIDSCOPE_DATABASE_URL: postgresql+asyncpg://bidscope:bidscope@postgres:5432/bidscope
@@ -54,6 +70,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
@@ -80,6 +98,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
 volumes:

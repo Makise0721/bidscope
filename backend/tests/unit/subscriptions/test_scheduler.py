@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
@@ -238,6 +239,102 @@ async def test_run_scheduler_tick_disposes_engine_when_due_listing_fails(
         await scheduler.run_scheduler_tick(Settings(), now=datetime.now(UTC))
 
     engine.dispose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_scheduler_tick_uses_configured_object_store_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scheduler process must build its object store via ``create_object_store``.
+
+    The scheduler is a separate process from the API and is configured with the
+    same ``BIDSCOPE_OBJECT_STORE_TYPE``/``BIDSCOPE_S3_*`` env vars in compose.
+    Hard-coding ``LocalObjectStore`` here would silently write subscription
+    report payloads to the container filesystem, invisible to the API process.
+    """
+    from bidscope.api import dependencies as deps
+    from bidscope.delivery.objects import LocalObjectStore
+
+    s3_settings = Settings(
+        object_store_type="s3",
+        s3_endpoint="http://minio:9000",
+        s3_bucket="bidscope",
+        s3_access_key="minio",
+        s3_secret_key="minioadmin",
+    )
+    captured_store = LocalObjectStore(root="unused-marker")
+    factory = Mock(return_value=captured_store)
+    # Patch the module-level name the scheduler resolves at runtime.
+    monkeypatch.setattr(scheduler, "create_object_store", factory)
+
+    engine = Mock()
+    engine.dispose = AsyncMock()
+    sync_engine = Mock()
+    sync_engine.dispose = Mock()
+    session_factory = _SessionFactory([])
+    monkeypatch.setattr(
+        scheduler,
+        "create_engine_and_session",
+        Mock(return_value=(engine, session_factory)),
+    )
+    # Non-empty due list drives the scheduler into the run-service assembly
+    # branch where the object store is constructed.
+    due = [_subscription("sub-1", "2026-07-20T08:00:00+08:00")]
+    monkeypatch.setattr(
+        scheduler,
+        "list_due_subscriptions",
+        AsyncMock(return_value=due),
+    )
+    monkeypatch.setattr(scheduler.sa, "create_engine", Mock(return_value=sync_engine))
+
+    # Stub the heavy graph/checkpointer assembly so only the factory call is
+    # asserted. ``AsyncPostgresSaver.from_conn_string`` returns an object used
+    # as ``async with ... as checkpointer``; model it minimally.
+    class _SaverCtx:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    saver_cls = Mock()
+    saver_cls.from_conn_string = Mock(return_value=_SaverCtx())
+    monkeypatch.setitem(
+        sys.modules,
+        "langgraph.checkpoint.postgres.aio",
+        SimpleNamespace(AsyncPostgresSaver=saver_cls),
+    )
+
+    built_with: dict[str, object] = {}
+
+    def _fake_build_components(*args: object, **kwargs: object) -> object:
+        # Signature: (settings, session_factory, sync_session_factory,
+        #             object_store, clock, checkpointer)
+        built_with["object_store"] = args[3] if len(args) >= 4 else kwargs.get("object_store")
+        return SimpleNamespace()
+
+    # ``_build_run_service_components`` is imported inside the function body, so
+    # patch it on the module it is resolved from.
+    monkeypatch.setattr(
+        "bidscope.api.dependencies._build_run_service_components",
+        _fake_build_components,
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_run_due_subscriptions",
+        AsyncMock(return_value={"due": 1, "ran": 1, "skipped": 0, "failed": 0}),
+    )
+
+    result = await scheduler.run_scheduler_tick(s3_settings, now=datetime.now(UTC))
+
+    # The factory MUST be invoked with the S3-configured settings (not bypassed
+    # by a hard-coded LocalObjectStore).
+    factory.assert_called_once_with(s3_settings)
+    # And the store handed to the run service is exactly the factory's product.
+    assert built_with.get("object_store") is captured_store
+    assert result == {"due": 1, "ran": 1, "skipped": 0, "failed": 0}
+    # Sanity: the deps module still exports the real factory for the API path.
+    assert callable(deps.create_object_store)
 
 
 @pytest.mark.asyncio

@@ -126,10 +126,10 @@ With the infrastructure running and migrations applied:
 
 ```bash
 # Start the API (serves both the backend and the built SPA)
-uv run bidscope api
+uv run bidscope api serve
 # Or, if the frontend is not built:
 npm --prefix web run build
-uv run bidscope api
+uv run bidscope api serve
 ```
 
 Then open `http://localhost:8000`:

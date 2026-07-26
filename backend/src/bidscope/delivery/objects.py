@@ -68,6 +68,10 @@ class S3ObjectStore:
 
     The bucket and an optional key prefix are supplied at construction so that
     every key passed to the store methods is a logical, bucket-relative path.
+    When ``client`` is omitted, an explicit boto3 client is built from the
+    supplied credentials/endpoint — the store never silently relies on ambient
+    (IAM/env) credentials. Inject ``client`` for tests or when you already hold
+    a configured client.
     """
 
     def __init__(
@@ -75,6 +79,9 @@ class S3ObjectStore:
         bucket: str,
         prefix: str = "",
         endpoint_url: str | None = None,
+        aws_access_key_id: str | None = None,
+        aws_secret_access_key: str | None = None,
+        region_name: str = "us-east-1",
         client: Any = None,
     ) -> None:
         if client is not None:
@@ -82,9 +89,48 @@ class S3ObjectStore:
         else:
             import boto3  # type: ignore[import-untyped]
 
-            self.client = boto3.client("s3", endpoint_url=endpoint_url)
+            self.client = boto3.client(
+                "s3",
+                endpoint_url=endpoint_url,
+                aws_access_key_id=aws_access_key_id,
+                aws_secret_access_key=aws_secret_access_key,
+                region_name=region_name,
+            )
         self.bucket = bucket
         self.prefix = prefix.strip("/")
+
+    def ensure_bucket(self) -> None:
+        """Create the configured bucket if it does not already exist.
+
+        Intentionally not part of the ``ObjectStore`` Protocol: only the S3
+        backend needs bucket bootstrap, and local stores have nothing
+        analogous. Callers that want startup-time bucket creation should guard
+        on ``isinstance(store, S3ObjectStore)`` so ``LocalObjectStore`` stays a
+        pure no-op-free implementation.
+
+        Mirrors :meth:`exists`: the client's own ``exceptions.ClientError`` is
+        caught from ``self.client.exceptions`` so this works against both real
+        boto3 clients (where it aliases ``botocore.exceptions.ClientError``)
+        and test doubles that stub the same namespace. Error codes are read
+        from the structured response; ``BucketAlreadyOwnedByYou`` (raised when
+        a bucket we already own was concurrently created) is treated as
+        success. Per-service errors like that are only present on the
+        instantiated client's ``exceptions`` namespace, not as importable
+        module-level classes.
+        """
+        try:
+            self.client.head_bucket(Bucket=self.bucket)
+        except self.client.exceptions.ClientError as error:
+            code = error.response.get("Error", {}).get("Code")
+            # boto3 surfaces a missing bucket on head_bucket as a 404 or a
+            # NoSuchBucket code depending on the backend (MinIO vs. AWS S3).
+            if code not in ("404", "NoSuchBucket"):
+                raise
+            try:
+                self.client.create_bucket(Bucket=self.bucket)
+            except self.client.exceptions.ClientError as create_error:
+                if create_error.response.get("Error", {}).get("Code") != "BucketAlreadyOwnedByYou":
+                    raise
 
     def _full_key(self, key: str) -> str:
         if ".." in key or key.startswith("/"):

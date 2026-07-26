@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from bidscope.clock import Clock, SystemClock
 from bidscope.config import Settings
 from bidscope.db import create_engine_and_session
-from bidscope.delivery.objects import LocalObjectStore, ObjectStore
+from bidscope.delivery.objects import LocalObjectStore, ObjectStore, S3ObjectStore
 from bidscope.delivery.reports import ReportPersistence
 from bidscope.domain.runs import SerializableError
 from bidscope.domain.types import BidScopeErrorCode
@@ -45,6 +45,33 @@ from bidscope.llm.fake import FakeDuplicateModel, FakeIntentModel, FakeReportMod
 from bidscope.persistence.models import NoticeEvidence, NoticeVersion, QueryRun, RunEvent
 from bidscope.retrieval.embeddings import HashEmbeddingProvider
 from bidscope.retrieval.search import HybridSearcher
+
+
+def create_object_store(settings: Settings) -> ObjectStore:
+    """Build the configured object-store backend from ``settings``.
+
+    Single source of truth for both the API (``create_run_service``) and the
+    CLI snapshot importer, so the two stay consistent and never construct
+    their own stores inline. ``object_store_type='s3'`` is fail-closed: the
+    settings validator (:meth:`Settings.validate_s3_storage_requirements`)
+    guarantees the S3 connection fields are non-empty before we read them,
+    and the store builds its boto3 client from those explicit credentials so
+    it never falls back to ambient IAM/env creds.
+
+    Bucket bootstrap (``ensure_bucket``) is the caller's responsibility and is
+    intentionally invoked only where a startup-time side effect is wanted
+    (e.g. compose's ``minio-init`` creates the bucket out-of-band, so the API
+    need not create it on every boot).
+    """
+    if settings.object_store_type == "s3":
+        return S3ObjectStore(
+            bucket=settings.s3_bucket or "",
+            prefix=settings.s3_prefix,
+            endpoint_url=settings.s3_endpoint,
+            aws_access_key_id=settings.s3_access_key,
+            aws_secret_access_key=settings.s3_secret_key,
+        )
+    return LocalObjectStore(root=settings.object_store_root)
 
 
 def _load_notice_views(
@@ -1081,7 +1108,7 @@ async def create_run_service(
     sync_engine = sa.create_engine(_to_sync_dsn(settings.database_url))
     sync_session_factory = sessionmaker(bind=sync_engine)
     resolved_clock = clock or SystemClock()
-    object_store = LocalObjectStore(root=settings.object_store_root)
+    object_store = create_object_store(settings)
 
     try:
         dsn = _to_plain_dsn(settings.checkpoint_database_url)
@@ -1112,7 +1139,7 @@ def _build_run_service_components(
     settings: Settings,
     session_factory: async_sessionmaker[AsyncSession],
     sync_session_factory: sessionmaker[Session],
-    object_store: LocalObjectStore,
+    object_store: ObjectStore,
     clock: Clock,
     checkpointer: AsyncPostgresSaver,
 ) -> RunService:

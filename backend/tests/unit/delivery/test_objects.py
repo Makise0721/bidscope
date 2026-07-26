@@ -2,7 +2,9 @@ import os
 from pathlib import Path
 
 import pytest
-from bidscope.delivery.objects import LocalObjectStore
+from bidscope.api.dependencies import create_object_store
+from bidscope.config import Settings
+from bidscope.delivery.objects import LocalObjectStore, S3ObjectStore
 
 
 def _make_store(tmp_path: Path) -> LocalObjectStore:
@@ -106,3 +108,20 @@ def test_put_bytes_leaves_no_tmp_files_when_replace_fails(tmp_path: Path) -> Non
 
     staging = list((tmp_path / "objects").rglob(".tmp-*"))
     assert staging == [], f"leftover temp files: {staging}"
+
+
+def test_storage_factory_selects_s3_with_explicit_configuration() -> None:
+    settings = Settings(
+        object_store_type="s3",
+        s3_endpoint="http://minio:9000",
+        s3_bucket="bidscope",
+        s3_access_key="minio",
+        s3_secret_key="minioadmin",
+    )
+    assert isinstance(create_object_store(settings), S3ObjectStore)
+
+
+def test_storage_factory_uses_local_root_in_demo(tmp_path: Path) -> None:
+    assert isinstance(
+        create_object_store(Settings(object_store_root=str(tmp_path))), LocalObjectStore
+    )
