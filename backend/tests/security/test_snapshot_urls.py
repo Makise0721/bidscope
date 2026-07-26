@@ -521,7 +521,13 @@ def test_inspect_bundle_symlink_rejected(tmp_path: Path) -> None:
     link_hash = hashlib.sha256(b"target").hexdigest()
     manifest = {
         **_valid_manifest_dict(),
-        "files": {**payload, "link.html": link_hash},
+        "files": {
+            **{
+                name: hashlib.sha256(content.encode("utf-8")).hexdigest()
+                for name, content in payload.items()
+            },
+            "link.html": link_hash,
+        },
     }
     (bundle / "manifest.json").write_text(
         json.dumps(manifest), encoding="utf-8"
