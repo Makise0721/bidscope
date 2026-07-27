@@ -44,6 +44,7 @@ class Settings(BaseSettings):
             del error
 
         if sanitized_error is not None:
+            del self
             raise sanitized_error
 
     @staticmethod

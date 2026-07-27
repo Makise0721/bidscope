@@ -22,8 +22,11 @@ PRODUCTION_SECRET_VALUES = {
     "model_api_key": "arbitrary-model-secret-1e5f",
 }
 
-TRACEBACK_DIRECT_MODEL_SECRET = "traceback-direct-model-secret-7f2a"
-TRACEBACK_TYPED_MODEL_SECRET = "traceback-typed-model-secret-8b3c"
+TRACEBACK_DIRECT_ADMIN_SECRET = "traceback-direct-admin-secret-7f2a"
+TRACEBACK_DIRECT_ACCESS_SECRET = "traceback-direct-access-secret-8b3c"
+TRACEBACK_DIRECT_S3_SECRET = "traceback-direct-s3-secret-9d4e"
+TRACEBACK_DIRECT_MODEL_SECRET = "traceback-direct-model-secret-1e5f"
+TRACEBACK_TYPED_MODEL_SECRET = "traceback-typed-model-secret-2a6b"
 TRACEBACK_DSN_PASSWORD = "traceback-dsn-p@ss:word/?#[]"
 TRACEBACK_DSN_PASSWORD_ENCODED = "traceback-dsn-p%40ss%3Aword%2F%3F%23%5B%5D"
 TRACEBACK_ENV_MODEL_SECRET = "traceback-environment-model-secret-9d4e"
@@ -31,6 +34,12 @@ TRACEBACK_ENV_DSN_PASSWORD = "traceback-environment-dsn-p@ss:word/?#[]"
 TRACEBACK_ENV_DSN_PASSWORD_ENCODED = (
     "traceback-environment-dsn-p%40ss%3Aword%2F%3F%23%5B%5D"
 )
+TRACEBACK_DIRECT_SECRET_VALUES = {
+    "admin_token": TRACEBACK_DIRECT_ADMIN_SECRET,
+    "model_api_key": TRACEBACK_DIRECT_MODEL_SECRET,
+    "s3_access_key": TRACEBACK_DIRECT_ACCESS_SECRET,
+    "s3_secret_key": TRACEBACK_DIRECT_S3_SECRET,
+}
 
 
 def valid_production_settings() -> dict[str, object]:
@@ -174,14 +183,14 @@ def _contains_raw_secret(
         return any(secret in value.get_secret_value() for secret in secrets)
     if isinstance(value, BaseException):
         return _contains_raw_secret(value.args, secrets, seen)
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         value_id = id(value)
         if value_id in seen:
             return False
         seen.add(value_id)
         return any(
             _contains_raw_secret(item, secrets, seen)
-            for pair in value.items()
+            for pair in tuple(value.items())
             for item in pair
         )
     if isinstance(value, (list, tuple, set, frozenset)):
@@ -189,8 +198,23 @@ def _contains_raw_secret(
         if value_id in seen:
             return False
         seen.add(value_id)
-        return any(_contains_raw_secret(item, secrets, seen) for item in value)
-    return False
+        return any(_contains_raw_secret(item, secrets, seen) for item in tuple(value))
+    value_id = id(value)
+    if value_id in seen:
+        return False
+    seen.add(value_id)
+    getter = getattr(value, "get_secret_value", None)
+    if callable(getter):
+        try:
+            if _contains_raw_secret(getter(), secrets, seen):
+                return True
+        except Exception:
+            pass
+    try:
+        attributes = vars(value)
+    except TypeError:
+        attributes = {}
+    return _contains_raw_secret(attributes, secrets, seen)
 
 
 def _assert_no_structured_secret_leaks(
@@ -303,6 +327,62 @@ def test_direct_secretstr_model_key_has_no_traceback_secret_locals() -> None:
     )
 
 
+def _construct_settings_with_direct_secret(
+    field_name: str, typed: bool
+) -> ValidationError:
+    settings = valid_production_settings()
+    secret = TRACEBACK_DIRECT_SECRET_VALUES[field_name]
+    settings[field_name] = SecretStr(secret) if typed else secret
+    if field_name == "model_api_key":
+        settings["real_model_enabled"] = True
+    settings.update(
+        {
+            "database_url": (
+                "postgresql+asyncpg://bidscope:"
+                f"{TRACEBACK_DSN_PASSWORD_ENCODED}@database.example.test:5432/bidscope"
+            ),
+            "checkpoint_database_url": (
+                "postgresql+psycopg://bidscope:"
+                f"{TRACEBACK_DSN_PASSWORD_ENCODED}@database.example.test:5432/bidscope"
+            ),
+            "external_scheme": "http",
+        }
+    )
+    try:
+        Settings(**settings)
+    except ValidationError as error:
+        del settings
+        del secret
+        return error
+    raise AssertionError("Settings should reject the invalid production configuration")
+
+
+@pytest.mark.parametrize(
+    ("field_name", "typed"),
+    (
+        ("admin_token", False),
+        ("admin_token", True),
+        ("model_api_key", False),
+        ("model_api_key", True),
+        ("s3_access_key", False),
+        ("s3_access_key", True),
+        ("s3_secret_key", False),
+        ("s3_secret_key", True),
+    ),
+)
+def test_all_direct_secret_inputs_leave_no_recoverable_traceback_locals(
+    field_name: str, typed: bool
+) -> None:
+    error = _construct_settings_with_direct_secret(field_name, typed)
+
+    assert_validation_error_has_no_traceback_secret_leaks(
+        error,
+        TRACEBACK_DIRECT_SECRET_VALUES[field_name],
+        TRACEBACK_DSN_PASSWORD,
+        TRACEBACK_DSN_PASSWORD_ENCODED,
+    )
+
+
 def _set_traceback_secret_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in tuple(os.environ):
         if key.startswith("BIDSCOPE_"):
@@ -337,8 +417,11 @@ def test_environment_loaded_secrets_have_no_traceback_secret_locals(
     with pytest.raises(ValidationError, match="external_scheme") as error:
         Settings(_env_file=None)
 
+    error_value = error.value
+    del error
+    del monkeypatch
     assert_validation_error_has_no_traceback_secret_leaks(
-        error.value,
+        error_value,
         TRACEBACK_ENV_MODEL_SECRET,
         TRACEBACK_ENV_DSN_PASSWORD,
         TRACEBACK_ENV_DSN_PASSWORD_ENCODED,
