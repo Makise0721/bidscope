@@ -22,6 +22,9 @@ import pytest
 from bidscope.config import get_settings
 
 _POSTGRES_DEFAULT_PORT = 5432
+_ALLOWED_POSTGRES_SCHEMES = frozenset(
+    {"postgresql", "postgresql+asyncpg", "postgresql+psycopg"}
+)
 _SAFE_DATABASE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _SAFE_HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _SAFE_IPV6_HOST = re.compile(r"[0-9A-Fa-f:.%]+\Z")
@@ -37,16 +40,20 @@ def _database_name(url: str) -> str:
 
 def _sanitize_dsn(url: str) -> str:
     """Return PostgreSQL connection metadata without user-info or query data."""
-    scheme, separator, _ = url.partition("://")
-    if not separator or not scheme.startswith("postgresql"):
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return "<redacted PostgreSQL URL>"
+
+    scheme = parsed.scheme.lower()
+    if scheme not in _ALLOWED_POSTGRES_SCHEMES or not url.startswith(f"{scheme}://"):
         return "<redacted PostgreSQL URL>"
 
     try:
-        parsed = urlparse(url)
         port = parsed.port or _POSTGRES_DEFAULT_PORT
         database = _database_name(url)
     except ValueError:
-        return f"{scheme}://<redacted>"
+        return "<redacted PostgreSQL URL>"
 
     if not _SAFE_DATABASE_NAME.fullmatch(database):
         database = "<redacted>"

@@ -38,6 +38,25 @@ _CASES: dict[str, tuple[str, str, tuple[str, ...]]] = {
         "postgresql+psycopg://no-at-checkpoint-password/bidscope_test",
         ("no-at-db-password", "no-at-checkpoint-password"),
     ),
+    "malformed-scheme": (
+        "postgresql+asyncpg:malformed-scheme-db-password://localhost:5432/bidscope_test",
+        "postgresql+psycopg:malformed-scheme-checkpoint-password://otherhost:5432/bidscope_test",
+        ("malformed-scheme-db-password", "malformed-scheme-checkpoint-password"),
+    ),
+    "encoded-malformed-scheme": (
+        "postgresql+asyncpg:encoded-scheme-db-%70%61%73%73%77%6f%72%64://localhost:5432/bidscope_test",
+        "postgresql+psycopg:encoded-scheme-checkpoint-%70%61%73%73%77%6f%72%64://otherhost:5432/bidscope_test",
+        (
+            "encoded-scheme-db-password",
+            "encoded-scheme-checkpoint-password",
+            "%70%61%73%73%77%6f%72%64",
+        ),
+    ),
+    "unknown-scheme": (
+        "postgresql+unknown-db-password://localhost:5432/bidscope_test",
+        "postgresql+unknown-checkpoint-password://otherhost:5432/bidscope_test",
+        ("postgresql+unknown-db-password", "postgresql+unknown-checkpoint-password"),
+    ),
 }
 
 
@@ -102,7 +121,11 @@ def test_mismatched_database_urls_never_expose_passwords(case_id: str) -> None:
     secrets = _CASES[case_id][2]
     _assert_no_raw_secret_leaks(error.value, secrets)
     message = str(error.value)
-    assert "database_url='postgresql+asyncpg://" in message
-    assert "checkpoint_database_url='postgresql+psycopg://" in message
+    if case_id in {"malformed-scheme", "encoded-malformed-scheme", "unknown-scheme"}:
+        assert "database_url='<redacted PostgreSQL URL>'" in message
+        assert "checkpoint_database_url='<redacted PostgreSQL URL>'" in message
+    else:
+        assert "database_url='postgresql+asyncpg://" in message
+        assert "checkpoint_database_url='postgresql+psycopg://" in message
     if case_id in {"normal", "encoded"}:
         assert "bidscope_test" in message
