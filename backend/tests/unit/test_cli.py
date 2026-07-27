@@ -397,6 +397,7 @@ def test_typed_secretstr_admin_token_is_accepted() -> None:
         {
             "admin_token": SecretStr("a" * 32),
             "real_model_enabled": True,
+            "model_api_key": SecretStr("typed-model-secret"),
         }
     )
 
@@ -541,6 +542,7 @@ def test_production_template_keeps_database_credentials_blank() -> None:
     assert "BIDSCOPE_POSTGRES_DB=\n" in template
     assert "BIDSCOPE_POSTGRES_USER=\n" in template
     assert "BIDSCOPE_POSTGRES_PASSWORD=\n" in template
+    assert "BIDSCOPE_MODEL_API_KEY=\n" in template
     assert "<database-password>" not in template
 
 
@@ -596,29 +598,83 @@ def test_s3_validation_errors_hide_arbitrary_secret_values_structurally() -> Non
     assert_validation_error_hides_production_secrets(settings)
 
 
-def test_valid_settings_mask_secret_fields_and_allow_missing_model_key() -> None:
-    settings = Settings(**valid_production_settings(), real_model_enabled=True)
-    settings_with_model_key = Settings(
-        **valid_production_settings(),
+def test_real_model_requires_model_api_key_without_leaking_secrets() -> None:
+    settings = valid_production_settings()
+    settings.update(
         real_model_enabled=True,
-        model_api_key=PRODUCTION_SECRET_VALUES["model_api_key"],
+        **{
+            key: value
+            for key, value in PRODUCTION_SECRET_VALUES.items()
+            if key != "model_api_key"
+        },
     )
 
-    assert isinstance(settings.admin_token, SecretStr)
-    assert isinstance(settings.s3_access_key, SecretStr)
-    assert isinstance(settings.s3_secret_key, SecretStr)
-    assert settings.admin_token.get_secret_value() == "a" * 32
-    assert settings.s3_access_key.get_secret_value() == "test-access-key"
-    assert settings.s3_secret_key.get_secret_value() == "test-secret-key"
-    assert str(settings.admin_token) == "**********"
-    assert str(settings.s3_access_key) == "**********"
-    assert str(settings.s3_secret_key) == "**********"
+    with pytest.raises(ValidationError, match="model_api_key") as error:
+        Settings(**settings)
+
+    rendered = (
+        str(error.value),
+        str(error.value.errors()),
+        error.value.json(),
+        "".join(traceback.format_exception(error.value)),
+        repr(error.value.__cause__),
+        repr(error.value.__context__),
+    )
+    for value in rendered:
+        for secret in PRODUCTION_SECRET_VALUES.values():
+            assert secret not in value
+
+
+@pytest.mark.parametrize("model_api_key", ("   ", SecretStr("   ")))
+def test_real_model_rejects_whitespace_model_api_key(model_api_key: object) -> None:
+    settings = valid_production_settings()
+    settings.update(real_model_enabled=True, model_api_key=model_api_key)
+
+    with pytest.raises(ValidationError, match="model_api_key") as error:
+        Settings(**settings)
+
+    rendered = (
+        str(error.value),
+        str(error.value.errors()),
+        error.value.json(),
+        "".join(traceback.format_exception(error.value)),
+    )
+    assert "SecretStr('   ')" not in " ".join(rendered)
+    assert "   " not in error.value.json()
+
+
+def test_real_model_accepts_and_masks_model_api_key() -> None:
+    model_key = PRODUCTION_SECRET_VALUES["model_api_key"]
+    settings = Settings(
+        **valid_production_settings(),
+        real_model_enabled=True,
+        model_api_key=SecretStr(model_key),
+    )
+
+    assert isinstance(settings.model_api_key, SecretStr)
+    assert settings.model_api_key.get_secret_value() == model_key
+    assert str(settings.model_api_key) == "**********"
+    assert model_key not in str(settings)
+
+
+def test_real_model_disabled_allows_missing_model_api_key() -> None:
+    settings = Settings(**valid_production_settings(), real_model_enabled=False)
+
     assert settings.model_api_key is None
-    assert isinstance(settings_with_model_key.model_api_key, SecretStr)
-    assert settings_with_model_key.model_api_key.get_secret_value() == PRODUCTION_SECRET_VALUES[
-        "model_api_key"
-    ]
-    assert str(settings_with_model_key.model_api_key) == "**********"
+
+
+def test_environment_loaded_real_model_requires_model_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key in tuple(os.environ):
+        if key.startswith("BIDSCOPE_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("BIDSCOPE_REAL_MODEL_ENABLED", "true")
+
+    with pytest.raises(ValidationError, match="model_api_key") as error:
+        Settings(_env_file=None)
+
+    assert "BIDSCOPE_REAL_MODEL_ENABLED" not in str(error.value)
 
 
 def test_s3_storage_accepts_default_and_explicit_region() -> None:

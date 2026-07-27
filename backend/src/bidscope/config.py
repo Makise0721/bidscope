@@ -237,6 +237,16 @@ class Settings(BaseSettings):
             raise ValueError("admin_token must meet admin_token_min_length in production")
         return self
 
+    @model_validator(mode="after")
+    def validate_real_model_credentials(self) -> Settings:
+        if not self.real_model_enabled:
+            return self
+
+        model_api_key = self._secret_text(self.model_api_key)
+        if model_api_key is None or not model_api_key.strip():
+            raise ValueError("model_api_key must be non-empty when real_model_enabled is true")
+        return self
+
     @model_validator(mode="before")
     @classmethod
     def validate_s3_storage_requirements(cls, data: Any) -> Any:
