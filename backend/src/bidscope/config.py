@@ -22,7 +22,7 @@ class Settings(BaseSettings):
             for field_name in self._secret_field_names:
                 self._collect_secret_value(data.get(field_name), secret_values)
             for item in raw_errors:
-                self._collect_error_input_values(item.get("input"), secret_values)
+                self._collect_error_input_values(item.get("input"), secret_values, root=True)
             sanitized_errors = [
                 self._sanitize_error_item(cast(Mapping[str, Any], item), secret_values)
                 for item in raw_errors
@@ -33,55 +33,82 @@ class Settings(BaseSettings):
 
     @classmethod
     def _collect_secret_value(cls, value: Any, secret_values: set[str]) -> None:
-        if value is None:
-            return
-        raw_value = value.get_secret_value() if isinstance(value, SecretStr) else str(value)
-        if raw_value:
-            secret_values.add(raw_value)
+        if isinstance(value, str) and value:
+            secret_values.add(value)
 
     @classmethod
-    def _collect_error_input_values(cls, value: Any, secret_values: set[str]) -> None:
+    def _collect_error_input_values(
+        cls, value: Any, secret_values: set[str], *, root: bool = False
+    ) -> None:
         if isinstance(value, Mapping):
             for key, item in value.items():
                 if key in cls._secret_field_names:
                     cls._collect_secret_value(item, secret_values)
-                else:
+                elif isinstance(item, (Mapping, list, tuple)):
                     cls._collect_error_input_values(item, secret_values)
         elif isinstance(value, (list, tuple)):
             for item in value:
                 cls._collect_error_input_values(item, secret_values)
-        elif isinstance(value, str):
-            secret_values.add(value)
+        elif root and isinstance(value, str):
+            cls._collect_secret_value(value, secret_values)
 
     @classmethod
     def _sanitize_error_item(
         cls, item: Mapping[str, Any], secret_values: set[str]
     ) -> dict[str, Any]:
-        return {
-            key: cls._sanitize_error_value(value, secret_values)
-            for key, value in item.items()
-        }
+        sanitized = dict(item)
+        if "input" in item:
+            sanitized["input"] = cls._sanitize_error_value(item["input"], secret_values)
+        if "ctx" in item:
+            sanitized["ctx"] = cls._sanitize_error_context(item["ctx"], secret_values)
+        return sanitized
+
+    @classmethod
+    def _sanitize_error_context(cls, value: Any, secret_values: set[str]) -> Any:
+        if isinstance(value, Mapping):
+            return {
+                key: cls._sanitize_error_context(item, secret_values)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [cls._sanitize_error_context(item, secret_values) for item in value]
+        if isinstance(value, BaseException):
+            sanitized_args = tuple(
+                cls._sanitize_error_context(item, secret_values) for item in value.args
+            )
+            if sanitized_args == value.args:
+                return value
+            try:
+                return type(value)(*sanitized_args)
+            except TypeError:
+                return value
+        if isinstance(value, str):
+            return cls._redact_secret_string(value, secret_values)
+        return value
+
+    @staticmethod
+    def _redact_secret_string(value: str, secret_values: set[str]) -> str:
+        return "**********" if value in secret_values else value
 
     @classmethod
     def _sanitize_error_value(cls, value: Any, secret_values: set[str]) -> Any:
         if isinstance(value, SecretStr):
             return value
-        if isinstance(value, dict):
+        if isinstance(value, Mapping):
             return {
                 key: (
-                    SecretStr(str(value[key]))
-                    if key in cls._secret_field_names and value[key] is not None
-                    else cls._sanitize_error_value(value[key], secret_values)
+                    value[key]
+                    if isinstance(value[key], SecretStr)
+                    else SecretStr(str(value[key]))
                 )
+                if key in cls._secret_field_names and value[key] is not None
+                else cls._sanitize_error_value(value[key], secret_values)
                 for key in value
             }
         if isinstance(value, (list, tuple)):
             return [cls._sanitize_error_value(item, secret_values) for item in value]
         if isinstance(value, str):
-            sanitized = value
-            for secret in secret_values:
-                sanitized = sanitized.replace(secret, "**********")
-            return sanitized
+            return cls._redact_secret_string(value, secret_values)
         return value
 
     model_config = SettingsConfigDict(
@@ -144,61 +171,51 @@ class Settings(BaseSettings):
             raise ValueError("run_heartbeat_seconds must be less than stale_run_after_seconds")
         return self
 
-    @model_validator(mode="after")
-    def validate_production_admin_token(self) -> Settings:
-        if self.app_mode != "production":
-            return self
+    @model_validator(mode="before")
+    @classmethod
+    def validate_production_admin_token(cls, data: Any) -> Any:
+        if not isinstance(data, Mapping) or data.get("app_mode", "demo") != "production":
+            return data
 
-        token = (
-            self.admin_token.get_secret_value().strip()
-            if self.admin_token is not None
-            else ""
-        )
+        raw_token = data.get("admin_token")
+        token = raw_token.strip() if isinstance(raw_token, str) else ""
         normalized_token = token.casefold()
         if not token:
             raise ValueError("admin_token must be non-empty in production")
-        if normalized_token in self.production_placeholder_tokens:
+        if normalized_token in cls.production_placeholder_tokens:
             raise ValueError("admin_token must not be a production placeholder")
-        if len(token) < self.admin_token_min_length:
+        min_length = data.get("admin_token_min_length", 32)
+        if isinstance(min_length, int) and len(token) < min_length:
             raise ValueError("admin_token must meet admin_token_min_length in production")
-        return self
+        return data
 
-    @model_validator(mode="after")
-    def validate_s3_storage_requirements(self) -> Settings:
+    @model_validator(mode="before")
+    @classmethod
+    def validate_s3_storage_requirements(cls, data: Any) -> Any:
         """When S3 storage is selected, all S3 connection fields must be present.
 
         A misconfigured S3 deployment would otherwise fall back to ambient
         credentials or fail at first use with an opaque error; failing fast at
         settings construction surfaces the missing variables by name.
         """
-        if self.object_store_type != "s3":
-            return self
+        if not isinstance(data, Mapping) or data.get("object_store_type", "local") != "s3":
+            return data
         missing = [
             name
             for name, value in (
-                ("s3_endpoint", self.s3_endpoint),
-                ("s3_region", self.s3_region),
-                ("s3_bucket", self.s3_bucket),
-                (
-                    "s3_access_key",
-                    self.s3_access_key.get_secret_value()
-                    if self.s3_access_key is not None
-                    else None,
-                ),
-                (
-                    "s3_secret_key",
-                    self.s3_secret_key.get_secret_value()
-                    if self.s3_secret_key is not None
-                    else None,
-                ),
+                ("s3_endpoint", data.get("s3_endpoint")),
+                ("s3_region", data.get("s3_region", "us-east-1")),
+                ("s3_bucket", data.get("s3_bucket")),
+                ("s3_access_key", data.get("s3_access_key")),
+                ("s3_secret_key", data.get("s3_secret_key")),
             )
-            if not value or not value.strip()
+            if value is None or (isinstance(value, str) and not value.strip())
         ]
         if missing:
             raise ValueError(
                 "object_store_type='s3' requires non-empty values for: " + ", ".join(missing)
             )
-        return self
+        return data
 
     @model_validator(mode="after")
     def validate_production_configuration(self) -> Settings:

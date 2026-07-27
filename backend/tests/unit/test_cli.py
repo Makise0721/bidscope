@@ -206,6 +206,46 @@ def test_production_validation_errors_hide_arbitrary_secrets() -> None:
     assert_validation_error_hides_production_secrets(settings)
 
 
+@pytest.mark.parametrize(
+    "secret_field",
+    ("admin_token", "s3_access_key", "s3_secret_key", "model_api_key"),
+)
+def test_one_character_secret_validation_errors_keep_structured_metadata(
+    secret_field: str,
+) -> None:
+    settings = valid_production_settings()
+    settings[secret_field] = "a"
+    if secret_field == "admin_token":
+        settings["admin_token_min_length"] = 32
+    elif secret_field in {"s3_access_key", "s3_secret_key"}:
+        settings["s3_bucket"] = "   "
+    else:
+        settings["external_scheme"] = "http"
+
+    with pytest.raises(ValidationError) as error:
+        Settings(**settings)
+
+    sanitized_item = error.value.errors()[0]
+    original_item = error.value.__cause__.errors()[0]
+    for metadata_key in ("type", "loc", "msg", "url"):
+        assert sanitized_item[metadata_key] == original_item[metadata_key]
+
+    for rendered in (
+        str(error.value),
+        str(error.value.errors()),
+        error.value.json(),
+    ):
+        assert "'a'" not in rendered
+        assert '\"a\"' not in rendered
+    assert sanitized_item["type"] == "value_error"
+
+
+def test_settings_config_does_not_unwrap_secrets() -> None:
+    config_source = Path(__file__).parents[2].joinpath("src/bidscope/config.py").read_text()
+
+    assert "get_secret_value" not in config_source
+
+
 def test_field_validation_errors_hide_arbitrary_secrets() -> None:
     settings = valid_production_settings()
     settings.update(PRODUCTION_SECRET_VALUES)
