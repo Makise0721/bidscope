@@ -50,3 +50,23 @@ def test_compose_api_uses_canonical_serve_command_and_has_minio_init() -> None:
     # a one-shot minio bucket bootstrap service must exist and create the configured bucket
     assert "minio-init" in compose
     assert "mc mb" in compose
+
+
+def test_compose_production_services_share_required_settings_without_literal_secrets() -> None:
+    compose = _read("compose.yaml")
+
+    assert "x-production-environment: &production-environment" in compose
+    assert compose.count("<<: *production-environment") == 2
+    assert "BIDSCOPE_APP_MODE: demo" not in compose
+    assert "minioadmin" not in compose
+
+    required_keys = (
+        "BIDSCOPE_ADMIN_TOKEN",
+        "BIDSCOPE_ALLOWED_ORIGINS",
+        "BIDSCOPE_TRUSTED_HOSTS",
+        "BIDSCOPE_EXTERNAL_SCHEME",
+        "BIDSCOPE_S3_ACCESS_KEY",
+        "BIDSCOPE_S3_SECRET_KEY",
+    )
+    for key in required_keys:
+        assert f"{key}: ${{{key}:?" in compose

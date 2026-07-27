@@ -28,7 +28,9 @@ def test_production_post_runs_accepts_exact_admin_token(
     response = production_client.post(
         "/api/runs",
         json=RUN_BODY,
-        headers={"X-Admin-Token": "test-admin-token"},
+        headers={
+            "X-Admin-Token": "test-admin-token-012345678901234567890123",
+        },
     )
     assert response.status_code == 201, response.text
     assert response.json()["id"]

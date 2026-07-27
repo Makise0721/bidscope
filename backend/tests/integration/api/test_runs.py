@@ -38,6 +38,7 @@ SCHEDULED_QUERY = (
     "预算 500 万以上的招标信息。"
 )
 NON_SCHEDULED_QUERY = "查询四川省最近的服务器招标信息。"
+PRODUCTION_ADMIN_TOKEN = "test-admin-token-012345678901234567890123"
 
 
 def _poll_status(client: TestClient, run_id: str, expected: str, timeout: float = 15.0) -> dict:
@@ -159,12 +160,22 @@ def test_docx_retry_exports_persisted_report_without_running_graph(tmp_path: Pat
             "postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test"
         ),
         real_model_enabled=False,
-        admin_token="test-admin-token",
+        admin_token=PRODUCTION_ADMIN_TOKEN,
+        object_store_type="s3",
+        s3_endpoint="http://minio:9000",
+        s3_region="us-east-1",
+        s3_bucket="bidscope-test",
+        s3_access_key="test-access",
+        s3_secret_key="test-secret",
+        allowed_origins=["https://bidscope.test"],
+        trusted_hosts=["bidscope.test"],
+        external_scheme="https",
         object_store_root=str(tmp_path / "objects"),
     )
-    headers = {"X-Admin-Token": "test-admin-token"}
+    headers = {"X-Admin-Token": PRODUCTION_ADMIN_TOKEN}
     with TestClient(create_app(settings=settings)) as client:
         service = client.app.state.run_service
+        service.object_store = LocalObjectStore(tmp_path / "objects")
         graph = CountingGraph()
         service.graph = graph
 
@@ -244,10 +255,19 @@ def test_docx_retry_recreates_a_missing_attached_object_with_the_same_key(tmp_pa
             "postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test"
         ),
         real_model_enabled=False,
-        admin_token="test-admin-token",
+        admin_token=PRODUCTION_ADMIN_TOKEN,
+        object_store_type="s3",
+        s3_endpoint="http://minio:9000",
+        s3_region="us-east-1",
+        s3_bucket="bidscope-test",
+        s3_access_key="test-access",
+        s3_secret_key="test-secret",
+        allowed_origins=["https://bidscope.test"],
+        trusted_hosts=["bidscope.test"],
+        external_scheme="https",
         object_store_root=str(tmp_path / "objects"),
     )
-    headers = {"X-Admin-Token": "test-admin-token"}
+    headers = {"X-Admin-Token": PRODUCTION_ADMIN_TOKEN}
     store = CountingObjectStore(tmp_path / "objects")
     with TestClient(create_app(settings=settings)) as client:
         service = client.app.state.run_service
