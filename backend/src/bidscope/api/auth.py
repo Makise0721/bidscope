@@ -13,7 +13,12 @@ async def require_admin_token(request: Request) -> None:
     if settings.app_mode in {"demo", "test"}:
         return
 
-    expected = settings.admin_token
+    configured_token = settings.admin_token
+    expected = (
+        configured_token.get_secret_value()
+        if configured_token is not None
+        else None
+    )
     provided = request.headers.get("X-Admin-Token")
     if not expected or provided != expected:
         raise HTTPException(status_code=401, detail="invalid admin token")

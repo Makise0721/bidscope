@@ -75,3 +75,25 @@ def test_compose_production_services_share_required_settings_without_literal_sec
     )
     for key in required_keys:
         assert f"{key}: ${{{key}:?" in compose
+
+
+def test_compose_requires_interpolated_postgres_credentials_everywhere() -> None:
+    compose = _read("compose.yaml")
+
+    assert "POSTGRES_PASSWORD: bidscope" not in compose
+    assert "bidscope:bidscope" not in compose
+    for key in (
+        "BIDSCOPE_POSTGRES_DB",
+        "BIDSCOPE_POSTGRES_USER",
+        "BIDSCOPE_POSTGRES_PASSWORD",
+    ):
+        assert f"${{{key}:?" in compose
+    assert 'pg_isready -U \\"$${POSTGRES_USER}\\" -d \\"$${POSTGRES_DB}\\"' in compose
+    assert (
+        "postgresql+asyncpg://${BIDSCOPE_POSTGRES_USER}:"
+        "${BIDSCOPE_POSTGRES_PASSWORD}@postgres:5432/${BIDSCOPE_POSTGRES_DB}"
+    ) in compose
+    assert (
+        "postgresql+psycopg://${BIDSCOPE_POSTGRES_USER}:"
+        "${BIDSCOPE_POSTGRES_PASSWORD}@postgres:5432/${BIDSCOPE_POSTGRES_DB}"
+    ) in compose

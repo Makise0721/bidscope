@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 from bidscope import cli
 from bidscope.config import Settings
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 PRODUCTION_SECRET_VALUES = {
-    "admin_token": "arbitrary-admin-secret-7f2a",
+    "admin_token": "arbitrary-admin-secret-7f2a-123456",
     "s3_access_key": "arbitrary-access-secret-8b3c",
     "s3_secret_key": "arbitrary-s3-secret-9d4e",
     "model_api_key": "arbitrary-model-secret-1e5f",
@@ -121,8 +122,42 @@ def assert_validation_error_hides_production_secrets(
         Settings(**settings)
 
     rendered_error = str(error.value)
+    structured_error = str(error.value.errors())
+    structured_json = error.value.json()
+    errors_json = json.dumps(error.value.errors(), default=str)
     for secret in (*PRODUCTION_SECRET_VALUES.values(), *additional_secrets):
         assert secret not in rendered_error
+        assert secret not in structured_error
+        assert secret not in structured_json
+        assert secret not in errors_json
+
+
+def test_environment_loaded_production_secrets_stay_masked_structurally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = {
+        "BIDSCOPE_APP_MODE": "production",
+        "BIDSCOPE_ADMIN_TOKEN": "env-admin-secret-123456789012345678901234",
+        "BIDSCOPE_OBJECT_STORE_TYPE": "s3",
+        "BIDSCOPE_S3_ENDPOINT": "https://s3.example.test",
+        "BIDSCOPE_S3_BUCKET": "bidscope-prod",
+        "BIDSCOPE_S3_ACCESS_KEY": "env-access-secret",
+        "BIDSCOPE_S3_SECRET_KEY": "env-s3-secret",
+        "BIDSCOPE_ALLOWED_ORIGINS": '["https://bidscope.example.test"]',
+        "BIDSCOPE_TRUSTED_HOSTS": '["bidscope.example.test"]',
+        "BIDSCOPE_EXTERNAL_SCHEME": "env-admin-secret-123456789012345678901234",
+    }
+    for key, value in values.items():
+        monkeypatch.setenv(key, value)
+
+    with pytest.raises(ValidationError) as error:
+        Settings(_env_file=None)
+
+    for secret in values.values():
+        if "secret" in secret or secret.startswith("env-admin"):
+            assert secret not in str(error.value)
+            assert secret not in str(error.value.errors())
+            assert secret not in error.value.json()
 
 
 def test_production_settings_missing_admin_token_hides_other_secrets() -> None:
@@ -184,6 +219,9 @@ def test_production_template_keeps_database_credentials_blank() -> None:
 
     assert "BIDSCOPE_DATABASE_URL=\n" in template
     assert "BIDSCOPE_CHECKPOINT_DATABASE_URL=\n" in template
+    assert "BIDSCOPE_POSTGRES_DB=\n" in template
+    assert "BIDSCOPE_POSTGRES_USER=\n" in template
+    assert "BIDSCOPE_POSTGRES_PASSWORD=\n" in template
     assert "<database-password>" not in template
 
 
@@ -229,6 +267,39 @@ def test_s3_storage_rejects_whitespace_only_required_fields() -> None:
 
         with pytest.raises(ValidationError, match=field):
             Settings(**settings)
+
+
+def test_s3_validation_errors_hide_arbitrary_secret_values_structurally() -> None:
+    settings = valid_production_settings()
+    settings.update(PRODUCTION_SECRET_VALUES)
+    settings["s3_bucket"] = "   "
+
+    assert_validation_error_hides_production_secrets(settings)
+
+
+def test_valid_settings_mask_secret_fields_and_allow_missing_model_key() -> None:
+    settings = Settings(**valid_production_settings(), real_model_enabled=True)
+    settings_with_model_key = Settings(
+        **valid_production_settings(),
+        real_model_enabled=True,
+        model_api_key=PRODUCTION_SECRET_VALUES["model_api_key"],
+    )
+
+    assert isinstance(settings.admin_token, SecretStr)
+    assert isinstance(settings.s3_access_key, SecretStr)
+    assert isinstance(settings.s3_secret_key, SecretStr)
+    assert settings.admin_token.get_secret_value() == "a" * 32
+    assert settings.s3_access_key.get_secret_value() == "test-access-key"
+    assert settings.s3_secret_key.get_secret_value() == "test-secret-key"
+    assert str(settings.admin_token) == "**********"
+    assert str(settings.s3_access_key) == "**********"
+    assert str(settings.s3_secret_key) == "**********"
+    assert settings.model_api_key is None
+    assert isinstance(settings_with_model_key.model_api_key, SecretStr)
+    assert settings_with_model_key.model_api_key.get_secret_value() == PRODUCTION_SECRET_VALUES[
+        "model_api_key"
+    ]
+    assert str(settings_with_model_key.model_api_key) == "**********"
 
 
 def test_s3_storage_accepts_default_and_explicit_region() -> None:
@@ -284,12 +355,12 @@ def test_valid_production_settings_are_accepted() -> None:
     settings = Settings(**valid_production_settings())
 
     assert settings.app_mode == "production"
-    assert settings.admin_token == "a" * 32
+    assert settings.admin_token.get_secret_value() == "a" * 32
     assert settings.object_store_type == "s3"
     assert settings.s3_endpoint == "https://s3.example.test"
     assert settings.s3_bucket == "bidscope-prod"
-    assert settings.s3_access_key == "test-access-key"
-    assert settings.s3_secret_key == "test-secret-key"
+    assert settings.s3_access_key.get_secret_value() == "test-access-key"
+    assert settings.s3_secret_key.get_secret_value() == "test-secret-key"
     assert [str(origin) for origin in settings.allowed_origins] == [
         "https://bidscope.example.test/"
     ]

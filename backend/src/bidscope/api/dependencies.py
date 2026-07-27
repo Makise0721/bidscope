@@ -68,8 +68,16 @@ def create_object_store(settings: Settings) -> ObjectStore:
             bucket=settings.s3_bucket or "",
             prefix=settings.s3_prefix,
             endpoint_url=settings.s3_endpoint,
-            aws_access_key_id=settings.s3_access_key,
-            aws_secret_access_key=settings.s3_secret_key,
+            aws_access_key_id=(
+                settings.s3_access_key.get_secret_value()
+                if settings.s3_access_key is not None
+                else None
+            ),
+            aws_secret_access_key=(
+                settings.s3_secret_key.get_secret_value()
+                if settings.s3_secret_key is not None
+                else None
+            ),
             region_name=settings.s3_region,
         )
     return LocalObjectStore(root=settings.object_store_root)

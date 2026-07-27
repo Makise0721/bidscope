@@ -1,13 +1,89 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from functools import lru_cache
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal, cast
 
-from pydantic import AnyHttpUrl, Field, model_validator
+from pydantic import AnyHttpUrl, Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    _secret_field_names: ClassVar[frozenset[str]] = frozenset(
+        {"admin_token", "model_api_key", "s3_access_key", "s3_secret_key"}
+    )
+
+    def __init__(self, **data: Any) -> None:
+        try:
+            super().__init__(**data)
+        except ValidationError as error:
+            raw_errors = error.errors(include_url=True, include_context=True)
+            secret_values: set[str] = set()
+            for field_name in self._secret_field_names:
+                self._collect_secret_value(data.get(field_name), secret_values)
+            for item in raw_errors:
+                self._collect_error_input_values(item.get("input"), secret_values)
+            sanitized_errors = [
+                self._sanitize_error_item(cast(Mapping[str, Any], item), secret_values)
+                for item in raw_errors
+            ]
+            raise ValidationError.from_exception_data(
+                self.__class__.__name__, cast(Any, sanitized_errors)
+            ) from error
+
+    @classmethod
+    def _collect_secret_value(cls, value: Any, secret_values: set[str]) -> None:
+        if value is None:
+            return
+        raw_value = value.get_secret_value() if isinstance(value, SecretStr) else str(value)
+        if raw_value:
+            secret_values.add(raw_value)
+
+    @classmethod
+    def _collect_error_input_values(cls, value: Any, secret_values: set[str]) -> None:
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                if key in cls._secret_field_names:
+                    cls._collect_secret_value(item, secret_values)
+                else:
+                    cls._collect_error_input_values(item, secret_values)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                cls._collect_error_input_values(item, secret_values)
+        elif isinstance(value, str):
+            secret_values.add(value)
+
+    @classmethod
+    def _sanitize_error_item(
+        cls, item: Mapping[str, Any], secret_values: set[str]
+    ) -> dict[str, Any]:
+        return {
+            key: cls._sanitize_error_value(value, secret_values)
+            for key, value in item.items()
+        }
+
+    @classmethod
+    def _sanitize_error_value(cls, value: Any, secret_values: set[str]) -> Any:
+        if isinstance(value, SecretStr):
+            return value
+        if isinstance(value, dict):
+            return {
+                key: (
+                    SecretStr(str(value[key]))
+                    if key in cls._secret_field_names and value[key] is not None
+                    else cls._sanitize_error_value(value[key], secret_values)
+                )
+                for key in value
+            }
+        if isinstance(value, (list, tuple)):
+            return [cls._sanitize_error_value(item, secret_values) for item in value]
+        if isinstance(value, str):
+            sanitized = value
+            for secret in secret_values:
+                sanitized = sanitized.replace(secret, "**********")
+            return sanitized
+        return value
+
     model_config = SettingsConfigDict(
         env_prefix="BIDSCOPE_",
         env_file=".env",
@@ -19,7 +95,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope"
     checkpoint_database_url: str = "postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope"
     real_model_enabled: bool = False
-    admin_token: str | None = None
+    admin_token: SecretStr | None = None
     admin_token_min_length: int = Field(default=32, gt=0)
     allowed_origins: list[AnyHttpUrl] = Field(default_factory=list)
     trusted_hosts: list[str] = Field(default_factory=list)
@@ -33,7 +109,7 @@ class Settings(BaseSettings):
     #: siblings — only consulted when ``real_model_enabled`` is true.
     model_base_url: str = "https://api.deepseek.com"
     model_name: str = "deepseek-chat"
-    model_api_key: str | None = None
+    model_api_key: SecretStr | None = None
     #: Root directory for the local object store (DOCX outputs and snapshot
     #: payloads in local/demo deployments).
     object_store_root: str = "data/objects"
@@ -50,9 +126,9 @@ class Settings(BaseSettings):
     #: Static access key for the S3 backend. Required when
     #: ``object_store_type == "s3"`` so the store never falls back to ambient
     #: (IAM/env) credentials implicitly.
-    s3_access_key: str | None = None
+    s3_access_key: SecretStr | None = None
     #: Static secret key paired with ``s3_access_key``.
-    s3_secret_key: str | None = None
+    s3_secret_key: SecretStr | None = None
     #: Optional logical key prefix applied to every stored object (e.g.
     #: ``imports/2026``). Defaults to no prefix.
     s3_prefix: str = ""
@@ -73,7 +149,11 @@ class Settings(BaseSettings):
         if self.app_mode != "production":
             return self
 
-        token = (self.admin_token or "").strip()
+        token = (
+            self.admin_token.get_secret_value().strip()
+            if self.admin_token is not None
+            else ""
+        )
         normalized_token = token.casefold()
         if not token:
             raise ValueError("admin_token must be non-empty in production")
@@ -99,8 +179,18 @@ class Settings(BaseSettings):
                 ("s3_endpoint", self.s3_endpoint),
                 ("s3_region", self.s3_region),
                 ("s3_bucket", self.s3_bucket),
-                ("s3_access_key", self.s3_access_key),
-                ("s3_secret_key", self.s3_secret_key),
+                (
+                    "s3_access_key",
+                    self.s3_access_key.get_secret_value()
+                    if self.s3_access_key is not None
+                    else None,
+                ),
+                (
+                    "s3_secret_key",
+                    self.s3_secret_key.get_secret_value()
+                    if self.s3_secret_key is not None
+                    else None,
+                ),
             )
             if not value or not value.strip()
         ]

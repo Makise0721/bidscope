@@ -44,22 +44,23 @@ class ModelSettings(Protocol):
 
     model_base_url: str
     model_name: str
-    model_api_key: str | None
+    model_api_key: SecretStr | str | None
 
 
 _UNTRUSTED_START = "UNTRUSTED_SOURCE_DATA_START"
 _UNTRUSTED_END = "UNTRUSTED_SOURCE_DATA_END"
 
 
-def _to_secret(value: str | None) -> SecretStr:
+def _to_secret(value: SecretStr | str | None) -> SecretStr:
     """Wrap a raw API key in the ``SecretStr`` ChatOpenAI expects.
 
     Raises ``ValueError`` when no key is configured so the failure is loud and
     immediate rather than a cryptic authentication error mid-run.
     """
-    if not value:
+    raw_value = value.get_secret_value() if isinstance(value, SecretStr) else value
+    if not raw_value:
         raise ValueError("model_api_key must be configured to use the DeepSeek adapter")
-    return SecretStr(value)
+    return SecretStr(raw_value)
 
 
 class DeepSeekIntentModel:

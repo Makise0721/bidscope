@@ -15,17 +15,20 @@ x-minio-environment: &minio-environment
   MINIO_ROOT_USER: ${BIDSCOPE_S3_ACCESS_KEY:?set BIDSCOPE_S3_ACCESS_KEY}
   MINIO_ROOT_PASSWORD: ${BIDSCOPE_S3_SECRET_KEY:?set BIDSCOPE_S3_SECRET_KEY}
 
+x-postgres-environment: &postgres-environment
+  POSTGRES_DB: ${BIDSCOPE_POSTGRES_DB:?set BIDSCOPE_POSTGRES_DB}
+  POSTGRES_USER: ${BIDSCOPE_POSTGRES_USER:?set BIDSCOPE_POSTGRES_USER}
+  POSTGRES_PASSWORD: ${BIDSCOPE_POSTGRES_PASSWORD:?set BIDSCOPE_POSTGRES_PASSWORD}
+
 services:
   postgres:
     image: pgvector/pgvector:pg17
     environment:
-      POSTGRES_DB: bidscope
-      POSTGRES_USER: bidscope
-      POSTGRES_PASSWORD: bidscope
+      <<: *postgres-environment
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U bidscope -d bidscope"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -72,8 +75,8 @@ services:
     command: ["bidscope", "api", "serve", "--host", "0.0.0.0", "--port", "8000"]
     environment:
       <<: *production-environment
-      BIDSCOPE_DATABASE_URL: postgresql+asyncpg://bidscope:bidscope@postgres:5432/bidscope
-      BIDSCOPE_CHECKPOINT_DATABASE_URL: postgresql+psycopg://bidscope:bidscope@postgres:5432/bidscope
+      BIDSCOPE_DATABASE_URL: postgresql+asyncpg://${BIDSCOPE_POSTGRES_USER}:${BIDSCOPE_POSTGRES_PASSWORD}@postgres:5432/${BIDSCOPE_POSTGRES_DB}
+      BIDSCOPE_CHECKPOINT_DATABASE_URL: postgresql+psycopg://${BIDSCOPE_POSTGRES_USER}:${BIDSCOPE_POSTGRES_PASSWORD}@postgres:5432/${BIDSCOPE_POSTGRES_DB}
     ports:
       - "8000:8000"
     depends_on:
@@ -97,8 +100,8 @@ services:
     command: ["bidscope", "scheduler", "start"]
     environment:
       <<: *production-environment
-      BIDSCOPE_DATABASE_URL: postgresql+asyncpg://bidscope:bidscope@postgres:5432/bidscope
-      BIDSCOPE_CHECKPOINT_DATABASE_URL: postgresql+psycopg://bidscope:bidscope@postgres:5432/bidscope
+      BIDSCOPE_DATABASE_URL: postgresql+asyncpg://${BIDSCOPE_POSTGRES_USER}:${BIDSCOPE_POSTGRES_PASSWORD}@postgres:5432/${BIDSCOPE_POSTGRES_DB}
+      BIDSCOPE_CHECKPOINT_DATABASE_URL: postgresql+psycopg://${BIDSCOPE_POSTGRES_USER}:${BIDSCOPE_POSTGRES_PASSWORD}@postgres:5432/${BIDSCOPE_POSTGRES_DB}
     depends_on:
       postgres:
         condition: service_healthy
