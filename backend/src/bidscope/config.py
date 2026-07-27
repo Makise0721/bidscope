@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     )
 
     def __init__(self, **data: Any) -> None:
+        sanitized_error: ValidationError | None = None
         try:
             super().__init__(**data)
         except ValidationError as error:
@@ -30,9 +31,12 @@ class Settings(BaseSettings):
                 self._sanitize_error_item(cast(Mapping[str, Any], item), secret_values)
                 for item in raw_errors
             ]
-            raise ValidationError.from_exception_data(
+            sanitized_error = ValidationError.from_exception_data(
                 self.__class__.__name__, cast(Any, sanitized_errors)
-            ) from error
+            )
+
+        if sanitized_error is not None:
+            raise sanitized_error
 
     @staticmethod
     def _secret_text(value: Any) -> str | None:

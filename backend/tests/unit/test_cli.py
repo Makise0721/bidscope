@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import traceback
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -168,9 +169,12 @@ def test_direct_settings_validation_redacts_dsn_passwords(
 
     sanitized_item = error.value.errors()[0]
     assert sanitized_item["input"][field_name] == redacted_dsn
-    original_item = error.value.__cause__.errors()[0]
-    for metadata_key in ("type", "loc", "msg", "url"):
-        assert sanitized_item[metadata_key] == original_item[metadata_key]
+    assert sanitized_item["type"] == "value_error"
+    assert sanitized_item["loc"] == ()
+    assert sanitized_item["msg"] == (
+        "Value error, production requires valid values for: external_scheme"
+    )
+    assert sanitized_item["url"].endswith("/value_error")
 
 
 def test_direct_settings_validation_redacts_malformed_raw_dsn_password() -> None:
@@ -194,6 +198,45 @@ def test_direct_settings_validation_redacts_malformed_raw_dsn_password() -> None
     assert error.value.errors()[0]["input"]["database_url"] == (
         "postgresql+asyncpg://bidscope:**********@database.example.test:5432/bidscope"
     )
+
+
+def test_sanitized_settings_validation_error_has_no_raw_exception_chain() -> None:
+    password = "chained-dsn-p@ss:word/?#[]"
+    encoded_password = "chained-dsn-p%40ss%3Aword%2F%3F%23%5B%5D"
+    settings = valid_production_settings()
+    settings.update(PRODUCTION_SECRET_VALUES)
+    settings.update(
+        {
+            "database_url": (
+                "postgresql+asyncpg://bidscope:"
+                f"{encoded_password}@database.example.test:5432/bidscope"
+            ),
+            "external_scheme": "http",
+        }
+    )
+
+    with pytest.raises(ValidationError) as error:
+        Settings(**settings)
+
+    sanitized_item = error.value.errors()[0]
+    assert sanitized_item["type"] == "value_error"
+    assert sanitized_item["loc"] == ()
+    assert sanitized_item["msg"] == (
+        "Value error, production requires valid values for: external_scheme"
+    )
+    assert sanitized_item["url"].endswith("/value_error")
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+
+    rendered = (
+        str(error.value),
+        str(error.value.errors()),
+        error.value.json(),
+        "".join(traceback.format_exception(error.value)),
+    )
+    for secret in (*PRODUCTION_SECRET_VALUES.values(), password, encoded_password):
+        for value in rendered:
+            assert secret not in value
 
 
 def test_environment_settings_validation_redacts_dsn_passwords(
@@ -420,10 +463,6 @@ def test_one_character_secret_validation_errors_keep_structured_metadata(
         Settings(**settings)
 
     sanitized_item = error.value.errors()[0]
-    original_item = error.value.__cause__.errors()[0]
-    for metadata_key in ("type", "loc", "msg", "url"):
-        assert sanitized_item[metadata_key] == original_item[metadata_key]
-
     for rendered in (
         str(error.value),
         str(error.value.errors()),
@@ -432,6 +471,9 @@ def test_one_character_secret_validation_errors_keep_structured_metadata(
         assert "'a'" not in rendered
         assert '\"a\"' not in rendered
     assert sanitized_item["type"] == "value_error"
+    assert sanitized_item["loc"] == ()
+    assert sanitized_item["msg"].startswith("Value error,")
+    assert sanitized_item["url"].endswith("/value_error")
 
 
 def test_secret_unwrapping_does_not_use_private_secret_internals() -> None:
