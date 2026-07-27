@@ -57,6 +57,8 @@ def test_compose_production_services_share_required_settings_without_literal_sec
 
     assert "x-production-environment: &production-environment" in compose
     assert compose.count("<<: *production-environment") == 2
+    assert "BIDSCOPE_APP_MODE: production" in compose
+    assert "BIDSCOPE_OBJECT_STORE_TYPE: s3" in compose
     assert "BIDSCOPE_APP_MODE: demo" not in compose
     assert "minioadmin" not in compose
 
@@ -65,6 +67,9 @@ def test_compose_production_services_share_required_settings_without_literal_sec
         "BIDSCOPE_ALLOWED_ORIGINS",
         "BIDSCOPE_TRUSTED_HOSTS",
         "BIDSCOPE_EXTERNAL_SCHEME",
+        "BIDSCOPE_S3_ENDPOINT",
+        "BIDSCOPE_S3_REGION",
+        "BIDSCOPE_S3_BUCKET",
         "BIDSCOPE_S3_ACCESS_KEY",
         "BIDSCOPE_S3_SECRET_KEY",
     )
