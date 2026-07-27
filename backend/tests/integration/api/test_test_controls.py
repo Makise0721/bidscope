@@ -9,23 +9,34 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from bidscope.config import Settings
+from bidscope.config import Settings, get_settings
 from bidscope.main import create_app
 from fastapi.testclient import TestClient
 
-TEST_DB_URL = "postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test"
-TEST_CHECKPOINT_URL = "postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test"
-
 
 def _client_for_mode(mode: str, tmp_path: Path) -> TestClient:
+    guarded_settings = get_settings()
+    production_values: dict[str, object] = {}
+    if mode == "production":
+        production_values = {
+            "object_store_type": "s3",
+            "s3_endpoint": "http://minio:9000",
+            "s3_bucket": "bidscope-test",
+            "s3_access_key": "test-access",
+            "s3_secret_key": "test-secret",
+            "allowed_origins": ["https://bidscope.test"],
+            "trusted_hosts": ["bidscope.test"],
+            "external_scheme": "https",
+        }
     settings = Settings(
         app_mode=mode,
-        database_url=TEST_DB_URL,
-        checkpoint_database_url=TEST_CHECKPOINT_URL,
+        database_url=guarded_settings.database_url,
+        checkpoint_database_url=guarded_settings.checkpoint_database_url,
         real_model_enabled=False,
-        admin_token="test-admin-token",
+        admin_token="test-admin-token-012345678901234567890123",
         object_store_root=str(tmp_path / "objects"),
         test_control_token="test-controls-token",
+        **production_values,
     )
     return TestClient(create_app(settings=settings))
 

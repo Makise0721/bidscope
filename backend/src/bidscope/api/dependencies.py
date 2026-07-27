@@ -188,7 +188,7 @@ def build_demo_graph(
         HashEmbeddingProvider(dimension=1024),
     )
     notice_factory = sync_session_factory or sessionmaker(
-        bind=sa.create_engine(_to_sync_dsn(settings.database_url))
+        bind=sa.create_engine(_to_sync_dsn(settings.database_dsn()))
     )
     resolved_store = object_store or LocalObjectStore(root=settings.object_store_root)
     deps = GraphDeps(
@@ -1114,13 +1114,13 @@ async def create_run_service(
     any API process is started.
     """
     engine, session_factory = create_engine_and_session(settings)
-    sync_engine = sa.create_engine(_to_sync_dsn(settings.database_url))
+    sync_engine = sa.create_engine(_to_sync_dsn(settings.database_dsn()))
     sync_session_factory = sessionmaker(bind=sync_engine)
     resolved_clock = clock or SystemClock()
     object_store = create_object_store(settings)
 
     try:
-        dsn = _to_plain_dsn(settings.checkpoint_database_url)
+        dsn = _to_plain_dsn(settings.checkpoint_database_dsn())
         async with AsyncPostgresSaver.from_conn_string(dsn) as checkpointer:
             graph = build_demo_graph(
                 session_factory,

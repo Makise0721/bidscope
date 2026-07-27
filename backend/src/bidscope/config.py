@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from functools import lru_cache
 from typing import Any, ClassVar, Literal, cast
+from urllib.parse import urlsplit
 
 from pydantic import AnyHttpUrl, Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -10,11 +11,24 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     _secret_field_names: ClassVar[frozenset[str]] = frozenset(
-        {"admin_token", "model_api_key", "s3_access_key", "s3_secret_key"}
+        {
+            "admin_token",
+            "model_api_key",
+            "s3_access_key",
+            "s3_secret_key",
+        }
     )
     _dsn_field_names: ClassVar[frozenset[str]] = frozenset(
         {"database_url", "checkpoint_database_url"}
     )
+    _database_dsn_defaults: ClassVar[dict[str, str]] = {
+        "database_url": "postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope",
+        "checkpoint_database_url": "postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope",
+    }
+    _production_dsn_schemes: ClassVar[dict[str, str]] = {
+        "database_url": "postgresql+asyncpg",
+        "checkpoint_database_url": "postgresql+psycopg",
+    }
 
     @classmethod
     def _build_sanitized_validation_error(
@@ -118,12 +132,10 @@ class Settings(BaseSettings):
             sanitized_args = tuple(
                 cls._sanitize_error_context(item, secret_values) for item in value.args
             )
-            if sanitized_args == value.args:
-                return value
-            try:
-                return type(value)(*sanitized_args)
-            except TypeError:
-                return value
+            # Pydantic exposes this object through ``ctx['error']``. Rebuild a
+            # plain ValueError so the original validator traceback and locals
+            # cannot remain reachable from the sanitized ValidationError.
+            return ValueError(*sanitized_args)
         if isinstance(value, str):
             return cls._redact_secret_string(value, secret_values)
         return value
@@ -150,6 +162,14 @@ class Settings(BaseSettings):
     @staticmethod
     def _redact_secret_string(value: str, secret_values: set[str]) -> str:
         return "**********" if value in secret_values else value
+
+    def database_dsn(self) -> str:
+        """Return the primary DSN only at the database driver boundary."""
+        return self.database_url.get_secret_value()
+
+    def checkpoint_database_dsn(self) -> str:
+        """Return the checkpoint DSN only at the migration/checkpoint boundary."""
+        return self.checkpoint_database_url.get_secret_value()
 
     @classmethod
     def _sanitize_error_value(cls, value: Any, secret_values: set[str]) -> Any:
@@ -182,8 +202,10 @@ class Settings(BaseSettings):
     )
 
     app_mode: Literal["demo", "development", "production", "test"] = "demo"
-    database_url: str = "postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope"
-    checkpoint_database_url: str = "postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope"
+    database_url: SecretStr = SecretStr(_database_dsn_defaults["database_url"])
+    checkpoint_database_url: SecretStr = SecretStr(
+        _database_dsn_defaults["checkpoint_database_url"]
+    )
     real_model_enabled: bool = False
     admin_token: SecretStr | None = None
     admin_token_min_length: int = Field(default=32, gt=0)
@@ -294,6 +316,10 @@ class Settings(BaseSettings):
             return self
 
         invalid_fields: list[str] = []
+        for field_name in self._dsn_field_names:
+            value = self._secret_text(getattr(self, field_name))
+            if not self._is_valid_production_dsn(field_name, value):
+                invalid_fields.append(field_name)
         if self.object_store_type != "s3":
             invalid_fields.append("object_store_type")
         if not self.allowed_origins or any("*" in str(origin) for origin in self.allowed_origins):
@@ -309,6 +335,32 @@ class Settings(BaseSettings):
                 "production requires valid values for: " + ", ".join(invalid_fields)
             )
         return self
+
+    @classmethod
+    def _is_valid_production_dsn(cls, field_name: str, value: str | None) -> bool:
+        """Accept only a complete, unambiguous DSN for its runtime consumer."""
+        if not value or value == cls._database_dsn_defaults[field_name]:
+            return False
+        try:
+            parsed = urlsplit(value)
+            if (
+                parsed.scheme != cls._production_dsn_schemes[field_name]
+                or not value.startswith(f"{parsed.scheme}://")
+                or not parsed.netloc
+                or parsed.query
+                or parsed.fragment
+                or parsed.hostname is None
+                or not parsed.path.startswith("/")
+                or parsed.path.count("/") != 1
+                or not parsed.path[1:].strip()
+                or ";" in parsed.path
+            ):
+                return False
+            if parsed.port is not None and not 1 <= parsed.port <= 65535:
+                return False
+        except ValueError:
+            return False
+        return True
 
 
 @lru_cache

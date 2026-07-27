@@ -21,7 +21,9 @@ session-scoped autouse fixtures require ``BIDSCOPE_APP_MODE=test`` and a
 needs.
 """
 
+import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -78,9 +80,69 @@ def test_compose_production_services_share_required_settings_without_literal_sec
         "BIDSCOPE_S3_PREFIX",
         "BIDSCOPE_S3_ACCESS_KEY",
         "BIDSCOPE_S3_SECRET_KEY",
+        "BIDSCOPE_REAL_MODEL_ENABLED",
+        "BIDSCOPE_MODEL_API_KEY",
     )
     for key in required_keys:
-        assert f"{key}: ${{{key}:?" in compose
+        assert f"{key}: ${{{key}:?" in compose or key in {
+            "BIDSCOPE_REAL_MODEL_ENABLED",
+            "BIDSCOPE_MODEL_API_KEY",
+        }
+    assert "BIDSCOPE_REAL_MODEL_ENABLED: ${BIDSCOPE_REAL_MODEL_ENABLED:-false}" in compose
+    assert "BIDSCOPE_MODEL_API_KEY: ${BIDSCOPE_MODEL_API_KEY-}" in compose
+
+
+def _service_block(compose: str, service_name: str) -> str:
+    marker = f"  {service_name}:\n"
+    start = compose.index(marker)
+    next_service = re.search(r"\n  [A-Za-z][A-Za-z0-9_-]*:\n", compose[start + len(marker) :])
+    if next_service is None:
+        return compose[start:]
+    return compose[start : start + len(marker) + next_service.start()]
+
+
+def test_compose_keeps_database_and_object_storage_internal_and_scheduler_unchecked() -> None:
+    compose = _read("compose.yaml")
+
+    postgres = _service_block(compose, "postgres")
+    minio = _service_block(compose, "minio")
+    api = _service_block(compose, "api")
+    scheduler = _service_block(compose, "scheduler")
+
+    assert "ports:" not in postgres
+    assert "ports:" not in minio
+    assert '"127.0.0.1:8000:8000"' in api
+    assert "healthcheck:" in api
+    assert "healthcheck:\n      disable: true" in scheduler
+
+
+def test_rendered_compose_keeps_infrastructure_unpublished(
+    compose_environment: dict[str, str],
+) -> None:
+    if shutil.which("docker") is None:
+        pytest.skip("Docker CLI is unavailable")
+
+    result = subprocess.run(
+        ["docker", "compose", "config", "--format", "json"],
+        cwd=REPO_ROOT,
+        env=compose_environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    services = json.loads(result.stdout)["services"]
+    assert "ports" not in services["postgres"]
+    assert "ports" not in services["minio"]
+    assert len(services["api"]["ports"]) == 1
+    api_port = services["api"]["ports"][0]
+    assert {
+        "host_ip": api_port["host_ip"],
+        "published": api_port["published"],
+        "target": api_port["target"],
+    } == {"host_ip": "127.0.0.1", "published": "8000", "target": 8000}
+    assert services["scheduler"]["healthcheck"]["disable"] is True
 
 
 def test_compose_requires_preencoded_postgres_dsns_and_keeps_service_credentials() -> None:
@@ -129,6 +191,8 @@ def compose_environment() -> dict[str, str]:
             "BIDSCOPE_POSTGRES_DB": "bidscope",
             "BIDSCOPE_POSTGRES_USER": "bidscope",
             "BIDSCOPE_POSTGRES_PASSWORD": "p@ss:word/?#[]",
+            "BIDSCOPE_REAL_MODEL_ENABLED": "false",
+            "BIDSCOPE_MODEL_API_KEY": "",
             "BIDSCOPE_DATABASE_URL": (
                 "postgresql+asyncpg://bidscope:p%40ss%3Aword%2F%3F%23%5B%5D"
                 "@postgres:5432/bidscope"

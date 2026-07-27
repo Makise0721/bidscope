@@ -16,9 +16,6 @@ from bidscope.db import create_engine_and_session
 from bidscope.persistence.models import QueryRun, RunEvent
 from fastapi.testclient import TestClient
 
-TEST_DB_URL = "postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test"
-TEST_CHECKPOINT_URL = "postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test"
-
 
 def _insert_run(status: str) -> str:
     """Create a run directly with three ordered events; return its id."""

@@ -21,7 +21,7 @@ def _database_url() -> str:
     database the test or deployment environment configures. A wrong or missing
     URL raises immediately instead of silently falling back to a default.
     """
-    url = get_settings().checkpoint_database_url
+    url = get_settings().checkpoint_database_dsn()
     if not url:
         raise RuntimeError(
             "BIDSCOPE_CHECKPOINT_DATABASE_URL is not set; "

@@ -9,6 +9,7 @@ from unittest import mock
 
 import pytest
 from bidscope.testing import enforce_test_environment
+from sqlalchemy.engine import make_url
 
 _GUARD_FAILURE = pytest.fail.Exception
 
@@ -82,6 +83,26 @@ _MALFORMED_URLS: dict[str, str] = {
         "postgresql+asyncpg://bidscope:port-password@localhost:not-a-port/bidscope_test"
     ),
     "empty-database": "postgresql+asyncpg://bidscope:empty-db-password@localhost:5432/",
+    "query-host-override": (
+        "postgresql+asyncpg://bidscope:query-host-password@localhost:5432/bidscope_test"
+        "?host=external.example"
+    ),
+    "query-port-override": (
+        "postgresql+asyncpg://bidscope:query-port-password@localhost:5432/bidscope_test"
+        "?port=65432"
+    ),
+    "query-dbname-override": (
+        "postgresql+asyncpg://bidscope:query-dbname-password@localhost:5432/bidscope_test"
+        "?dbname=production_database"
+    ),
+    "query-service-override": (
+        "postgresql+asyncpg://bidscope:query-service-password@localhost:5432/bidscope_test"
+        "?service=production-service"
+    ),
+    "fragment": (
+        "postgresql+asyncpg://bidscope:fragment-password@localhost:5432/bidscope_test"
+        "#external-target"
+    ),
 }
 
 _EARLY_REJECTION_CASES: dict[str, tuple[str, str, tuple[str, ...]]] = {
@@ -197,15 +218,7 @@ def test_mismatched_database_urls_never_expose_passwords(case_id: str) -> None:
 
     secrets = _CASES[case_id][2]
     _assert_no_raw_secret_leaks(error.value, secrets)
-    message = str(error.value)
-    if case_id in {"malformed-scheme", "encoded-malformed-scheme", "unknown-scheme"}:
-        assert "database_url='<redacted PostgreSQL URL>'" in message
-        assert "checkpoint_database_url='<redacted PostgreSQL URL>'" in message
-    else:
-        assert "database_url='postgresql+asyncpg://" in message
-        assert "checkpoint_database_url='postgresql+psycopg://" in message
-    if case_id in {"normal", "encoded"}:
-        assert "bidscope_test" in message
+    assert str(error.value) == "Integration test database URLs are invalid or mismatched."
 
 
 @pytest.mark.parametrize("case_id", tuple(_MALFORMED_URLS))
@@ -221,10 +234,39 @@ def test_early_database_suffix_failures_are_constant_and_secret_free(case_id: st
         _call_guard_with_early_case(case_id)
 
     _assert_no_raw_secret_leaks(error.value, _EARLY_REJECTION_CASES[case_id][2])
-    assert str(error.value) == (
-        "database URL must target a dedicated test database (name must end with "
-        "'_test' or '_e2e')"
-        if case_id == "database"
-        else "checkpoint URL must target a dedicated test database (name must end with "
-        "'_test' or '_e2e')"
+    assert str(error.value) == "Integration test database URLs are invalid or mismatched."
+
+
+@pytest.mark.parametrize("case_id", tuple(_MALFORMED_URLS))
+def test_malformed_urls_emit_a_fixed_secret_free_guard_failure(case_id: str) -> None:
+    raw_url = _MALFORMED_URLS[case_id]
+    raw_database_name = "bidscope_test"
+    password = raw_url.partition("://")[2].partition("@")[0].partition(":")[2]
+
+    with pytest.raises(_GUARD_FAILURE) as error:
+        _call_guard_with_malformed_case(case_id, "database")
+
+    assert str(error.value) == "Integration test database URLs are invalid or mismatched."
+    _assert_no_raw_secret_leaks(
+        error.value,
+        tuple(value for value in (password, raw_database_name, "production_database") if value),
     )
+
+
+@pytest.mark.parametrize(
+    "case_id",
+    (
+        "query-host-override",
+        "query-port-override",
+        "query-dbname-override",
+        "query-service-override",
+        "fragment",
+    ),
+)
+def test_url_parser_preserves_rejected_query_or_fragment_components(case_id: str) -> None:
+    parsed = make_url(_MALFORMED_URLS[case_id])
+
+    if case_id == "fragment":
+        assert "#external-target" in _MALFORMED_URLS[case_id]
+    else:
+        assert parsed.query

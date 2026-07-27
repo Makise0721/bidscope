@@ -173,7 +173,7 @@ async def run_service(tmp_path: Path) -> Any:
     await _import_batch_1(tmp_path)
     settings = _settings(tmp_path)
     object_store = LocalObjectStore(root=settings.object_store_root)
-    dsn = _to_plain_dsn(settings.checkpoint_database_url)
+    dsn = _to_plain_dsn(settings.checkpoint_database_dsn())
     async with AsyncPostgresSaver.from_conn_string(dsn) as checkpointer:
         graph = build_demo_graph(
             session_factory,

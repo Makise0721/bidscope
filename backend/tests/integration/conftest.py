@@ -167,7 +167,7 @@ def _setup_checkpoint_schema(_apply_migrations: None) -> None:
 @pytest_asyncio.fixture(scope="session")
 async def db_engine() -> sa.ext.asyncio.AsyncEngine:
     settings = get_settings()
-    return create_async_engine(settings.database_url)
+    return create_async_engine(settings.database_dsn())
 
 
 @pytest.fixture

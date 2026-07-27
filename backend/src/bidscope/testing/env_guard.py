@@ -27,54 +27,7 @@ _ALLOWED_POSTGRES_SCHEMES = frozenset(
 )
 _ALLOWED_TEST_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _SAFE_DATABASE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
-_SAFE_HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
-_SAFE_IPV6_HOST = re.compile(r"[0-9A-Fa-f:.%]+\Z")
-
-
-def _database_name(url: str) -> str:
-    try:
-        parsed = urlparse(url)
-    except ValueError:
-        return ""
-    return (parsed.path or "").lstrip("/").split("?", 1)[0]
-
-
-def _sanitize_dsn(url: str) -> str:
-    """Return PostgreSQL connection metadata without user-info or query data."""
-    try:
-        parsed = urlparse(url)
-    except ValueError:
-        return "<redacted PostgreSQL URL>"
-
-    scheme = parsed.scheme.lower()
-    if scheme not in _ALLOWED_POSTGRES_SCHEMES or not url.startswith(f"{scheme}://"):
-        return "<redacted PostgreSQL URL>"
-
-    try:
-        port = parsed.port or _POSTGRES_DEFAULT_PORT
-        database = _database_name(url)
-    except ValueError:
-        return "<redacted PostgreSQL URL>"
-
-    if not _SAFE_DATABASE_NAME.fullmatch(database):
-        database = "<redacted>"
-
-    # Without an '@', the authority can be malformed user-info or a password
-    # in a nonstandard location. Keep the scheme and database only.
-    if "@" not in parsed.netloc:
-        authority = "<redacted>"
-    else:
-        try:
-            host = parsed.hostname or "<redacted>"
-        except ValueError:
-            host = "<redacted>"
-        if ":" in host:
-            safe_host = f"[{host}]" if _SAFE_IPV6_HOST.fullmatch(host) else "<redacted>"
-        else:
-            safe_host = host if _SAFE_HOST.fullmatch(host) else "<redacted>"
-        authority = f"{safe_host}:{port}"
-
-    return f"{scheme}://{authority}/{database}"
+_GUARD_FAILURE = "Integration test database URLs are invalid or mismatched."
 
 
 def _connection_parts(url: str) -> tuple[str, int, str] | None:
@@ -121,6 +74,7 @@ def _connection_parts(url: str) -> tuple[str, int, str] | None:
             not database
             or not _SAFE_DATABASE_NAME.fullmatch(database)
             or parsed.params
+            or parsed.query
             or parsed.fragment
         ):
             return None
@@ -142,52 +96,23 @@ def enforce_test_environment() -> None:
             "Refusing to run against a non-test environment."
         )
 
-    database_url = settings.database_url
-    checkpoint_url = settings.checkpoint_database_url
-
-    database_name = _database_name(database_url)
-    if not database_name or not re.search(r"_(test|e2e)$", database_name):
-        del database_url
-        del checkpoint_url
-        del settings
-        del database_name
-        pytest.fail(
-            "database URL must target a dedicated test database (name must end with "
-            "'_test' or '_e2e')"
-        )
-
-    checkpoint_name = _database_name(checkpoint_url)
-    if not checkpoint_name or not re.search(r"_(test|e2e)$", checkpoint_name):
-        del database_url
-        del checkpoint_url
-        del settings
-        del database_name
-        del checkpoint_name
-        pytest.fail(
-            "checkpoint URL must target a dedicated test database (name must end with "
-            "'_test' or '_e2e')"
-        )
-
+    database_url = settings.database_dsn()
+    checkpoint_url = settings.checkpoint_database_dsn()
     database_parts = _connection_parts(database_url)
     checkpoint_parts = _connection_parts(checkpoint_url)
-    if database_parts is None or checkpoint_parts is None or database_parts != checkpoint_parts:
-        sanitized_database_url = _sanitize_dsn(database_url)
-        sanitized_checkpoint_url = _sanitize_dsn(checkpoint_url)
-        # Drop settings and raw URLs before pytest formats the failure so the
-        # retained traceback frame cannot expose credentials through locals.
+    is_valid = (
+        database_parts is not None
+        and checkpoint_parts is not None
+        and database_parts == checkpoint_parts
+        and database_parts[2].endswith(("_test", "_e2e"))
+    )
+    if not is_valid:
+        # Drop settings, raw URLs, and parsed targets before pytest formats the
+        # exception; the fixed marker exposes no password, host, or database.
         del database_url
         del checkpoint_url
         del settings
-        del database_name
-        del checkpoint_name
         del database_parts
         del checkpoint_parts
-        pytest.fail(
-            "Integration tests require BIDSCOPE_DATABASE_URL and "
-            "BIDSCOPE_CHECKPOINT_DATABASE_URL to point at the same physical database "
-            "(host, port and database name must match; only the SQLAlchemy driver prefix "
-            "may differ). "
-            f"database_url={sanitized_database_url!r}, "
-            f"checkpoint_database_url={sanitized_checkpoint_url!r}. "
-            "Refusing to run with mismatched database URLs."
-        )
+        del is_valid
+        pytest.fail(_GUARD_FAILURE)

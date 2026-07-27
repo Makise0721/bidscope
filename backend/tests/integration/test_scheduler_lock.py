@@ -113,7 +113,7 @@ async def real_run_service(
     _, session_factory = create_engine_and_session()
     settings = _test_settings(tmp_path)
     object_store = LocalObjectStore(root=settings.object_store_root)
-    dsn = _to_plain_dsn(settings.checkpoint_database_url)
+    dsn = _to_plain_dsn(settings.checkpoint_database_dsn())
     async with AsyncPostgresSaver.from_conn_string(dsn) as checkpointer:
         graph = build_demo_graph(
             session_factory,

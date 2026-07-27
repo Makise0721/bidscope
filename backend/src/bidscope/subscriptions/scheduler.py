@@ -266,10 +266,10 @@ async def run_scheduler_tick(
         # BIDSCOPE_OBJECT_STORE_TYPE (e.g. S3/MinIO in compose) exactly like the
         # API; hard-coding LocalObjectStore here would write subscription report
         # payloads to the container filesystem, invisible to the API process.
-        sync_engine = sa.create_engine(_to_sync_dsn(resolved.database_url))
+        sync_engine = sa.create_engine(_to_sync_dsn(resolved.database_dsn()))
         sync_session_factory = orm.sessionmaker(bind=sync_engine)
         object_store = create_object_store(resolved)
-        dsn = _to_plain_dsn(resolved.checkpoint_database_url)
+        dsn = _to_plain_dsn(resolved.checkpoint_database_dsn())
         try:
             async with AsyncPostgresSaver.from_conn_string(dsn) as checkpointer:
                 run_service = _build_run_service_components(

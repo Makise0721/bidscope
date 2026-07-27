@@ -23,7 +23,7 @@ from pathlib import Path
 import docx
 import pytest
 import sqlalchemy as sa
-from bidscope.config import Settings
+from bidscope.config import Settings, get_settings
 from bidscope.delivery.docx import DeliveryError
 from bidscope.delivery.objects import LocalObjectStore
 from bidscope.delivery.reports import ReportPersistence
@@ -155,10 +155,8 @@ def test_docx_retry_exports_persisted_report_without_running_graph(tmp_path: Pat
 
     settings = Settings(
         app_mode="production",
-        database_url="postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test",
-        checkpoint_database_url=(
-            "postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test"
-        ),
+        database_url=get_settings().database_url,
+        checkpoint_database_url=get_settings().checkpoint_database_url,
         real_model_enabled=False,
         admin_token=PRODUCTION_ADMIN_TOKEN,
         object_store_type="s3",
@@ -250,10 +248,8 @@ def test_docx_retry_recreates_a_missing_attached_object_with_the_same_key(tmp_pa
 
     settings = Settings(
         app_mode="production",
-        database_url="postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test",
-        checkpoint_database_url=(
-            "postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test"
-        ),
+        database_url=get_settings().database_url,
+        checkpoint_database_url=get_settings().checkpoint_database_url,
         real_model_enabled=False,
         admin_token=PRODUCTION_ADMIN_TOKEN,
         object_store_type="s3",

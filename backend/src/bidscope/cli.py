@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from pydantic import ValidationError
 
 from bidscope.api.dependencies import create_object_store
 from bidscope.clock import SystemClock
@@ -74,6 +75,15 @@ def configure_windows_selector_event_loop_policy() -> None:
     """Use selector-backed loops for psycopg async connections on Windows."""
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
+def _require_startup_settings() -> None:
+    """Exit without rendering settings validation data or tracebacks."""
+    try:
+        get_settings()
+    except ValidationError:
+        typer.echo("BidScope startup configuration is invalid.", err=True)
+        raise typer.Exit(code=2) from None
 
 
 def _build_importer() -> SnapshotImporter:
@@ -222,6 +232,7 @@ def api_serve(
     """Serve the FastAPI app (SPA + API) via uvicorn."""
     import uvicorn
 
+    _require_startup_settings()
     from bidscope.main import app
 
     configure_windows_selector_event_loop_policy()
@@ -257,6 +268,7 @@ def scheduler_run_once() -> None:
     """Run one scheduler tick immediately (used by tests and manual triggers)."""
     from bidscope.subscriptions.scheduler import run_scheduler_tick
 
+    _require_startup_settings()
     configure_windows_selector_event_loop_policy()
     counters = asyncio.run(run_scheduler_tick(get_settings()))
     typer.echo(
@@ -273,6 +285,7 @@ def scheduler_start() -> None:
     """Start the APScheduler process role (blocks; one instance per host)."""
     from bidscope.subscriptions.scheduler import start_scheduler
 
+    _require_startup_settings()
     configure_windows_selector_event_loop_policy()
     scheduler = start_scheduler()
     typer.echo("subscription scheduler started (Ctrl+C to stop)")

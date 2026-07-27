@@ -12,19 +12,17 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from bidscope.config import Settings
+from bidscope.config import Settings, get_settings
 from bidscope.delivery.objects import LocalObjectStore
 from bidscope.main import create_app
 from fastapi.testclient import TestClient
 
 PRODUCTION_ADMIN_TOKEN = "test-admin-token-012345678901234567890123"
 
-TEST_DB_URL = "postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test"
-TEST_CHECKPOINT_URL = "postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test"
-
 
 def _settings(*, mode: str, tmp_path: Path) -> Settings:
-    """Build settings pointing at the test database with an isolated object root."""
+    """Build settings over the guard-validated test database and isolated storage."""
+    guarded_settings = get_settings()
     production_values: dict[str, object] = {}
     if mode == "production":
         production_values = {
@@ -40,8 +38,8 @@ def _settings(*, mode: str, tmp_path: Path) -> Settings:
         }
     return Settings(
         app_mode=mode,
-        database_url=TEST_DB_URL,
-        checkpoint_database_url=TEST_CHECKPOINT_URL,
+        database_url=guarded_settings.database_url,
+        checkpoint_database_url=guarded_settings.checkpoint_database_url,
         real_model_enabled=False,
         admin_token=(
             PRODUCTION_ADMIN_TOKEN if mode == "production" else "test-admin-token"

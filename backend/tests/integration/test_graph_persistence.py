@@ -58,7 +58,7 @@ def _build_deps() -> GraphDeps:
 
 async def _new_checkpointer():
     settings = get_settings()
-    return AsyncPostgresSaver.from_conn_string(_to_plain_dsn(settings.checkpoint_database_url))
+    return AsyncPostgresSaver.from_conn_string(_to_plain_dsn(settings.checkpoint_database_dsn()))
 
 
 @pytest.mark.asyncio

@@ -54,6 +54,8 @@ def valid_production_settings() -> dict[str, object]:
         "allowed_origins": ["https://bidscope.example.test"],
         "trusted_hosts": ["bidscope.example.test"],
         "external_scheme": "https",
+        "database_url": "postgresql+asyncpg://bidscope:test-password@database.example.test:5432/bidscope",
+        "checkpoint_database_url": "postgresql+psycopg://bidscope:test-checkpoint-password@database.example.test:5432/bidscope",
     }
 
 
@@ -872,15 +874,13 @@ def test_production_template_keeps_database_credentials_blank() -> None:
     assert "<database-password>" not in template
 
 
-def test_production_template_origin_host_examples_are_nonoperative() -> None:
+def test_production_template_has_active_valid_origin_and_host_entries() -> None:
     template = Path(__file__).parents[3].joinpath(".env.production.example").read_text()
 
     active_lines = [line for line in template.splitlines() if not line.lstrip().startswith("#")]
 
-    assert '# BIDSCOPE_ALLOWED_ORIGINS=["https://bidscope.example.com"]' in template
-    assert '# BIDSCOPE_TRUSTED_HOSTS=["bidscope.example.com"]' in template
-    assert 'BIDSCOPE_ALLOWED_ORIGINS=["https://bidscope.example.com"]' not in active_lines
-    assert 'BIDSCOPE_TRUSTED_HOSTS=["bidscope.example.com"]' not in active_lines
+    assert 'BIDSCOPE_ALLOWED_ORIGINS=["https://bidscope.example.test"]' in active_lines
+    assert 'BIDSCOPE_TRUSTED_HOSTS=["bidscope.example.test"]' in active_lines
 
 
 def test_production_settings_reject_too_short_admin_token() -> None:

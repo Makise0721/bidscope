@@ -12,6 +12,6 @@ def create_engine_and_session(
     settings: Settings | None = None,
 ) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
     resolved = settings or get_settings()
-    engine = create_async_engine(resolved.database_url)
+    engine = create_async_engine(resolved.database_dsn())
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     return engine, factory

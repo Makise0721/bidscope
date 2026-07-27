@@ -158,7 +158,7 @@ async def test_completed_application_graph_persists_report_and_serves_docx(
         object_store_root=str(tmp_path / "graph-reports"),
     )
     clock = FixedClock(datetime(2026, 7, 18, 9, 0, tzinfo=UTC))
-    dsn = _to_plain_dsn(settings.checkpoint_database_url)
+    dsn = _to_plain_dsn(settings.checkpoint_database_dsn())
     async with AsyncPostgresSaver.from_conn_string(dsn) as checkpointer:
         graph = build_demo_graph(
             session_factory,

@@ -100,7 +100,7 @@ def _config(thread_id: str) -> RunnableConfig:
 
 async def setup_checkpoints(settings: Settings) -> None:
     """Create the LangGraph checkpoint tables. CLI-only; not called implicitly."""
-    dsn = _to_plain_dsn(settings.checkpoint_database_url)
+    dsn = _to_plain_dsn(settings.checkpoint_database_dsn())
     async with AsyncPostgresSaver.from_conn_string(dsn) as checkpointer:
         await checkpointer.setup()
 
