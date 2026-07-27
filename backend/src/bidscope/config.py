@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Literal
+from typing import ClassVar, Literal
 
-from pydantic import Field, model_validator
+from pydantic import AnyHttpUrl, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,6 +19,14 @@ class Settings(BaseSettings):
     checkpoint_database_url: str = "postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope"
     real_model_enabled: bool = False
     admin_token: str | None = None
+    admin_token_min_length: int = Field(default=32, gt=0)
+    allowed_origins: list[AnyHttpUrl] = Field(default_factory=list)
+    trusted_hosts: list[str] = Field(default_factory=list)
+    external_scheme: Literal["http", "https"] = "http"
+    #: Values that are unsafe to use as production admin credentials.
+    production_placeholder_tokens: ClassVar[frozenset[str]] = frozenset(
+        {"change-me", "changeme", "replace-me", "your-admin-token", "minioadmin"}
+    )
     #: OpenAI-compatible base URL for the real-model provider (e.g. DeepSeek).
     #: Used by :class:`~bidscope.llm.deepseek.DeepSeekReportModel` and its
     #: siblings — only consulted when ``real_model_enabled`` is true.
@@ -35,6 +43,7 @@ class Settings(BaseSettings):
     #: S3-compatible endpoint URL (e.g. ``http://minio:9000``). Required when
     #: ``object_store_type == "s3"``.
     s3_endpoint: str | None = None
+    s3_region: str = "us-east-1"
     #: S3 bucket name. Required when ``object_store_type == "s3"``.
     s3_bucket: str | None = None
     #: Static access key for the S3 backend. Required when
@@ -56,6 +65,21 @@ class Settings(BaseSettings):
     def validate_run_heartbeat_interval(self) -> Settings:
         if self.run_heartbeat_seconds >= self.stale_run_after_seconds:
             raise ValueError("run_heartbeat_seconds must be less than stale_run_after_seconds")
+        return self
+
+    @model_validator(mode="after")
+    def validate_production_admin_token(self) -> Settings:
+        if self.app_mode != "production":
+            return self
+
+        token = (self.admin_token or "").strip()
+        normalized_token = token.casefold()
+        if not token:
+            raise ValueError("admin_token must be non-empty in production")
+        if normalized_token in self.production_placeholder_tokens:
+            raise ValueError("admin_token must not be a production placeholder")
+        if len(token) < self.admin_token_min_length:
+            raise ValueError("admin_token must meet admin_token_min_length in production")
         return self
 
     @model_validator(mode="after")
@@ -81,6 +105,28 @@ class Settings(BaseSettings):
         if missing:
             raise ValueError(
                 "object_store_type='s3' requires non-empty values for: " + ", ".join(missing)
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_production_configuration(self) -> Settings:
+        if self.app_mode != "production":
+            return self
+
+        invalid_fields: list[str] = []
+        if self.object_store_type != "s3":
+            invalid_fields.append("object_store_type")
+        if not self.allowed_origins or any("*" in str(origin) for origin in self.allowed_origins):
+            invalid_fields.append("allowed_origins")
+        if not self.trusted_hosts or any(
+            not host.strip() or "*" in host for host in self.trusted_hosts
+        ):
+            invalid_fields.append("trusted_hosts")
+        if self.external_scheme != "https":
+            invalid_fields.append("external_scheme")
+        if invalid_fields:
+            raise ValueError(
+                "production requires valid values for: " + ", ".join(invalid_fields)
             )
         return self
 
