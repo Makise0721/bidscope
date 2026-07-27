@@ -75,6 +75,7 @@ def test_compose_production_services_share_required_settings_without_literal_sec
         "BIDSCOPE_S3_ENDPOINT",
         "BIDSCOPE_S3_REGION",
         "BIDSCOPE_S3_BUCKET",
+        "BIDSCOPE_S3_PREFIX",
         "BIDSCOPE_S3_ACCESS_KEY",
         "BIDSCOPE_S3_SECRET_KEY",
     )
@@ -122,6 +123,7 @@ def compose_environment() -> dict[str, str]:
             "BIDSCOPE_S3_ENDPOINT": "http://minio:9000",
             "BIDSCOPE_S3_REGION": "us-east-1",
             "BIDSCOPE_S3_BUCKET": "bidscope-prod",
+            "BIDSCOPE_S3_PREFIX": "production/objects",
             "BIDSCOPE_S3_ACCESS_KEY": "bidscope-access",
             "BIDSCOPE_S3_SECRET_KEY": "bidscope-secret",
             "BIDSCOPE_POSTGRES_DB": "bidscope",
@@ -159,9 +161,10 @@ def test_compose_config_accepts_preencoded_postgres_dsns(
 
 
 @pytest.mark.parametrize(
-    "missing_key", ("BIDSCOPE_DATABASE_URL", "BIDSCOPE_CHECKPOINT_DATABASE_URL")
+    "missing_key",
+    ("BIDSCOPE_DATABASE_URL", "BIDSCOPE_CHECKPOINT_DATABASE_URL", "BIDSCOPE_S3_PREFIX"),
 )
-def test_compose_config_rejects_missing_postgres_dsn(
+def test_compose_config_rejects_missing_required_production_value(
     compose_environment: dict[str, str],
     missing_key: str,
 ) -> None:
