@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -158,6 +159,84 @@ def test_environment_loaded_production_secrets_stay_masked_structurally(
             assert secret not in str(error.value)
             assert secret not in str(error.value.errors())
             assert secret not in error.value.json()
+
+
+def test_environment_loaded_admin_token_honors_string_minimum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key in tuple(os.environ):
+        if key.startswith("BIDSCOPE_"):
+            monkeypatch.delenv(key, raising=False)
+    values = {
+        "BIDSCOPE_APP_MODE": "production",
+        "BIDSCOPE_ADMIN_TOKEN": "a",
+        "BIDSCOPE_ADMIN_TOKEN_MIN_LENGTH": "32",
+        "BIDSCOPE_OBJECT_STORE_TYPE": "s3",
+        "BIDSCOPE_S3_ENDPOINT": "https://s3.example.test",
+        "BIDSCOPE_S3_REGION": "us-east-1",
+        "BIDSCOPE_S3_BUCKET": "bidscope-prod",
+        "BIDSCOPE_S3_ACCESS_KEY": "env-access-secret",
+        "BIDSCOPE_S3_SECRET_KEY": "env-s3-secret",
+        "BIDSCOPE_ALLOWED_ORIGINS": '["https://bidscope.example.test"]',
+        "BIDSCOPE_TRUSTED_HOSTS": '["bidscope.example.test"]',
+        "BIDSCOPE_EXTERNAL_SCHEME": "https",
+    }
+    for key, value in values.items():
+        monkeypatch.setenv(key, value)
+
+    with pytest.raises(ValidationError, match="admin_token_min_length") as error:
+        Settings(_env_file=None)
+
+    assert "env-access-secret" not in str(error.value)
+    assert "env-s3-secret" not in str(error.value)
+
+
+def test_typed_secretstr_admin_token_is_accepted() -> None:
+    settings = valid_production_settings()
+    settings.update(
+        {
+            "admin_token": SecretStr("a" * 32),
+            "real_model_enabled": True,
+        }
+    )
+
+    result = Settings(**settings)
+
+    assert result.admin_token.get_secret_value() == "a" * 32
+
+
+@pytest.mark.parametrize("secret_field", ("s3_access_key", "s3_secret_key"))
+def test_typed_whitespace_s3_secret_is_rejected(secret_field: str) -> None:
+    settings = valid_production_settings()
+    settings[secret_field] = SecretStr("   ")
+
+    with pytest.raises(ValidationError, match=secret_field) as error:
+        Settings(**settings)
+
+    for rendered in (
+        str(error.value),
+        str(error.value.errors()),
+        error.value.json(),
+    ):
+        assert "SecretStr('   ')" not in rendered
+
+
+@pytest.mark.parametrize("minimum", ["not-an-integer", 0, 32])
+def test_admin_token_minimum_edge_is_bounded_and_secret_safe(minimum: object) -> None:
+    settings = valid_production_settings()
+    settings.update(PRODUCTION_SECRET_VALUES)
+    settings["admin_token"] = "minimum-edge-admin-secret"
+    settings["admin_token_min_length"] = minimum
+
+    with pytest.raises(ValidationError) as error:
+        Settings(**settings)
+
+    rendered = " ".join(
+        (str(error.value), str(error.value.errors()), error.value.json())
+    )
+    for secret in PRODUCTION_SECRET_VALUES.values():
+        assert secret not in rendered
+    assert "minimum-edge-admin-secret" not in rendered
 
 
 def test_production_settings_missing_admin_token_hides_other_secrets() -> None:

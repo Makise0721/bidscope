@@ -31,10 +31,24 @@ class Settings(BaseSettings):
                 self.__class__.__name__, cast(Any, sanitized_errors)
             ) from error
 
+    @staticmethod
+    def _secret_text(value: Any) -> str | None:
+        if isinstance(value, SecretStr):
+            value = getattr(value, "_secret_value", None)
+        return value if isinstance(value, str) else None
+
     @classmethod
     def _collect_secret_value(cls, value: Any, secret_values: set[str]) -> None:
-        if isinstance(value, str) and value:
-            secret_values.add(value)
+        secret_text = cls._secret_text(value)
+        if secret_text:
+            secret_values.add(secret_text)
+
+    @classmethod
+    def _is_blank(cls, value: Any) -> bool:
+        if isinstance(value, SecretStr):
+            text = cls._secret_text(value)
+            return text is None or not text.strip()
+        return value is None or (isinstance(value, str) and not value.strip())
 
     @classmethod
     def _collect_error_input_values(
@@ -171,23 +185,21 @@ class Settings(BaseSettings):
             raise ValueError("run_heartbeat_seconds must be less than stale_run_after_seconds")
         return self
 
-    @model_validator(mode="before")
-    @classmethod
-    def validate_production_admin_token(cls, data: Any) -> Any:
-        if not isinstance(data, Mapping) or data.get("app_mode", "demo") != "production":
-            return data
+    @model_validator(mode="after")
+    def validate_production_admin_token(self) -> Settings:
+        if self.app_mode != "production":
+            return self
 
-        raw_token = data.get("admin_token")
-        token = raw_token.strip() if isinstance(raw_token, str) else ""
+        raw_token = self._secret_text(self.admin_token)
+        token = raw_token.strip() if raw_token is not None else ""
         normalized_token = token.casefold()
         if not token:
             raise ValueError("admin_token must be non-empty in production")
-        if normalized_token in cls.production_placeholder_tokens:
+        if normalized_token in self.production_placeholder_tokens:
             raise ValueError("admin_token must not be a production placeholder")
-        min_length = data.get("admin_token_min_length", 32)
-        if isinstance(min_length, int) and len(token) < min_length:
+        if len(token) < self.admin_token_min_length:
             raise ValueError("admin_token must meet admin_token_min_length in production")
-        return data
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -209,7 +221,7 @@ class Settings(BaseSettings):
                 ("s3_access_key", data.get("s3_access_key")),
                 ("s3_secret_key", data.get("s3_secret_key")),
             )
-            if value is None or (isinstance(value, str) and not value.strip())
+            if cls._is_blank(value)
         ]
         if missing:
             raise ValueError(
