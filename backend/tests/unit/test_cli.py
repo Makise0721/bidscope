@@ -200,6 +200,49 @@ def test_direct_settings_validation_redacts_malformed_raw_dsn_password() -> None
     )
 
 
+@pytest.mark.parametrize(
+    ("password", "dsn_suffix"),
+    (
+        ("malformed-no-host-raw:p/word?#[]", "malformed-no-host-raw:p/word?#[]"),
+        (
+            "malformed-no-host-encoded:p@ss/word?#[]",
+            "malformed-no-host-encoded%3Ap%40ss%2Fword%3F%23%5B%5D",
+        ),
+    ),
+)
+def test_direct_settings_validation_redacts_malformed_no_host_dsn_password(
+    password: str,
+    dsn_suffix: str,
+) -> None:
+    settings = valid_production_settings()
+    settings.update(
+        {
+            "database_url": f"postgresql+asyncpg://bidscope:{dsn_suffix}",
+            "external_scheme": "http",
+        }
+    )
+
+    with pytest.raises(ValidationError) as error:
+        Settings(**settings)
+
+    rendered = (
+        str(error.value),
+        str(error.value.errors()),
+        error.value.json(),
+        "".join(traceback.format_exception(error.value)),
+        repr(error.value.__cause__),
+        repr(error.value.__context__),
+    )
+    for value in rendered:
+        assert password not in value
+        assert dsn_suffix not in value
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert error.value.errors()[0]["input"]["database_url"] == (
+        "postgresql+asyncpg://bidscope:**********"
+    )
+
+
 def test_sanitized_settings_validation_error_has_no_raw_exception_chain() -> None:
     password = "chained-dsn-p@ss:word/?#[]"
     encoded_password = "chained-dsn-p%40ss%3Aword%2F%3F%23%5B%5D"

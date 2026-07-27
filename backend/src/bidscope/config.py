@@ -121,11 +121,16 @@ class Settings(BaseSettings):
             return value
 
         userinfo, separator, location = remainder.rpartition("@")
-        username, password_separator, _ = userinfo.partition(":")
-        if not separator or not password_separator:
-            return value
+        if separator:
+            username, password_separator, _ = userinfo.partition(":")
+            if not password_separator:
+                return value
+            return f"{scheme}://{username}:**********@{location}"
 
-        return f"{scheme}://{username}:**********@{location}"
+        username, password_separator, _ = remainder.partition(":")
+        if not password_separator:
+            return value
+        return f"{scheme}://{username}:**********"
 
     @staticmethod
     def _redact_secret_string(value: str, secret_values: set[str]) -> str:
