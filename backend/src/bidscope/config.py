@@ -33,8 +33,14 @@ class Settings(BaseSettings):
 
     @staticmethod
     def _secret_text(value: Any) -> str | None:
+        """Normalize secret input only for transient settings validation/redaction.
+
+        The public getter is never logged, persisted, returned, or included in
+        validation errors; runtime secret use remains at its authentication,
+        storage, and model-provider boundaries.
+        """
         if isinstance(value, SecretStr):
-            value = getattr(value, "_secret_value", None)
+            value = value.get_secret_value()
         return value if isinstance(value, str) else None
 
     @classmethod

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 from pathlib import Path
@@ -192,6 +193,7 @@ def test_environment_loaded_admin_token_honors_string_minimum(
 
 
 def test_typed_secretstr_admin_token_is_accepted() -> None:
+    """Direct SecretStr input is transiently validated and remains masked in Settings."""
     settings = valid_production_settings()
     settings.update(
         {
@@ -207,6 +209,7 @@ def test_typed_secretstr_admin_token_is_accepted() -> None:
 
 @pytest.mark.parametrize("secret_field", ("s3_access_key", "s3_secret_key"))
 def test_typed_whitespace_s3_secret_is_rejected(secret_field: str) -> None:
+    """Direct blank SecretStr S3 credentials fail the configuration boundary."""
     settings = valid_production_settings()
     settings[secret_field] = SecretStr("   ")
 
@@ -319,10 +322,35 @@ def test_one_character_secret_validation_errors_keep_structured_metadata(
     assert sanitized_item["type"] == "value_error"
 
 
-def test_settings_config_does_not_unwrap_secrets() -> None:
-    config_source = Path(__file__).parents[2].joinpath("src/bidscope/config.py").read_text()
+def test_secret_unwrapping_uses_supported_api_at_limited_boundaries() -> None:
+    source_root = Path(__file__).parents[2].joinpath("src/bidscope")
+    config_source = source_root.joinpath("config.py").read_text()
+    config_ast = ast.parse(config_source)
+    private_secret_internal_names = {
+        node.attr
+        for node in ast.walk(config_ast)
+        if isinstance(node, ast.Attribute) and node.attr in {"_secret_value", "__dict__"}
+    }
+    private_secret_internal_names.update(
+        node.value
+        for node in ast.walk(config_ast)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value in {"_secret_value", "__dict__"}
+    )
+    getter_callers = {
+        source_file.relative_to(source_root).as_posix()
+        for source_file in source_root.rglob("*.py")
+        if ".get_secret_value()" in source_file.read_text()
+    }
 
-    assert "get_secret_value" not in config_source
+    assert not private_secret_internal_names
+    assert getter_callers == {
+        "api/auth.py",
+        "api/dependencies.py",
+        "config.py",
+        "llm/deepseek.py",
+    }
 
 
 def test_field_validation_errors_hide_arbitrary_secrets() -> None:
