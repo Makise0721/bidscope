@@ -111,7 +111,7 @@ P1 不把管理员 token 编译进前端 bundle，也不把 token 放入 URL、C
 | `/healthz` | 公开 | 进程存活检查，不执行深依赖检查 |
 | `/readyz` | 公开 | 返回每项依赖的 `ok`/`degraded`/`failed`，不返回内部细节 |
 | `/assets/*` 与 SPA GET | 公开或由反向代理限制 | 不携带敏感数据 |
-| `/api/runs/*`、`events/*`、`reports/*` | Admin Token | 查询、创建、确认、重试、取消和下载均受保护 |
+| `/api/runs/*`、`events/*`、`reports/*` | Admin Token | 查询、创建、确认、重试和下载均受保护；P1 不新增用户可见的取消端点 |
 | `/api/subscriptions/*`、`inbox/*` | Admin Token | 订阅和通知操作受保护 |
 | `/api/sources/*`、`evaluations/*` | Admin Token | 数据与评估信息受保护 |
 | `/metrics` | Admin Token | bounded 指标，不公开业务标签 |
@@ -129,7 +129,7 @@ P1 不把管理员 token 编译进前端 bundle，也不把 token 放入 URL、C
 
 审计分为两类：
 
-- **关键变更审计：** 运行确认/重试/取消、订阅创建/暂停/恢复、快照导入和管理配置变更与业务事务同提交。审计写入失败时事务失败并返回 bounded 错误，不能出现“操作成功但没有审计记录”。
+- **关键变更审计：** 运行创建/确认/重试、订阅创建/暂停/恢复、快照导入和管理配置变更与业务事务同提交。P1 不新增用户可见的取消端点；内部任务取消保持运行时恢复实现细节。审计写入失败时事务失败并返回 bounded 错误，不能出现“操作成功但没有审计记录”。
 - **观察类审计：** 读取、下载、健康检查等使用有界异步/同步记录；写入失败必须记录结构化错误和指标，但不阻断普通读取响应。
 
 禁止写入：Admin Token、Authorization 头、模型 API key、Cookie/session、完整用户请求中的敏感字段、完整报告正文和任意原始请求头。
@@ -218,15 +218,15 @@ P1 不把管理员 token 编译进前端 bundle，也不把 token 放入 URL、C
   "created_at": "...",
   "app_version": "...",
   "git_commit": "...",
-  "migration_revision": "...",
-  "database_dump": {"path": "...", "sha256": "..."},
+  "migration_revisions": {"application": "...", "checkpoint": "..."},
+  "database_dumps": {"application": {"path": "...", "sha256": "..."}},
   "objects": [{"key": "...", "size": 0, "sha256": "..."}],
   "counts": {"objects": 0},
   "retention_class": "daily"
 }
 ```
 
-数据库使用一致性 dump（计划采用 PostgreSQL custom-format `pg_dump`，恢复使用 `pg_restore`）；对象使用 provider 无关的逐对象复制/归档。最终 manifest 和归档均计算 SHA-256。备份日志不得输出任何凭据。
+数据库使用一致性 dump（计划采用 PostgreSQL custom-format `pg_dump`，恢复使用 `pg_restore`）；当应用库和 checkpoint 库指向同一个 PostgreSQL 数据库时只生成一份 dump 并在 manifest 中映射两个角色，指向不同数据库时分别生成 dump。对象使用 provider 无关的逐对象复制/归档。最终 manifest 和归档均计算 SHA-256。备份日志不得输出任何凭据。
 
 ### 7.2 运维 CLI
 
