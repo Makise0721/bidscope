@@ -75,8 +75,8 @@ services:
     command: ["bidscope", "api", "serve", "--host", "0.0.0.0", "--port", "8000"]
     environment:
       <<: *production-environment
-      BIDSCOPE_DATABASE_URL: postgresql+asyncpg://${BIDSCOPE_POSTGRES_USER}:${BIDSCOPE_POSTGRES_PASSWORD}@postgres:5432/${BIDSCOPE_POSTGRES_DB}
-      BIDSCOPE_CHECKPOINT_DATABASE_URL: postgresql+psycopg://${BIDSCOPE_POSTGRES_USER}:${BIDSCOPE_POSTGRES_PASSWORD}@postgres:5432/${BIDSCOPE_POSTGRES_DB}
+      BIDSCOPE_DATABASE_URL: ${BIDSCOPE_DATABASE_URL:?set BIDSCOPE_DATABASE_URL to a pre-encoded PostgreSQL application DSN}
+      BIDSCOPE_CHECKPOINT_DATABASE_URL: ${BIDSCOPE_CHECKPOINT_DATABASE_URL:?set BIDSCOPE_CHECKPOINT_DATABASE_URL to a pre-encoded PostgreSQL checkpoint DSN}
     ports:
       - "8000:8000"
     depends_on:
@@ -100,8 +100,8 @@ services:
     command: ["bidscope", "scheduler", "start"]
     environment:
       <<: *production-environment
-      BIDSCOPE_DATABASE_URL: postgresql+asyncpg://${BIDSCOPE_POSTGRES_USER}:${BIDSCOPE_POSTGRES_PASSWORD}@postgres:5432/${BIDSCOPE_POSTGRES_DB}
-      BIDSCOPE_CHECKPOINT_DATABASE_URL: postgresql+psycopg://${BIDSCOPE_POSTGRES_USER}:${BIDSCOPE_POSTGRES_PASSWORD}@postgres:5432/${BIDSCOPE_POSTGRES_DB}
+      BIDSCOPE_DATABASE_URL: ${BIDSCOPE_DATABASE_URL:?set BIDSCOPE_DATABASE_URL to a pre-encoded PostgreSQL application DSN}
+      BIDSCOPE_CHECKPOINT_DATABASE_URL: ${BIDSCOPE_CHECKPOINT_DATABASE_URL:?set BIDSCOPE_CHECKPOINT_DATABASE_URL to a pre-encoded PostgreSQL checkpoint DSN}
     depends_on:
       postgres:
         condition: service_healthy

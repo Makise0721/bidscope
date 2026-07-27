@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import ast
 import json
 import os
+import re
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -132,6 +132,118 @@ def assert_validation_error_hides_production_secrets(
         assert secret not in structured_error
         assert secret not in structured_json
         assert secret not in errors_json
+
+
+@pytest.mark.parametrize(
+    ("field_name", "driver"),
+    (
+        ("database_url", "asyncpg"),
+        ("checkpoint_database_url", "psycopg"),
+    ),
+)
+def test_direct_settings_validation_redacts_dsn_passwords(
+    field_name: str,
+    driver: str,
+) -> None:
+    password = "direct-dsn-p@ss:word/?#[]"
+    encoded_password = "direct-dsn-p%40ss%3Aword%2F%3F%23%5B%5D"
+    dsn = (
+        f"postgresql+{driver}://bidscope:{encoded_password}"
+        "@database.example.test:5432/bidscope"
+    )
+    settings = valid_production_settings()
+    settings.update({field_name: dsn, "external_scheme": "http"})
+
+    with pytest.raises(ValidationError) as error:
+        Settings(**settings)
+
+    rendered = (str(error.value), str(error.value.errors()), error.value.json())
+    redacted_dsn = (
+        f"postgresql+{driver}://bidscope:**********"
+        "@database.example.test:5432/bidscope"
+    )
+    for value in rendered:
+        assert password not in value
+        assert encoded_password not in value
+
+    sanitized_item = error.value.errors()[0]
+    assert sanitized_item["input"][field_name] == redacted_dsn
+    original_item = error.value.__cause__.errors()[0]
+    for metadata_key in ("type", "loc", "msg", "url"):
+        assert sanitized_item[metadata_key] == original_item[metadata_key]
+
+
+def test_direct_settings_validation_redacts_malformed_raw_dsn_password() -> None:
+    password = "malformed-raw-p@ss:word/?#[]"
+    settings = valid_production_settings()
+    settings.update(
+        {
+            "database_url": (
+                "postgresql+asyncpg://bidscope:"
+                f"{password}@database.example.test:5432/bidscope"
+            ),
+            "external_scheme": "http",
+        }
+    )
+
+    with pytest.raises(ValidationError) as error:
+        Settings(**settings)
+
+    for rendered in (str(error.value), str(error.value.errors()), error.value.json()):
+        assert password not in rendered
+    assert error.value.errors()[0]["input"]["database_url"] == (
+        "postgresql+asyncpg://bidscope:**********@database.example.test:5432/bidscope"
+    )
+
+
+def test_environment_settings_validation_redacts_dsn_passwords(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key in tuple(os.environ):
+        if key.startswith("BIDSCOPE_"):
+            monkeypatch.delenv(key, raising=False)
+
+    password = "environment-dsn-p@ss:word/?#[]"
+    encoded_password = "environment-dsn-p%40ss%3Aword%2F%3F%23%5B%5D"
+    values = {
+        "BIDSCOPE_APP_MODE": "production",
+        "BIDSCOPE_ADMIN_TOKEN": "a" * 32,
+        "BIDSCOPE_OBJECT_STORE_TYPE": "s3",
+        "BIDSCOPE_S3_ENDPOINT": "https://s3.example.test",
+        "BIDSCOPE_S3_BUCKET": "bidscope-prod",
+        "BIDSCOPE_S3_ACCESS_KEY": "test-access-key",
+        "BIDSCOPE_S3_SECRET_KEY": "test-secret-key",
+        "BIDSCOPE_ALLOWED_ORIGINS": '["https://bidscope.example.test"]',
+        "BIDSCOPE_TRUSTED_HOSTS": '["bidscope.example.test"]',
+        "BIDSCOPE_EXTERNAL_SCHEME": "http",
+        "BIDSCOPE_DATABASE_URL": (
+            "postgresql+asyncpg://bidscope:"
+            f"{encoded_password}@database.example.test:5432/bidscope"
+        ),
+        "BIDSCOPE_CHECKPOINT_DATABASE_URL": (
+            "postgresql+psycopg://bidscope:"
+            f"{encoded_password}@database.example.test:5432/bidscope"
+        ),
+    }
+    for key, value in values.items():
+        monkeypatch.setenv(key, value)
+
+    with pytest.raises(ValidationError) as error:
+        Settings(_env_file=None)
+
+    for rendered in (str(error.value), str(error.value.errors()), error.value.json()):
+        assert password not in rendered
+        assert encoded_password not in rendered
+
+    sanitized_input = error.value.errors()[0]["input"]
+    assert sanitized_input["database_url"] == (
+        "postgresql+asyncpg://bidscope:**********"
+        "@database.example.test:5432/bidscope"
+    )
+    assert sanitized_input["checkpoint_database_url"] == (
+        "postgresql+psycopg://bidscope:**********"
+        "@database.example.test:5432/bidscope"
+    )
 
 
 def test_environment_loaded_production_secrets_stay_masked_structurally(
@@ -322,35 +434,10 @@ def test_one_character_secret_validation_errors_keep_structured_metadata(
     assert sanitized_item["type"] == "value_error"
 
 
-def test_secret_unwrapping_uses_supported_api_at_limited_boundaries() -> None:
-    source_root = Path(__file__).parents[2].joinpath("src/bidscope")
-    config_source = source_root.joinpath("config.py").read_text()
-    config_ast = ast.parse(config_source)
-    private_secret_internal_names = {
-        node.attr
-        for node in ast.walk(config_ast)
-        if isinstance(node, ast.Attribute) and node.attr in {"_secret_value", "__dict__"}
-    }
-    private_secret_internal_names.update(
-        node.value
-        for node in ast.walk(config_ast)
-        if isinstance(node, ast.Constant)
-        and isinstance(node.value, str)
-        and node.value in {"_secret_value", "__dict__"}
-    )
-    getter_callers = {
-        source_file.relative_to(source_root).as_posix()
-        for source_file in source_root.rglob("*.py")
-        if ".get_secret_value()" in source_file.read_text()
-    }
+def test_secret_unwrapping_does_not_use_private_secret_internals() -> None:
+    config_source = Path(__file__).parents[2].joinpath("src/bidscope/config.py").read_text()
 
-    assert not private_secret_internal_names
-    assert getter_callers == {
-        "api/auth.py",
-        "api/dependencies.py",
-        "config.py",
-        "llm/deepseek.py",
-    }
+    assert not re.search(r"\.(?:_secret_value|__dict__)\b", config_source)
 
 
 def test_field_validation_errors_hide_arbitrary_secrets() -> None:

@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     _secret_field_names: ClassVar[frozenset[str]] = frozenset(
         {"admin_token", "model_api_key", "s3_access_key", "s3_secret_key"}
     )
+    _dsn_field_names: ClassVar[frozenset[str]] = frozenset(
+        {"database_url", "checkpoint_database_url"}
+    )
 
     def __init__(self, **data: Any) -> None:
         try:
@@ -107,6 +110,20 @@ class Settings(BaseSettings):
         return value
 
     @staticmethod
+    def _redact_dsn_password(value: str) -> str:
+        """Mask a PostgreSQL password without changing the connection target."""
+        scheme, separator, remainder = value.partition("://")
+        if not separator or not scheme.startswith("postgresql"):
+            return value
+
+        userinfo, separator, location = remainder.rpartition("@")
+        username, password_separator, _ = userinfo.partition(":")
+        if not separator or not password_separator:
+            return value
+
+        return f"{scheme}://{username}:**********@{location}"
+
+    @staticmethod
     def _redact_secret_string(value: str, secret_values: set[str]) -> str:
         return "**********" if value in secret_values else value
 
@@ -122,7 +139,11 @@ class Settings(BaseSettings):
                     else SecretStr(str(value[key]))
                 )
                 if key in cls._secret_field_names and value[key] is not None
-                else cls._sanitize_error_value(value[key], secret_values)
+                else (
+                    cls._redact_dsn_password(value[key])
+                    if key in cls._dsn_field_names and isinstance(value[key], str)
+                    else cls._sanitize_error_value(value[key], secret_values)
+                )
                 for key in value
             }
         if isinstance(value, (list, tuple)):

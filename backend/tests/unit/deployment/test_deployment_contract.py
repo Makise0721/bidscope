@@ -21,7 +21,12 @@ session-scoped autouse fixtures require ``BIDSCOPE_APP_MODE=test`` and a
 needs.
 """
 
+import os
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
@@ -77,7 +82,7 @@ def test_compose_production_services_share_required_settings_without_literal_sec
         assert f"{key}: ${{{key}:?" in compose
 
 
-def test_compose_requires_interpolated_postgres_credentials_everywhere() -> None:
+def test_compose_requires_preencoded_postgres_dsns_and_keeps_service_credentials() -> None:
     compose = _read("compose.yaml")
 
     assert "POSTGRES_PASSWORD: bidscope" not in compose
@@ -86,14 +91,92 @@ def test_compose_requires_interpolated_postgres_credentials_everywhere() -> None
         "BIDSCOPE_POSTGRES_DB",
         "BIDSCOPE_POSTGRES_USER",
         "BIDSCOPE_POSTGRES_PASSWORD",
+        "BIDSCOPE_DATABASE_URL",
+        "BIDSCOPE_CHECKPOINT_DATABASE_URL",
     ):
         assert f"${{{key}:?" in compose
     assert 'pg_isready -U \\"$${POSTGRES_USER}\\" -d \\"$${POSTGRES_DB}\\"' in compose
-    assert (
-        "postgresql+asyncpg://${BIDSCOPE_POSTGRES_USER}:"
-        "${BIDSCOPE_POSTGRES_PASSWORD}@postgres:5432/${BIDSCOPE_POSTGRES_DB}"
-    ) in compose
-    assert (
-        "postgresql+psycopg://${BIDSCOPE_POSTGRES_USER}:"
-        "${BIDSCOPE_POSTGRES_PASSWORD}@postgres:5432/${BIDSCOPE_POSTGRES_DB}"
-    ) in compose
+    assert compose.count(
+        "BIDSCOPE_DATABASE_URL: ${BIDSCOPE_DATABASE_URL:?set BIDSCOPE_DATABASE_URL to a "
+        "pre-encoded PostgreSQL application DSN}"
+    ) == 2
+    assert compose.count(
+        "BIDSCOPE_CHECKPOINT_DATABASE_URL: "
+        "${BIDSCOPE_CHECKPOINT_DATABASE_URL:?set BIDSCOPE_CHECKPOINT_DATABASE_URL to a "
+        "pre-encoded PostgreSQL checkpoint DSN}"
+    ) == 2
+    assert "${BIDSCOPE_POSTGRES_PASSWORD}@postgres" not in compose
+    assert "postgresql+asyncpg://${BIDSCOPE_POSTGRES_USER}" not in compose
+    assert "postgresql+psycopg://${BIDSCOPE_POSTGRES_USER}" not in compose
+
+
+@pytest.fixture
+def compose_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "BIDSCOPE_ADMIN_TOKEN": "a" * 32,
+            "BIDSCOPE_ALLOWED_ORIGINS": '["https://bidscope.example.test"]',
+            "BIDSCOPE_TRUSTED_HOSTS": '["bidscope.example.test"]',
+            "BIDSCOPE_EXTERNAL_SCHEME": "https",
+            "BIDSCOPE_S3_ENDPOINT": "http://minio:9000",
+            "BIDSCOPE_S3_REGION": "us-east-1",
+            "BIDSCOPE_S3_BUCKET": "bidscope-prod",
+            "BIDSCOPE_S3_ACCESS_KEY": "bidscope-access",
+            "BIDSCOPE_S3_SECRET_KEY": "bidscope-secret",
+            "BIDSCOPE_POSTGRES_DB": "bidscope",
+            "BIDSCOPE_POSTGRES_USER": "bidscope",
+            "BIDSCOPE_POSTGRES_PASSWORD": "p@ss:word/?#[]",
+            "BIDSCOPE_DATABASE_URL": (
+                "postgresql+asyncpg://bidscope:p%40ss%3Aword%2F%3F%23%5B%5D"
+                "@postgres:5432/bidscope"
+            ),
+            "BIDSCOPE_CHECKPOINT_DATABASE_URL": (
+                "postgresql+psycopg://bidscope:p%40ss%3Aword%2F%3F%23%5B%5D"
+                "@postgres:5432/bidscope"
+            ),
+        }
+    )
+    return environment
+
+
+def test_compose_config_accepts_preencoded_postgres_dsns(
+    compose_environment: dict[str, str],
+) -> None:
+    if shutil.which("docker") is None:
+        pytest.skip("Docker CLI is unavailable")
+
+    result = subprocess.run(
+        ["docker", "compose", "config", "-q"],
+        cwd=REPO_ROOT,
+        env=compose_environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "missing_key", ("BIDSCOPE_DATABASE_URL", "BIDSCOPE_CHECKPOINT_DATABASE_URL")
+)
+def test_compose_config_rejects_missing_postgres_dsn(
+    compose_environment: dict[str, str],
+    missing_key: str,
+) -> None:
+    if shutil.which("docker") is None:
+        pytest.skip("Docker CLI is unavailable")
+    compose_environment.pop(missing_key)
+
+    result = subprocess.run(
+        ["docker", "compose", "config", "-q"],
+        cwd=REPO_ROOT,
+        env=compose_environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert missing_key in result.stderr
