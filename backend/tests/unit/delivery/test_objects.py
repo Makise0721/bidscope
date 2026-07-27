@@ -1,7 +1,9 @@
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
+from bidscope.api import dependencies
 from bidscope.api.dependencies import create_object_store
 from bidscope.config import Settings
 from bidscope.delivery.objects import LocalObjectStore, S3ObjectStore
@@ -119,6 +121,28 @@ def test_storage_factory_selects_s3_with_explicit_configuration() -> None:
         s3_secret_key="minioadmin",
     )
     assert isinstance(create_object_store(settings), S3ObjectStore)
+
+
+def test_storage_factory_passes_configured_s3_region(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    class CapturingS3ObjectStore(S3ObjectStore):
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(dependencies, "S3ObjectStore", CapturingS3ObjectStore)
+    settings = Settings(
+        object_store_type="s3",
+        s3_endpoint="https://s3.example.test",
+        s3_bucket="bidscope",
+        s3_access_key="access",
+        s3_secret_key="secret",
+        s3_region="eu-west-2",
+    )
+
+    create_object_store(settings)
+
+    assert captured["region_name"] == "eu-west-2"
 
 
 def test_storage_factory_uses_local_root_in_demo(tmp_path: Path) -> None:

@@ -187,6 +187,17 @@ def test_production_template_keeps_database_credentials_blank() -> None:
     assert "<database-password>" not in template
 
 
+def test_production_template_origin_host_examples_are_nonoperative() -> None:
+    template = Path(__file__).parents[3].joinpath(".env.production.example").read_text()
+
+    active_lines = [line for line in template.splitlines() if not line.lstrip().startswith("#")]
+
+    assert '# BIDSCOPE_ALLOWED_ORIGINS=["https://bidscope.example.com"]' in template
+    assert '# BIDSCOPE_TRUSTED_HOSTS=["bidscope.example.com"]' in template
+    assert 'BIDSCOPE_ALLOWED_ORIGINS=["https://bidscope.example.com"]' not in active_lines
+    assert 'BIDSCOPE_TRUSTED_HOSTS=["bidscope.example.com"]' not in active_lines
+
+
 def test_production_settings_reject_too_short_admin_token() -> None:
     settings = valid_production_settings()
     settings["admin_token"] = "s" * 31
