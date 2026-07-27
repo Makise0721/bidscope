@@ -16,24 +16,32 @@ class Settings(BaseSettings):
         {"database_url", "checkpoint_database_url"}
     )
 
+    @classmethod
+    def _build_sanitized_validation_error(
+        cls, data: Mapping[str, Any], error: ValidationError
+    ) -> ValidationError:
+        raw_errors = error.errors(include_url=True, include_context=True)
+        secret_values: set[str] = set()
+        for field_name in cls._secret_field_names:
+            cls._collect_secret_value(data.get(field_name), secret_values)
+        for item in raw_errors:
+            cls._collect_error_input_values(item.get("input"), secret_values, root=True)
+        sanitized_errors = [
+            cls._sanitize_error_item(cast(Mapping[str, Any], item), secret_values)
+            for item in raw_errors
+        ]
+        return ValidationError.from_exception_data(
+            cls.__name__, cast(Any, sanitized_errors)
+        )
+
     def __init__(self, **data: Any) -> None:
         sanitized_error: ValidationError | None = None
         try:
             super().__init__(**data)
         except ValidationError as error:
-            raw_errors = error.errors(include_url=True, include_context=True)
-            secret_values: set[str] = set()
-            for field_name in self._secret_field_names:
-                self._collect_secret_value(data.get(field_name), secret_values)
-            for item in raw_errors:
-                self._collect_error_input_values(item.get("input"), secret_values, root=True)
-            sanitized_errors = [
-                self._sanitize_error_item(cast(Mapping[str, Any], item), secret_values)
-                for item in raw_errors
-            ]
-            sanitized_error = ValidationError.from_exception_data(
-                self.__class__.__name__, cast(Any, sanitized_errors)
-            )
+            sanitized_error = self._build_sanitized_validation_error(data, error)
+            del data
+            del error
 
         if sanitized_error is not None:
             raise sanitized_error

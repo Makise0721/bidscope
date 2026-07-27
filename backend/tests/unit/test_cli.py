@@ -21,6 +21,16 @@ PRODUCTION_SECRET_VALUES = {
     "model_api_key": "arbitrary-model-secret-1e5f",
 }
 
+TRACEBACK_DIRECT_MODEL_SECRET = "traceback-direct-model-secret-7f2a"
+TRACEBACK_TYPED_MODEL_SECRET = "traceback-typed-model-secret-8b3c"
+TRACEBACK_DSN_PASSWORD = "traceback-dsn-p@ss:word/?#[]"
+TRACEBACK_DSN_PASSWORD_ENCODED = "traceback-dsn-p%40ss%3Aword%2F%3F%23%5B%5D"
+TRACEBACK_ENV_MODEL_SECRET = "traceback-environment-model-secret-9d4e"
+TRACEBACK_ENV_DSN_PASSWORD = "traceback-environment-dsn-p@ss:word/?#[]"
+TRACEBACK_ENV_DSN_PASSWORD_ENCODED = (
+    "traceback-environment-dsn-p%40ss%3Aword%2F%3F%23%5B%5D"
+)
+
 
 def valid_production_settings() -> dict[str, object]:
     return {
@@ -133,6 +143,167 @@ def assert_validation_error_hides_production_secrets(
         assert secret not in structured_error
         assert secret not in structured_json
         assert secret not in errors_json
+
+
+def _iter_exception_graph(error: BaseException):
+    pending = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        for related in (current.__cause__, current.__context__):
+            if related is not None:
+                pending.append(related)
+
+
+def _contains_raw_secret(
+    value: object, secrets: tuple[str, ...], seen: set[int] | None = None
+) -> bool:
+    seen = set() if seen is None else seen
+    if isinstance(value, str):
+        return any(secret in value for secret in secrets)
+    if isinstance(value, SecretStr):
+        return any(secret in value.get_secret_value() for secret in secrets)
+    if isinstance(value, BaseException):
+        return _contains_raw_secret(value.args, secrets, seen)
+    if isinstance(value, dict):
+        value_id = id(value)
+        if value_id in seen:
+            return False
+        seen.add(value_id)
+        return any(
+            _contains_raw_secret(item, secrets, seen)
+            for pair in value.items()
+            for item in pair
+        )
+    if isinstance(value, (list, tuple, set, frozenset)):
+        value_id = id(value)
+        if value_id in seen:
+            return False
+        seen.add(value_id)
+        return any(_contains_raw_secret(item, secrets, seen) for item in value)
+    return False
+
+
+def assert_validation_error_has_no_traceback_secret_leaks(
+    error: ValidationError, *secrets: str
+) -> None:
+    raw_secrets = tuple(secrets)
+    rendered = (
+        str(error),
+        str(error.errors()),
+        error.json(),
+        "".join(traceback.format_exception(error)),
+    )
+    for value in rendered:
+        for secret in raw_secrets:
+            assert secret not in value
+
+    for exception in _iter_exception_graph(error):
+        assert not _contains_raw_secret(exception.args, raw_secrets)
+        traceback_frame = exception.__traceback__
+        while traceback_frame is not None:
+            assert not _contains_raw_secret(
+                traceback_frame.tb_frame.f_locals, raw_secrets
+            )
+            traceback_frame = traceback_frame.tb_next
+
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+def test_direct_raw_model_key_has_no_traceback_secret_locals() -> None:
+    with pytest.raises(ValidationError, match="external_scheme") as error:
+        Settings(
+            **{
+                **valid_production_settings(),
+                "real_model_enabled": True,
+                "model_api_key": TRACEBACK_DIRECT_MODEL_SECRET,
+                "database_url": (
+                    "postgresql+asyncpg://bidscope:"
+                    f"{TRACEBACK_DSN_PASSWORD_ENCODED}@database.example.test:5432/bidscope"
+                ),
+                "external_scheme": "http",
+            }
+        )
+
+    assert_validation_error_has_no_traceback_secret_leaks(
+        error.value,
+        TRACEBACK_DIRECT_MODEL_SECRET,
+        TRACEBACK_DSN_PASSWORD,
+        TRACEBACK_DSN_PASSWORD_ENCODED,
+    )
+
+
+def test_direct_secretstr_model_key_has_no_traceback_secret_locals() -> None:
+    with pytest.raises(ValidationError, match="external_scheme") as error:
+        Settings(
+            **{
+                **valid_production_settings(),
+                "real_model_enabled": True,
+                "model_api_key": SecretStr(TRACEBACK_TYPED_MODEL_SECRET),
+                "checkpoint_database_url": (
+                    "postgresql+psycopg://bidscope:"
+                    f"{TRACEBACK_DSN_PASSWORD_ENCODED}@database.example.test:5432/bidscope"
+                ),
+                "external_scheme": "http",
+            }
+        )
+
+    assert_validation_error_has_no_traceback_secret_leaks(
+        error.value,
+        TRACEBACK_TYPED_MODEL_SECRET,
+        TRACEBACK_DSN_PASSWORD,
+        TRACEBACK_DSN_PASSWORD_ENCODED,
+    )
+
+
+def _set_traceback_secret_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in tuple(os.environ):
+        if key.startswith("BIDSCOPE_"):
+            monkeypatch.delenv(key, raising=False)
+    environment_values = {
+        "BIDSCOPE_APP_MODE": "production",
+        "BIDSCOPE_ADMIN_TOKEN": "a" * 32,
+        "BIDSCOPE_OBJECT_STORE_TYPE": "s3",
+        "BIDSCOPE_S3_ENDPOINT": "https://s3.example.test",
+        "BIDSCOPE_S3_BUCKET": "bidscope-prod",
+        "BIDSCOPE_S3_ACCESS_KEY": "traceback-environment-access-secret",
+        "BIDSCOPE_S3_SECRET_KEY": "traceback-environment-s3-secret",
+        "BIDSCOPE_ALLOWED_ORIGINS": '["https://bidscope.example.test"]',
+        "BIDSCOPE_TRUSTED_HOSTS": '["bidscope.example.test"]',
+        "BIDSCOPE_EXTERNAL_SCHEME": "http",
+        "BIDSCOPE_REAL_MODEL_ENABLED": "true",
+        "BIDSCOPE_MODEL_API_KEY": TRACEBACK_ENV_MODEL_SECRET,
+        "BIDSCOPE_DATABASE_URL": (
+            "postgresql+asyncpg://bidscope:"
+            f"{TRACEBACK_ENV_DSN_PASSWORD_ENCODED}@database.example.test:5432/bidscope"
+        ),
+    }
+    for key, value in environment_values.items():
+        monkeypatch.setenv(key, value)
+
+
+def test_environment_loaded_secrets_have_no_traceback_secret_locals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_traceback_secret_environment(monkeypatch)
+
+    with pytest.raises(ValidationError, match="external_scheme") as error:
+        Settings(_env_file=None)
+
+    assert_validation_error_has_no_traceback_secret_leaks(
+        error.value,
+        TRACEBACK_ENV_MODEL_SECRET,
+        TRACEBACK_ENV_DSN_PASSWORD,
+        TRACEBACK_ENV_DSN_PASSWORD_ENCODED,
+        "traceback-environment-access-secret",
+        "traceback-environment-s3-secret",
+    )
+
 
 
 @pytest.mark.parametrize(
