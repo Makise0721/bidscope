@@ -98,8 +98,14 @@ class Settings(BaseSettings):
             sanitized["ctx"] = cls._sanitize_error_context(item["ctx"], secret_values)
         return sanitized
 
+    @staticmethod
+    def _is_secret_like(value: Any) -> bool:
+        return isinstance(value, SecretStr) or getattr(value, "get_secret_value", None) is not None
+
     @classmethod
     def _sanitize_error_context(cls, value: Any, secret_values: set[str]) -> Any:
+        if cls._is_secret_like(value):
+            return "**********"
         if isinstance(value, Mapping):
             return {
                 key: cls._sanitize_error_context(item, secret_values)
@@ -146,20 +152,18 @@ class Settings(BaseSettings):
 
     @classmethod
     def _sanitize_error_value(cls, value: Any, secret_values: set[str]) -> Any:
-        if isinstance(value, SecretStr):
-            return value
+        if cls._is_secret_like(value):
+            return "**********"
         if isinstance(value, Mapping):
             return {
                 key: (
-                    value[key]
-                    if isinstance(value[key], SecretStr)
-                    else SecretStr(str(value[key]))
-                )
-                if key in cls._secret_field_names and value[key] is not None
-                else (
-                    cls._redact_dsn_password(value[key])
-                    if key in cls._dsn_field_names and isinstance(value[key], str)
-                    else cls._sanitize_error_value(value[key], secret_values)
+                    "**********"
+                    if key in cls._secret_field_names and value[key] is not None
+                    else (
+                        cls._redact_dsn_password(value[key])
+                        if key in cls._dsn_field_names and isinstance(value[key], str)
+                        else cls._sanitize_error_value(value[key], secret_values)
+                    )
                 )
                 for key in value
             }

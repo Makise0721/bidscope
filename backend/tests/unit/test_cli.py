@@ -6,6 +6,7 @@ import json
 import os
 import re
 import traceback
+from collections.abc import Mapping
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -134,11 +135,15 @@ def assert_validation_error_hides_production_secrets(
     with pytest.raises(ValidationError) as error:
         Settings(**settings)
 
+    raw_secrets = (*PRODUCTION_SECRET_VALUES.values(), *additional_secrets)
+    _assert_no_structured_secret_leaks(
+        error.value.errors(include_url=True, include_context=True), raw_secrets
+    )
     rendered_error = str(error.value)
     structured_error = str(error.value.errors())
     structured_json = error.value.json()
     errors_json = json.dumps(error.value.errors(), default=str)
-    for secret in (*PRODUCTION_SECRET_VALUES.values(), *additional_secrets):
+    for secret in raw_secrets:
         assert secret not in rendered_error
         assert secret not in structured_error
         assert secret not in structured_json
@@ -188,10 +193,47 @@ def _contains_raw_secret(
     return False
 
 
+def _assert_no_structured_secret_leaks(
+    value: object,
+    secrets: tuple[str, ...],
+    seen: set[int] | None = None,
+) -> None:
+    seen = set() if seen is None else seen
+    getter = getattr(value, "get_secret_value", None)
+    assert getter is None, f"recoverable secret object survived: {value!r}"
+    assert not isinstance(value, SecretStr)
+    if isinstance(value, str):
+        for secret in secrets:
+            assert secret not in value
+        return
+    if isinstance(value, BaseException):
+        _assert_no_structured_secret_leaks(value.args, secrets, seen)
+        return
+    if isinstance(value, Mapping):
+        value_id = id(value)
+        if value_id in seen:
+            return
+        seen.add(value_id)
+        for key, item in value.items():
+            _assert_no_structured_secret_leaks(key, secrets, seen)
+            _assert_no_structured_secret_leaks(item, secrets, seen)
+        return
+    if isinstance(value, (list, tuple, set, frozenset)):
+        value_id = id(value)
+        if value_id in seen:
+            return
+        seen.add(value_id)
+        for item in value:
+            _assert_no_structured_secret_leaks(item, secrets, seen)
+
+
 def assert_validation_error_has_no_traceback_secret_leaks(
     error: ValidationError, *secrets: str
 ) -> None:
     raw_secrets = tuple(secrets)
+    _assert_no_structured_secret_leaks(
+        error.errors(include_url=True, include_context=True), raw_secrets
+    )
     rendered = (
         str(error),
         str(error.errors()),
@@ -656,6 +698,36 @@ def test_production_validation_errors_hide_arbitrary_secrets() -> None:
     settings["external_scheme"] = "http"
 
     assert_validation_error_hides_production_secrets(settings)
+
+
+def test_sanitized_errors_replace_nested_secret_objects_with_plain_masks() -> None:
+    settings = valid_production_settings()
+    typed_secrets = {
+        field_name: SecretStr(f"structured-{field_name}-secret")
+        for field_name in PRODUCTION_SECRET_VALUES
+    }
+    settings.update(typed_secrets, real_model_enabled=True, external_scheme="http")
+
+    with pytest.raises(ValidationError) as error:
+        Settings(**settings)
+
+    structured_errors = error.value.errors(include_url=True, include_context=True)
+    structured_secrets = tuple(
+        secret.get_secret_value() for secret in typed_secrets.values()
+    )
+    _assert_no_structured_secret_leaks(structured_errors, structured_secrets)
+
+    sanitized_input = structured_errors[0]["input"]
+    assert isinstance(sanitized_input, dict)
+    assert sanitized_input["admin_token"] == "**********"
+    assert sanitized_input["model_api_key"] == "**********"
+    assert sanitized_input["s3_access_key"] == "**********"
+    assert sanitized_input["s3_secret_key"] == "**********"
+    assert sanitized_input["app_mode"] == "production"
+    assert structured_errors[0]["type"] == "value_error"
+    assert structured_errors[0]["loc"] == ()
+    assert structured_errors[0]["msg"].startswith("Value error,")
+    assert structured_errors[0]["url"].endswith("/value_error")
 
 
 @pytest.mark.parametrize(
