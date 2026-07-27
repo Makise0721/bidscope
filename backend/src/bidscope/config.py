@@ -97,6 +97,7 @@ class Settings(BaseSettings):
             name
             for name, value in (
                 ("s3_endpoint", self.s3_endpoint),
+                ("s3_region", self.s3_region),
                 ("s3_bucket", self.s3_bucket),
                 ("s3_access_key", self.s3_access_key),
                 ("s3_secret_key", self.s3_secret_key),

@@ -217,12 +217,27 @@ def test_production_settings_require_s3_object_store() -> None:
 
 
 def test_s3_storage_rejects_whitespace_only_required_fields() -> None:
-    for field in ("s3_endpoint", "s3_bucket", "s3_access_key", "s3_secret_key"):
+    for field in (
+        "s3_endpoint",
+        "s3_region",
+        "s3_bucket",
+        "s3_access_key",
+        "s3_secret_key",
+    ):
         settings = valid_production_settings()
         settings[field] = "   "
 
         with pytest.raises(ValidationError, match=field):
             Settings(**settings)
+
+
+def test_s3_storage_accepts_default_and_explicit_region() -> None:
+    default_settings = Settings(**valid_production_settings())
+    explicit_settings = valid_production_settings()
+    explicit_settings["s3_region"] = "eu-west-2"
+
+    assert default_settings.s3_region == "us-east-1"
+    assert Settings(**explicit_settings).s3_region == "eu-west-2"
 
 
 def test_production_settings_require_nonempty_allowed_origins() -> None:
