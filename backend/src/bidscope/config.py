@@ -12,6 +12,7 @@ class Settings(BaseSettings):
         env_prefix="BIDSCOPE_",
         env_file=".env",
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     app_mode: Literal["demo", "development", "production", "test"] = "demo"
@@ -100,7 +101,7 @@ class Settings(BaseSettings):
                 ("s3_access_key", self.s3_access_key),
                 ("s3_secret_key", self.s3_secret_key),
             )
-            if not value
+            if not value or not value.strip()
         ]
         if missing:
             raise ValueError(

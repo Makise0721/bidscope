@@ -10,6 +10,13 @@ from bidscope import cli
 from bidscope.config import Settings
 from pydantic import ValidationError
 
+PRODUCTION_SECRET_VALUES = {
+    "admin_token": "arbitrary-admin-secret-7f2a",
+    "s3_access_key": "arbitrary-access-secret-8b3c",
+    "s3_secret_key": "arbitrary-s3-secret-9d4e",
+    "model_api_key": "arbitrary-model-secret-1e5f",
+}
+
 
 def valid_production_settings() -> dict[str, object]:
     return {
@@ -92,19 +99,92 @@ def test_settings_default_to_safe_nonproduction_configuration() -> None:
     assert settings.s3_region == "us-east-1"
 
 
+def test_test_mode_keeps_safe_local_defaults() -> None:
+    settings = Settings(app_mode="test")
+
+    assert settings.admin_token is None
+    assert settings.object_store_type == "local"
+    assert settings.external_scheme == "http"
+    assert settings.allowed_origins == []
+    assert settings.trusted_hosts == []
+
+
 def test_admin_token_min_length_must_be_positive() -> None:
     with pytest.raises(ValidationError, match="admin_token_min_length"):
         Settings(admin_token_min_length=0)
 
 
-def test_production_settings_reject_placeholder_admin_token() -> None:
+def assert_validation_error_hides_production_secrets(
+    settings: dict[str, object], *additional_secrets: str
+) -> None:
+    with pytest.raises(ValidationError) as error:
+        Settings(**settings)
+
+    rendered_error = str(error.value)
+    for secret in (*PRODUCTION_SECRET_VALUES.values(), *additional_secrets):
+        assert secret not in rendered_error
+
+
+def test_production_settings_missing_admin_token_hides_other_secrets() -> None:
     settings = valid_production_settings()
+    settings.pop("admin_token")
+    settings.update(
+        {
+            key: value
+            for key, value in PRODUCTION_SECRET_VALUES.items()
+            if key != "admin_token"
+        }
+    )
+
+    assert_validation_error_hides_production_secrets(settings)
+
+
+def test_production_settings_reject_placeholder_admin_token_without_leaking_it() -> None:
+    settings = valid_production_settings()
+    settings.update(PRODUCTION_SECRET_VALUES)
     settings["admin_token"] = "change-me"
 
     with pytest.raises(ValidationError, match="placeholder") as error:
         Settings(**settings)
 
     assert "change-me" not in str(error.value)
+    for secret in PRODUCTION_SECRET_VALUES.values():
+        assert secret not in str(error.value)
+
+
+def test_production_settings_reject_too_short_admin_token_without_leaking_secrets() -> None:
+    settings = valid_production_settings()
+    settings.update(PRODUCTION_SECRET_VALUES)
+    settings["admin_token"] = "s" * 31
+
+    with pytest.raises(ValidationError, match="admin_token_min_length"):
+        Settings(**settings)
+
+    assert_validation_error_hides_production_secrets(settings, settings["admin_token"])
+
+
+def test_production_validation_errors_hide_arbitrary_secrets() -> None:
+    settings = valid_production_settings()
+    settings.update(PRODUCTION_SECRET_VALUES)
+    settings["external_scheme"] = "http"
+
+    assert_validation_error_hides_production_secrets(settings)
+
+
+def test_field_validation_errors_hide_arbitrary_secrets() -> None:
+    settings = valid_production_settings()
+    settings.update(PRODUCTION_SECRET_VALUES)
+    settings["external_scheme"] = PRODUCTION_SECRET_VALUES["admin_token"]
+
+    assert_validation_error_hides_production_secrets(settings)
+
+
+def test_production_template_keeps_database_credentials_blank() -> None:
+    template = Path(__file__).parents[3].joinpath(".env.production.example").read_text()
+
+    assert "BIDSCOPE_DATABASE_URL=\n" in template
+    assert "BIDSCOPE_CHECKPOINT_DATABASE_URL=\n" in template
+    assert "<database-password>" not in template
 
 
 def test_production_settings_reject_too_short_admin_token() -> None:
@@ -123,6 +203,15 @@ def test_production_settings_require_s3_object_store() -> None:
 
     with pytest.raises(ValidationError, match="object_store_type"):
         Settings(**settings)
+
+
+def test_s3_storage_rejects_whitespace_only_required_fields() -> None:
+    for field in ("s3_endpoint", "s3_bucket", "s3_access_key", "s3_secret_key"):
+        settings = valid_production_settings()
+        settings[field] = "   "
+
+        with pytest.raises(ValidationError, match=field):
+            Settings(**settings)
 
 
 def test_production_settings_require_nonempty_allowed_origins() -> None:
