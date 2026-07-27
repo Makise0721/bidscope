@@ -25,6 +25,7 @@ _POSTGRES_DEFAULT_PORT = 5432
 _ALLOWED_POSTGRES_SCHEMES = frozenset(
     {"postgresql", "postgresql+asyncpg", "postgresql+psycopg"}
 )
+_ALLOWED_TEST_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _SAFE_DATABASE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _SAFE_HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _SAFE_IPV6_HOST = re.compile(r"[0-9A-Fa-f:.%]+\Z")
@@ -77,22 +78,56 @@ def _sanitize_dsn(url: str) -> str:
 
 
 def _connection_parts(url: str) -> tuple[str, int, str] | None:
-    """Return (host, port, database) for a ``postgresql`` URL.
+    """Return validated (host, port, database) for a local PostgreSQL URL."""
+    raw_scheme, separator, _ = url.partition("://")
+    if not separator or raw_scheme not in _ALLOWED_POSTGRES_SCHEMES:
+        return None
 
-    Alembic's sync driver (``postgresql+psycopg``) and the async test driver
-    (``postgresql+asyncpg``) may use different driver prefixes yet point at the
-    same physical database. We therefore compare host/port/database after
-    stripping the driver, defaulting to the PostgreSQL standard port when none
-    is specified.
-    """
     try:
         parsed = urlparse(url)
-        host = parsed.hostname or "localhost"
-        port = parsed.port or _POSTGRES_DEFAULT_PORT
-        database = _database_name(url)
+        if parsed.scheme != raw_scheme or not parsed.netloc:
+            return None
+        host = parsed.hostname
+        if host is None or host.casefold() not in _ALLOWED_TEST_HOSTS:
+            return None
+
+        authority = parsed.netloc.rsplit("@", 1)[-1]
+        if authority.startswith("["):
+            closing_bracket = authority.find("]")
+            if closing_bracket < 0:
+                return None
+            port_text = authority[closing_bracket + 1 :]
+            if port_text and (not port_text.startswith(":") or not port_text[1:]):
+                return None
+        elif ":" in authority:
+            port_text = authority.rsplit(":", 1)[1]
+            if not port_text.isdigit():
+                return None
+        else:
+            port_text = ""
+
+        port = parsed.port
+        if port is None:
+            if port_text:
+                return None
+            port = _POSTGRES_DEFAULT_PORT
+        if not 1 <= port <= 65535:
+            return None
+
+        if not parsed.path.startswith("/") or parsed.path.count("/") != 1:
+            return None
+        database = parsed.path[1:]
+        if (
+            not database
+            or not _SAFE_DATABASE_NAME.fullmatch(database)
+            or parsed.params
+            or parsed.fragment
+        ):
+            return None
     except ValueError:
         return None
-    return (host, port, database)
+
+    return (host.casefold(), port, database)
 
 
 def enforce_test_environment() -> None:
@@ -115,10 +150,10 @@ def enforce_test_environment() -> None:
         del database_url
         del checkpoint_url
         del settings
+        del database_name
         pytest.fail(
-            "Integration tests require a database whose name ends with '_test' or '_e2e' "
-            f"(current BIDSCOPE_DATABASE_URL database name={database_name!r}). "
-            "Refusing to run against a non-test database."
+            "database URL must target a dedicated test database (name must end with "
+            "'_test' or '_e2e')"
         )
 
     checkpoint_name = _database_name(checkpoint_url)
@@ -126,11 +161,11 @@ def enforce_test_environment() -> None:
         del database_url
         del checkpoint_url
         del settings
+        del database_name
+        del checkpoint_name
         pytest.fail(
-            "Integration tests require the Alembic checkpoint database name to end with "
-            "'_test' or '_e2e' "
-            f"(current BIDSCOPE_CHECKPOINT_DATABASE_URL database name={checkpoint_name!r}). "
-            "Refusing to run migrations against a non-test database."
+            "checkpoint URL must target a dedicated test database (name must end with "
+            "'_test' or '_e2e')"
         )
 
     database_parts = _connection_parts(database_url)
