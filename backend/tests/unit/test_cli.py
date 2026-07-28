@@ -14,6 +14,7 @@ import pytest
 from bidscope import cli
 from bidscope.config import Settings
 from pydantic import SecretStr, ValidationError
+from typer.testing import CliRunner
 
 PRODUCTION_SECRET_VALUES = {
     "admin_token": "arbitrary-admin-secret-7f2a-123456",
@@ -1136,6 +1137,85 @@ def test_environment_loaded_real_model_requires_model_api_key(
         Settings(_env_file=None)
 
     assert "BIDSCOPE_REAL_MODEL_ENABLED" not in str(error.value)
+
+
+def test_backup_command_help_exposes_task_5_commands() -> None:
+    result = CliRunner().invoke(cli.app, ["ops", "backup", "--help"])
+
+    assert result.exit_code == 0
+    for command in ("create", "verify", "list", "prune", "restore"):
+        assert command in result.stdout
+
+
+def test_backup_restore_requires_confirm_without_calling_service(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    restore = Mock()
+    monkeypatch.setattr(cli, "_build_backup_service", Mock())
+    monkeypatch.setattr(cli.BackupService, "restore", restore)
+    (tmp_path / "backup").mkdir()
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "ops",
+            "backup",
+            "restore",
+            str(tmp_path / "backup"),
+            "--target-database-url",
+            "postgresql://user:password@localhost/app",
+            "--target-checkpoint-database-url",
+            "postgresql://user:password@localhost/app",
+            "--target-object-root",
+            str(tmp_path / "objects"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "confirm" in result.output.lower()
+    restore.assert_not_called()
+
+
+def test_backup_restore_cli_passes_explicit_targets_and_redacts_urls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    restore = Mock(return_value={"status": "restored", "backup_id": "b-1"})
+    service = Mock()
+    service.restore = restore
+    monkeypatch.setattr(cli, "_build_backup_service", Mock(return_value=service))
+    (tmp_path / "backup").mkdir()
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "ops",
+            "backup",
+            "restore",
+            str(tmp_path / "backup"),
+            "--target-database-url",
+            "postgresql://user:restore-secret@localhost/app",
+            "--target-checkpoint-database-url",
+            "postgresql://user:checkpoint-secret@localhost/app",
+            "--target-object-root",
+            str(tmp_path / "objects"),
+            "--confirm",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert '"status": "restored"' in result.stdout
+    assert "restore-secret" not in result.output
+    assert "checkpoint-secret" not in result.output
+    restore.assert_called_once_with(
+        backup_dir=tmp_path / "backup",
+        target_database_url="postgresql://user:restore-secret@localhost/app",
+        target_checkpoint_database_url="postgresql://user:checkpoint-secret@localhost/app",
+        target_object_root=tmp_path / "objects",
+        confirmed=True,
+    )
 
 
 def test_s3_storage_accepts_default_and_explicit_region() -> None:

@@ -26,6 +26,7 @@ from pydantic import ValidationError
 from pydantic_settings import SettingsError
 
 from bidscope.api.dependencies import create_object_store
+from bidscope.backup import BackupError, BackupService
 from bidscope.clock import SystemClock
 from bidscope.config import get_settings
 from bidscope.db import create_engine_and_session
@@ -70,6 +71,11 @@ api_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(api_app, name="api")
+
+ops_app = typer.Typer(help="Production operations.", no_args_is_help=True)
+backup_app = typer.Typer(help="Backup and restore operations.", no_args_is_help=True)
+app.add_typer(ops_app, name="ops")
+ops_app.add_typer(backup_app, name="backup")
 
 
 def configure_windows_selector_event_loop_policy() -> None:
@@ -190,6 +196,120 @@ def snapshots_import(
         typer.echo(_json_payload(result))
     else:
         typer.echo(f"imported ({record.status}): {record.snapshot_bundle_id}")
+
+
+def _build_backup_service() -> BackupService:
+    _require_startup_settings()
+    settings = get_settings()
+    return BackupService(backup_root=getattr(settings, "backup_root", "data/backups"))
+
+
+def _backup_error(error: BackupError, json_output: bool) -> None:
+    payload = {"status": "error", "code": error.code, "message": error.message}
+    if json_output:
+        typer.echo(_json_payload(payload))
+    else:
+        typer.echo(f"{error.code}: {error.message}", err=True)
+    raise typer.Exit(code=1)
+
+
+@backup_app.command("create")
+def backup_create(
+    retention_class: Annotated[
+        str, typer.Option("--retention-class", help="daily or weekly backup retention class.")
+    ] = "daily",
+    json_output: Annotated[bool, typer.Option("--json", help="Print JSON output.")] = False,
+) -> None:
+    """Create and verify a local backup."""
+    try:
+        result = _build_backup_service().create(retention_class=retention_class)
+    except BackupError as error:
+        _backup_error(error, json_output)
+    if json_output:
+        typer.echo(_json_payload(result))
+    else:
+        typer.echo(f"backup {result.get('status', 'created')}: {result.get('backup_id', '')}")
+
+
+@backup_app.command("verify")
+def backup_verify(
+    backup_dir: Annotated[Path, typer.Argument(exists=True, file_okay=False, resolve_path=True)],
+    json_output: Annotated[bool, typer.Option("--json", help="Print JSON output.")] = False,
+) -> None:
+    """Verify a backup manifest and all archived hashes."""
+    try:
+        result = _build_backup_service().verify(backup_dir)
+    except BackupError as error:
+        _backup_error(error, json_output)
+    if json_output:
+        typer.echo(_json_payload(result))
+    else:
+        typer.echo(f"backup verified: {result.get('backup_id', '')}")
+
+
+@backup_app.command("list")
+def backup_list(
+    json_output: Annotated[bool, typer.Option("--json", help="Print JSON output.")] = False,
+) -> None:
+    """List verified and invalid local backups."""
+    try:
+        result = _build_backup_service().list()
+    except BackupError as error:
+        _backup_error(error, json_output)
+    if json_output:
+        typer.echo(_json_payload({"backups": result}))
+    else:
+        for item in result:
+            typer.echo(f"{item['status']}: {item['backup_id']}")
+
+
+@backup_app.command("prune")
+def backup_prune(
+    json_output: Annotated[bool, typer.Option("--json", help="Print JSON output.")] = False,
+) -> None:
+    """Prune backups according to configured retention policy."""
+    try:
+        result = _build_backup_service().prune()
+    except BackupError as error:
+        _backup_error(error, json_output)
+    if json_output:
+        typer.echo(_json_payload(result))
+    else:
+        typer.echo(f"backups pruned: {result.get('deleted_count', 0)}")
+
+
+@backup_app.command("restore")
+def backup_restore(
+    backup_dir: Annotated[Path, typer.Argument(exists=True, file_okay=False, resolve_path=True)],
+    target_database_url: Annotated[str, typer.Option("--target-database-url")],
+    target_checkpoint_database_url: Annotated[
+        str, typer.Option("--target-checkpoint-database-url")
+    ],
+    target_object_root: Annotated[Path, typer.Option("--target-object-root")],
+    confirm: Annotated[
+        bool, typer.Option("--confirm", help="Confirm restore into empty targets.")
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Print JSON output.")] = False,
+) -> None:
+    """Restore only into explicitly confirmed empty database/object targets."""
+    if not confirm:
+        _backup_error(
+            BackupError("restore_confirmation_required", "restore requires --confirm"), json_output
+        )
+    try:
+        result = _build_backup_service().restore(
+            backup_dir=backup_dir,
+            target_database_url=target_database_url,
+            target_checkpoint_database_url=target_checkpoint_database_url,
+            target_object_root=target_object_root,
+            confirmed=True,
+        )
+    except BackupError as error:
+        _backup_error(error, json_output)
+    if json_output:
+        typer.echo(_json_payload(result))
+    else:
+        typer.echo(f"backup restored: {result.get('backup_id', '')}")
 
 
 # --- checkpoints setup -------------------------------------------------------
