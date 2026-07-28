@@ -18,6 +18,8 @@ class Settings(BaseSettings):
             "model_api_key",
             "s3_access_key",
             "s3_secret_key",
+            "backup_s3_access_key",
+            "backup_s3_secret_key",
         }
     )
     _dsn_field_names: ClassVar[frozenset[str]] = frozenset(
@@ -255,6 +257,17 @@ class Settings(BaseSettings):
     #: Optional logical key prefix applied to every stored object (e.g.
     #: ``imports/2026``). Defaults to no prefix.
     s3_prefix: str = ""
+    #: Root directory for versioned local PostgreSQL/object-store backups.
+    backup_root: str = "data/backups"
+    backup_daily_retention: int = Field(default=7, gt=0)
+    backup_weekly_retention: int = Field(default=4, gt=0)
+    backup_s3_enabled: bool = False
+    backup_s3_endpoint: str | None = None
+    backup_s3_bucket: str | None = None
+    backup_s3_access_key: SecretStr | None = None
+    backup_s3_secret_key: SecretStr | None = None
+    backup_s3_prefix: str = "bidscope-backups"
+    backup_tool_timeout_seconds: int = Field(default=900, gt=0)
     db_pool_size: int = Field(default=10, gt=0)
     db_max_overflow: int = Field(default=20, gt=0)
     db_pool_recycle_seconds: int = Field(default=1800, gt=0)
@@ -324,6 +337,27 @@ class Settings(BaseSettings):
         if model_api_key is None or not model_api_key.strip():
             raise ValueError("model_api_key must be non-empty when real_model_enabled is true")
         return self
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_backup_s3_requirements(cls, data: Any) -> Any:
+        if not isinstance(data, Mapping) or not data.get("backup_s3_enabled", False):
+            return data
+        missing = [
+            name
+            for name, value in (
+                ("backup_s3_endpoint", data.get("backup_s3_endpoint")),
+                ("backup_s3_bucket", data.get("backup_s3_bucket")),
+                ("backup_s3_access_key", data.get("backup_s3_access_key")),
+                ("backup_s3_secret_key", data.get("backup_s3_secret_key")),
+            )
+            if cls._is_blank(value)
+        ]
+        if missing:
+            raise ValueError(
+                "backup_s3_enabled requires non-empty values for: " + ", ".join(missing)
+            )
+        return data
 
     @model_validator(mode="before")
     @classmethod

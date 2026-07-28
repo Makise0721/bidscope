@@ -115,6 +115,45 @@ def test_production_settings_require_an_admin_token() -> None:
         Settings(**settings)
 
 
+def test_backup_defaults_are_safe() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.backup_root
+    assert settings.backup_daily_retention == 7
+    assert settings.backup_weekly_retention == 4
+    assert settings.backup_s3_enabled is False
+    assert settings.backup_s3_prefix == "bidscope-backups"
+    assert settings.backup_tool_timeout_seconds == 900
+
+
+def test_backup_retention_and_tool_timeout_must_be_positive() -> None:
+    for field_name in (
+        "backup_daily_retention",
+        "backup_weekly_retention",
+        "backup_tool_timeout_seconds",
+    ):
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, **{field_name: 0})
+
+
+def test_backup_external_s3_requires_all_explicit_fields() -> None:
+    with pytest.raises(ValidationError, match="backup_s3_endpoint"):
+        Settings(_env_file=None, backup_s3_enabled=True)
+
+
+def test_backup_external_s3_accepts_complete_explicit_configuration() -> None:
+    settings = Settings(
+        _env_file=None,
+        backup_s3_enabled=True,
+        backup_s3_endpoint="https://backup-s3.example.test",
+        backup_s3_bucket="bidscope-backups",
+        backup_s3_access_key="backup-access",
+        backup_s3_secret_key="backup-secret",
+    )
+
+    assert settings.backup_s3_enabled is True
+
+
 def test_settings_default_to_safe_nonproduction_configuration() -> None:
     settings = Settings()
 

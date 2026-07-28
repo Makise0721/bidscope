@@ -152,3 +152,22 @@ def test_storage_factory_uses_local_root_in_demo(tmp_path: Path) -> None:
     assert isinstance(
         create_object_store(Settings(object_store_root=str(tmp_path))), LocalObjectStore
     )
+
+
+def test_local_object_store_lists_and_deletes_keys(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    store.put_bytes("reports/a.docx", b"a")
+    store.put_bytes("imports/b.html", b"b")
+
+    assert store.list_keys() == ["imports/b.html", "reports/a.docx"]
+    store.delete("imports/b.html")
+    assert store.list_keys() == ["reports/a.docx"]
+
+
+def test_local_object_store_rejects_unsafe_list_and_delete_keys(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+
+    with pytest.raises(ValueError):
+        store.delete("../outside")
+    with pytest.raises(ValueError):
+        store.delete("/absolute")

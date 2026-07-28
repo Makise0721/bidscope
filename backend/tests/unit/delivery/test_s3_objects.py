@@ -82,12 +82,59 @@ class _FakeS3Client:
         self.known_buckets.add(kwargs["Bucket"])
         return {}
 
+    def list_objects_v2(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append({"method": "list_objects_v2", "kwargs": kwargs})
+        prefix = kwargs.get("Prefix", "")
+        keys = sorted(key for key in self._keys(kwargs["Bucket"]) if key.startswith(prefix))
+        token = kwargs.get("ContinuationToken")
+        if token is None:
+            selected, truncated = keys[:1], len(keys) > 1
+            response: dict[str, Any] = {
+                "Contents": [{"Key": key} for key in selected],
+                "IsTruncated": truncated,
+            }
+            if truncated:
+                response["NextContinuationToken"] = "page-2"
+            return response
+        return {
+            "Contents": [{"Key": key} for key in keys[1:]],
+            "IsTruncated": False,
+        }
+
+    def delete_object(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append({"method": "delete_object", "kwargs": kwargs})
+        self._keys(kwargs["Bucket"]).pop(kwargs["Key"], None)
+        return {}
+
 
 def _make_store(client: _FakeS3Client, prefix: str = "") -> S3ObjectStore:
     return S3ObjectStore(bucket="tender-docs", prefix=prefix, client=client)
 
 
-def test_put_get_round_trip() -> None:
+def test_list_and_delete_keys_handle_pagination_and_prefix() -> None:
+    client = _FakeS3Client()
+    store = _make_store(client, prefix="backups")
+    store.put_bytes("b.bin", b"b")
+    store.put_bytes("a.bin", b"a")
+    store.put_bytes("nested/c.bin", b"c")
+
+    assert store.list_keys() == ["a.bin", "b.bin", "nested/c.bin"]
+    store.delete("b.bin")
+    assert store.list_keys() == ["a.bin", "nested/c.bin"]
+    calls = [call for call in client.calls if call["method"] == "list_objects_v2"]
+    assert calls[0]["kwargs"]["Prefix"] == "backups/"
+    assert calls[1]["kwargs"]["ContinuationToken"] == "page-2"
+
+
+def test_list_and_delete_reject_path_traversal() -> None:
+    store = _make_store(_FakeS3Client())
+
+    with pytest.raises(ValueError):
+        store.list_keys("../")
+    with pytest.raises(ValueError):
+        store.delete("/absolute")
+
+
     client = _FakeS3Client()
     store = _make_store(client)
     url = store.put_bytes("ccgp/notice-1.html", b"<html>data</html>")

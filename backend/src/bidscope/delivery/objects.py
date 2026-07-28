@@ -9,6 +9,8 @@ class ObjectStore(Protocol):
     def put_bytes(self, key: str, data: bytes) -> str: ...
     def get_bytes(self, key: str) -> bytes: ...
     def exists(self, key: str) -> bool: ...
+    def list_keys(self, prefix: str = "") -> list[str]: ...
+    def delete(self, key: str) -> None: ...
 
 
 class LocalObjectStore:
@@ -61,6 +63,23 @@ class LocalObjectStore:
             return self._resolve(key).exists()
         except ValueError:
             return False
+
+    def list_keys(self, prefix: str = "") -> list[str]:
+        self._resolve(prefix or ".")
+        base = self.root.resolve()
+        keys = [
+            path.relative_to(base).as_posix()
+            for path in self.root.rglob("*")
+            if path.is_file() and path.relative_to(base).as_posix().startswith(prefix)
+        ]
+        return sorted(keys)
+
+    def delete(self, key: str) -> None:
+        target = self._resolve(key)
+        if target.exists():
+            if not target.is_file():
+                raise ValueError(f"object key is not a file: {key!r}")
+            target.unlink()
 
 
 class S3ObjectStore:
@@ -145,6 +164,43 @@ class S3ObjectStore:
         if ".." in key or key.startswith("/"):
             raise ValueError(f"object key escapes prefix: {key!r}")
         return f"{self.prefix}/{key}" if self.prefix else key
+
+    def _full_prefix(self, prefix: str) -> str:
+        if ".." in prefix or prefix.startswith("/"):
+            raise ValueError(f"object prefix escapes prefix: {prefix!r}")
+        logical_prefix = prefix.strip("/")
+        if not logical_prefix:
+            return f"{self.prefix}/" if self.prefix else ""
+        base = f"{self.prefix}/" if self.prefix else ""
+        return f"{base}{logical_prefix}"
+
+    def list_keys(self, prefix: str = "") -> list[str]:
+        full_prefix = self._full_prefix(prefix)
+        logical_base = f"{self.prefix}/" if self.prefix else ""
+        keys: list[str] = []
+        continuation_token: str | None = None
+        while True:
+            params: dict[str, str] = {
+                "Bucket": self.bucket,
+                "Prefix": full_prefix,
+            }
+            if continuation_token is not None:
+                params["ContinuationToken"] = continuation_token
+            response = self.client.list_objects_v2(**params)
+            for item in response.get("Contents", ()):
+                full_key = item.get("Key")
+                if not isinstance(full_key, str) or not full_key.startswith(logical_base):
+                    continue
+                keys.append(full_key[len(logical_base) :])
+            if not response.get("IsTruncated"):
+                break
+            continuation_token = response.get("NextContinuationToken")
+            if not isinstance(continuation_token, str) or not continuation_token:
+                break
+        return sorted(keys)
+
+    def delete(self, key: str) -> None:
+        self.client.delete_object(Bucket=self.bucket, Key=self._full_key(key))
 
     def put_bytes(self, key: str, data: bytes) -> str:
         full_key = self._full_key(key)
