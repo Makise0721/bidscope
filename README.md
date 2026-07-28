@@ -4,7 +4,7 @@
 
 BidScope parses public tender notices from Chinese government procurement sources, deduplicates them, verifies evidence, and generates cited reports. It is designed so that every factual claim in every report resolves to an immutable evidence span and source version.
 
-**Status:** P1-A security and configuration baseline complete. P1-B observability/runtime stability and P1-C backup/recovery/release operations are not implemented yet. BidScope remains snapshot-only with deterministic offline evaluation.
+**Status:** P1 security, observability, readiness, bounded runtime, and backup/restore foundations are implemented. A full production recovery drill and external backup replication gate remain operational follow-up work. BidScope remains snapshot-only with deterministic offline evaluation.
 
 ---
 
@@ -49,7 +49,7 @@ To rotate the credential, generate a new random token, update `BIDSCOPE_ADMIN_TO
 
 The application writes bounded audit events for critical run, subscription, snapshot-import, report, and DOCX operations. Critical mutation audit rows use the same database transaction as the business change; observation audit failures do not block ordinary reads. Audit details contain IDs, status, and bounded metadata only. Admin Tokens, Authorization headers, model keys, Cookies/session data, raw request headers, request bodies, and full report bodies are excluded.
 
-`/readyz`, `/metrics`, structured request logging, backup/restore commands, recovery drills, and release rollback gates are P1-B/P1-C work and are intentionally not claimed by this baseline.
+`/readyz` checks configuration, PostgreSQL, checkpoint, and object storage dependencies within bounded time and returns `200` only when all checks pass. `/healthz` remains a public process liveness probe. `GET /metrics` is Admin Token protected and returns bounded Prometheus text; request IDs are accepted from `X-Request-ID` or generated and echoed in responses. Capacity exhaustion returns `429` with `Retry-After: 5`; scheduler tick timeout and SSE lifecycle are logged/metricized without user text labels. Backup creation, verification, pruning, and non-destructive restore are explicit CLI operations; a complete clean-host recovery drill remains a release gate.
 
 ---
 
@@ -280,7 +280,7 @@ docker compose up -d api
 # Optional: docker compose up -d scheduler
 ```
 
-The API is available at `http://localhost:8000`. Healthcheck at `GET /healthz`.
+The API is available at `http://localhost:8000`. Process liveness is `GET /healthz`; dependency readiness is `GET /readyz`.
 
 ---
 

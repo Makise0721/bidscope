@@ -1014,3 +1014,9 @@ class _NoObjectStore:
 
     def exists(self, key: str) -> bool:
         return False
+
+    def list_keys(self, prefix: str = "") -> list[str]:
+        raise RuntimeError("subscription report gate must not list objects")
+
+    def delete(self, key: str) -> None:
+        raise RuntimeError("subscription report gate must not delete objects")

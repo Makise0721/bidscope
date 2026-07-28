@@ -74,9 +74,7 @@ docker compose logs --tail=200 api
 docker compose logs --tail=200 scheduler
 ```
 
-`/healthz` is an API process healthcheck, not a full dependency readiness
-check. The scheduler is not an HTTP server; diagnose it from process state,
-logs, and its database lock/tick evidence.
+`/healthz` is the public API process liveness check. `/readyz` is the dependency readiness gate used by the container healthcheck and checks configuration, PostgreSQL, checkpoint, and object storage without exposing connection details. The scheduler is not an HTTP server; diagnose it from process state, bounded logs/metrics, and database lock/tick evidence.
 
 ## 4. Migrations
 
@@ -108,7 +106,7 @@ Use this order for an upgrade:
 3. Pull/build the immutable target image.
 4. Run `alembic upgrade head` as an explicit step.
 5. Start the target `api` and the single `scheduler` role.
-6. Check `/healthz`, logs, and one representative application operation.
+6. Check `/readyz`, logs, and one representative application operation.
 
 Example:
 
@@ -227,7 +225,7 @@ Before publishing:
 - A fresh backup was created and `backup verify` succeeded.
 - The target image and migrations were checked for forward compatibility.
 - `alembic upgrade head` completed before application traffic was enabled.
-- API health, scheduler process/tick evidence, and a smoke operation passed.
+- API readiness, scheduler process/tick evidence, and a smoke operation passed.
 - Rollback means application image rollback only when schema compatibility is
   confirmed; migration downgrade is a deliberate recovery operation and is not
   automated.

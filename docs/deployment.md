@@ -67,7 +67,7 @@ For rotation, generate a new random token, update the deployment secret, restart
 
 Critical run creation/confirmation/retry, subscription creation/pause/resume, snapshot import, and report/DOCX operations create bounded audit metadata. Critical mutation audit rows are flushed in the same database transaction as the business operation; a failure prevents the mutation from committing. Read/download observations may be recorded separately and do not block the successful response if audit persistence fails. Audit records contain normalized paths, request and business IDs, outcome, error code, status, and bounded allowlisted details. They never contain Admin Tokens, `Authorization` headers, model API keys, cookies/session values, raw request headers, request bodies, or report bodies.
 
-P1-A does not claim `/readyz`, `/metrics`, structured request/run logging, backup/restore commands, recovery drills, or release rollback automation. Those are P1-B/P1-C deliverables and must not be used as production readiness evidence for this baseline.
+P1-B adds `/readyz` as the dependency readiness probe and `/metrics` as a bounded, Admin Token-protected Prometheus endpoint. The container healthcheck uses `/readyz`; `/healthz` remains process liveness only. Runtime logs include a bounded request ID, normalized path, status, duration, and exception type. Capacity exhaustion returns HTTP 429 with `Retry-After: 5`; scheduler ticks and SSE lifecycle are diagnosed through bounded logs/metrics.
 
 ## Production Compose Workflow
 
@@ -95,7 +95,7 @@ docker compose up -d api scheduler
 docker compose ps
 ```
 
-`api` keeps its `/healthz` HTTP healthcheck. The scheduler is not an HTTP server, so Compose explicitly disables its inherited image healthcheck; inspect its process state and logs instead.
+`api` uses `/readyz` for its HTTP healthcheck. The scheduler is not an HTTP server, so Compose explicitly disables its inherited image healthcheck; inspect its process state and bounded tick logs instead.
 
 ## Required Production Variables
 
@@ -135,7 +135,7 @@ docker compose stop api scheduler
 docker compose up -d api scheduler
 ```
 
-`/healthz` proves that the API process can answer HTTP. It is intentionally not a database or object-store readiness check. Scheduler liveness is determined by its running process and scheduler logs, not by an HTTP endpoint.
+`/healthz` proves that the API process can answer HTTP. `/readyz` is the dependency gate used by the container healthcheck; it checks configuration, PostgreSQL, checkpoint, and object storage without returning connection details. Scheduler liveness is determined by its running process and tick logs/metrics, not by an HTTP endpoint.
 
 ## Snapshot and Test Operations
 
