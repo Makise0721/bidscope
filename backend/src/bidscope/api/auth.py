@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from secrets import compare_digest
 from typing import Any
 
 from fastapi import HTTPException, Request
+
+MAX_ADMIN_TOKEN_HEADER_LENGTH = 4096
 
 
 async def require_admin_token(request: Request) -> None:
@@ -20,5 +23,7 @@ async def require_admin_token(request: Request) -> None:
         else None
     )
     provided = request.headers.get("X-Admin-Token")
-    if not expected or provided != expected:
+    if not expected or not provided or len(provided) > MAX_ADMIN_TOKEN_HEADER_LENGTH:
+        raise HTTPException(status_code=401, detail="invalid admin token")
+    if not compare_digest(provided, expected):
         raise HTTPException(status_code=401, detail="invalid admin token")
