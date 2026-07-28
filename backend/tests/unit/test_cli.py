@@ -140,6 +140,44 @@ def test_admin_token_min_length_must_be_positive() -> None:
         Settings(admin_token_min_length=0)
 
 
+@pytest.mark.parametrize("app_mode", ("development", "production"))
+@pytest.mark.parametrize(
+    ("admin_token", "is_valid"),
+    (
+        ("a" * 4096, True),
+        ("a" * 4097, False),
+        ("é" * 2048, True),
+        ("é" * 2049, False),
+    ),
+)
+def test_strict_settings_bound_admin_token_by_utf8_byte_length(
+    app_mode: str, admin_token: str, is_valid: bool
+) -> None:
+    settings = valid_production_settings()
+    settings.update(app_mode=app_mode, admin_token=admin_token)
+
+    if is_valid:
+        assert Settings(**settings).admin_token is not None
+    else:
+        with pytest.raises(ValidationError, match="admin_token"):
+            Settings(**settings)
+
+
+@pytest.mark.parametrize("app_mode", ("demo", "test"))
+def test_bypass_modes_do_not_limit_admin_token_utf8_byte_length(app_mode: str) -> None:
+    admin_token = "é" * 2049
+
+    settings = Settings(app_mode=app_mode, admin_token=admin_token)
+
+    assert settings.admin_token is not None
+    assert settings.admin_token.get_secret_value() == admin_token
+
+
+def test_strict_settings_reject_unencodable_admin_tokens() -> None:
+    with pytest.raises(ValidationError, match="admin_token"):
+        Settings(app_mode="development", admin_token="\ud800")
+
+
 def assert_validation_error_hides_production_secrets(
     settings: dict[str, object], *additional_secrets: str
 ) -> None:

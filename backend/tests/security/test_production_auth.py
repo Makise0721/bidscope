@@ -10,6 +10,7 @@ from fastapi import HTTPException, Request
 
 ADMIN_TOKEN = "test-admin-token-sentinel-0123456789"
 INVALID_TOKEN = "wrong-admin-token-sentinel"
+UNICODE_ADMIN_TOKEN = "test-admin-token-é-sentinel-0123456789"
 
 
 def _settings(app_mode: str, admin_token: str | None = ADMIN_TOKEN) -> Settings:
@@ -38,8 +39,12 @@ def _settings(app_mode: str, admin_token: str | None = ADMIN_TOKEN) -> Settings:
     )
 
 
-def _request(settings: Settings, token: str | None = None) -> Request:
-    headers = [] if token is None else [(b"x-admin-token", token.encode())]
+def _request(settings: Settings, token: str | bytes | None = None) -> Request:
+    headers = (
+        []
+        if token is None
+        else [(b"x-admin-token", token if isinstance(token, bytes) else token.encode())]
+    )
     return Request(
         {
             "type": "http",
@@ -72,6 +77,28 @@ async def test_strict_modes_reject_invalid_admin_tokens_identically(
 @pytest.mark.parametrize("app_mode", ("development", "production"))
 async def test_strict_modes_accept_the_configured_admin_token(app_mode: str) -> None:
     await require_admin_token(_request(_settings(app_mode), ADMIN_TOKEN))
+
+
+@pytest.mark.parametrize("app_mode", ("development", "production"))
+async def test_strict_modes_accept_unicode_admin_tokens_from_raw_utf8_headers(
+    app_mode: str,
+) -> None:
+    await require_admin_token(
+        _request(_settings(app_mode, UNICODE_ADMIN_TOKEN), UNICODE_ADMIN_TOKEN.encode("utf-8"))
+    )
+
+
+@pytest.mark.parametrize("app_mode", ("development", "production"))
+async def test_strict_modes_reject_nonmatching_non_ascii_raw_headers_generically(
+    app_mode: str,
+) -> None:
+    request = _request(_settings(app_mode), b"\xc3\xa9")
+
+    with pytest.raises(HTTPException) as raised:
+        await require_admin_token(request)
+
+    assert (raised.value.status_code, raised.value.detail) == (401, "invalid admin token")
+    assert ADMIN_TOKEN not in str(raised.value)
 
 
 @pytest.mark.parametrize("app_mode", ("demo", "test"))

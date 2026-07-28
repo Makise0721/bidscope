@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import HTTPException, Request
 
-MAX_ADMIN_TOKEN_HEADER_LENGTH = 4096
+from bidscope.config import MAX_ADMIN_TOKEN_HEADER_LENGTH
 
 
 async def require_admin_token(request: Request) -> None:
@@ -23,7 +23,16 @@ async def require_admin_token(request: Request) -> None:
         else None
     )
     provided = request.headers.get("X-Admin-Token")
-    if not expected or not provided or len(provided) > MAX_ADMIN_TOKEN_HEADER_LENGTH:
+    if not expected or not provided:
         raise HTTPException(status_code=401, detail="invalid admin token")
-    if not compare_digest(provided, expected):
+    try:
+        expected_bytes = expected.encode("utf-8")
+        provided_bytes = provided.encode("latin-1")
+    except UnicodeEncodeError:
+        raise HTTPException(status_code=401, detail="invalid admin token") from None
+    if len(expected_bytes) > MAX_ADMIN_TOKEN_HEADER_LENGTH:
+        raise HTTPException(status_code=401, detail="invalid admin token")
+    if len(provided_bytes) > MAX_ADMIN_TOKEN_HEADER_LENGTH:
+        raise HTTPException(status_code=401, detail="invalid admin token")
+    if not compare_digest(provided_bytes, expected_bytes):
         raise HTTPException(status_code=401, detail="invalid admin token")

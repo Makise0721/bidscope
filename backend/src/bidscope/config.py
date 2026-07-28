@@ -8,6 +8,8 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 from pydantic import AnyHttpUrl, Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+MAX_ADMIN_TOKEN_HEADER_LENGTH = 4096
+
 
 class Settings(BaseSettings):
     _secret_field_names: ClassVar[frozenset[str]] = frozenset(
@@ -267,18 +269,27 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_admin_token(self) -> Settings:
-        if self.app_mode != "production":
+        if self.app_mode not in {"development", "production"}:
             return self
 
         raw_token = self._secret_text(self.admin_token)
-        token = raw_token.strip() if raw_token is not None else ""
-        normalized_token = token.casefold()
-        if not token:
-            raise ValueError("admin_token must be non-empty in production")
-        if normalized_token in self.production_placeholder_tokens:
-            raise ValueError("admin_token must not be a production placeholder")
-        if len(token) < self.admin_token_min_length:
-            raise ValueError("admin_token must meet admin_token_min_length in production")
+        if raw_token is None or not raw_token.strip():
+            if self.app_mode == "production":
+                raise ValueError("admin_token must be non-empty in production")
+            return self
+        token = raw_token.strip()
+        if self.app_mode == "production":
+            normalized_token = token.casefold()
+            if normalized_token in self.production_placeholder_tokens:
+                raise ValueError("admin_token must not be a production placeholder")
+            if len(token) < self.admin_token_min_length:
+                raise ValueError("admin_token must meet admin_token_min_length in production")
+        try:
+            token_bytes = raw_token.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ValueError("admin_token must be valid UTF-8") from error
+        if len(token_bytes) > MAX_ADMIN_TOKEN_HEADER_LENGTH:
+            raise ValueError("admin_token exceeds the maximum header byte length")
         return self
 
     @model_validator(mode="after")
