@@ -4,7 +4,7 @@
 
 BidScope parses public tender notices from Chinese government procurement sources, deduplicates them, verifies evidence, and generates cited reports. It is designed so that every factual claim in every report resolves to an immutable evidence span and source version.
 
-**Status:** P0 snapshot-only. No live web fetching. Deterministic offline evaluation.
+**Status:** P1-A security and configuration baseline complete. P1-B observability/runtime stability and P1-C backup/recovery/release operations are not implemented yet. BidScope remains snapshot-only with deterministic offline evaluation.
 
 ---
 
@@ -18,6 +18,38 @@ BidScope parses public tender notices from Chinese government procurement source
 6. **Schedules** recurring queries and surfaces only new or materially changed notices.
 
 Official sources: [中国政府采购网 (CCGP)](https://www.ccgp.gov.cn/) and [全国公共资源交易平台 (GGZY)](https://www.ggzy.gov.cn/).
+
+### Production Security Baseline (P1-A)
+
+The production Compose profile is a single-tenant administrator deployment. It fails closed during settings construction and does not silently fall back to the demo configuration:
+
+- `BIDSCOPE_APP_MODE=production` is required.
+- `BIDSCOPE_ADMIN_TOKEN` must be non-empty, at least `BIDSCOPE_ADMIN_TOKEN_MIN_LENGTH` bytes after UTF-8 encoding, and different from example or placeholder values. Production startup fails if it is missing, too short, or a placeholder.
+- Production uses `BIDSCOPE_OBJECT_STORE_TYPE=s3` with explicit endpoint, region, bucket, prefix, access key, and secret key. Ambient credentials and the local object store are not accepted for production.
+- `BIDSCOPE_REAL_MODEL_ENABLED=true` requires `BIDSCOPE_MODEL_API_KEY`. The key is never written to logs, run events, or audit details.
+- `BIDSCOPE_ALLOWED_ORIGINS`, `BIDSCOPE_TRUSTED_HOSTS`, and `BIDSCOPE_EXTERNAL_SCHEME=https` are explicit transport settings. Production origins must be exact browser origins; wildcard origins and wildcard trusted hosts are rejected.
+- PostgreSQL application and checkpoint DSNs must use their explicit supported drivers, credentials, authority, database name, and allowlisted TLS query only. Demo DSNs, ambient credentials, target overrides, fragments, and unknown query parameters are rejected.
+
+The endpoint policy is:
+
+| Endpoint area | Access |
+|---|---|
+| `/healthz` | Public process liveness response; no dependency details |
+| `/assets/*` and SPA GET | Public, or restricted by the reverse proxy |
+| `/api/runs/*`, `/api/reports/*`, `/api/subscriptions/*`, `/api/inbox-events`, `/api/sources/*`, `/api/evaluations/*` | `X-Admin-Token` required |
+| `/api/test-controls/*` | Registered only in `app_mode=test`; requires the separate test-control token |
+
+P1-A does not provide a user-account system, cookies, query-string credentials, or a user-visible cancellation endpoint. The API checks the Admin Token at the router boundary and returns the stable `401 {"detail":"invalid admin token"}` response for missing, wrong, empty, or oversized values. Trusted Host and explicit CORS middleware remain active in production; CORS does not enable credentials.
+
+### Browser Admin Token Flow
+
+Open the SPA through the configured same-origin public entry point, then enter the Admin Token in the Workbench access control. The frontend trims the value, stores it only in the current tab's `sessionStorage`, and sends it as `X-Admin-Token` on JSON requests and the authenticated SSE stream. It never puts the token in the bundle, URL, hash, `localStorage`, Cookie, log, or report. Use **Clear** to remove it from the tab. A `401` clears the stored token and returns the UI to the authentication-required state; enter the token again to continue.
+
+To rotate the credential, generate a new random token, update `BIDSCOPE_ADMIN_TOKEN` in the deployment secret, restart both `api` and `scheduler`, and enter the new token in each open browser tab. Treat old tabs as unauthenticated until their token is replaced. Never commit the deployment `.env` file or real credentials.
+
+The application writes bounded audit events for critical run, subscription, snapshot-import, report, and DOCX operations. Critical mutation audit rows use the same database transaction as the business change; observation audit failures do not block ordinary reads. Audit details contain IDs, status, and bounded metadata only. Admin Tokens, Authorization headers, model keys, Cookies/session data, raw request headers, request bodies, and full report bodies are excluded.
+
+`/readyz`, `/metrics`, structured request logging, backup/restore commands, recovery drills, and release rollback gates are P1-B/P1-C work and are intentionally not claimed by this baseline.
 
 ---
 

@@ -1,7 +1,53 @@
 # Deployment
 
-**Version:** 2026-07-27
-**Applies to:** BidScope P1-A Compose configuration baseline
+**Version:** 2026-07-28
+**Applies to:** BidScope P1-A Compose security and configuration baseline
+
+## P1-A Security Contract
+
+P1-A is the production security and configuration layer. It is deliberately single-tenant: the application credential is one operator-managed Admin Token, not a user-account or RBAC system.
+
+### Startup must fail closed
+
+The production settings validator rejects startup when any of the following is missing or unsafe:
+
+- `BIDSCOPE_APP_MODE` is not `production`.
+- `BIDSCOPE_ADMIN_TOKEN` is blank, shorter than `BIDSCOPE_ADMIN_TOKEN_MIN_LENGTH` (32 by default), longer than the bounded header limit, or equal to a placeholder such as `change-me`, `replace-me`, `your-admin-token`, or `minioadmin`.
+- `BIDSCOPE_OBJECT_STORE_TYPE` is not `s3`, or any of `BIDSCOPE_S3_ENDPOINT`, `BIDSCOPE_S3_REGION`, `BIDSCOPE_S3_BUCKET`, `BIDSCOPE_S3_ACCESS_KEY`, or `BIDSCOPE_S3_SECRET_KEY` is blank. The application does not fall back to ambient S3 credentials.
+- `BIDSCOPE_REAL_MODEL_ENABLED=true` without `BIDSCOPE_MODEL_API_KEY`.
+- `BIDSCOPE_ALLOWED_ORIGINS` is empty, wildcarded, or contains a path, query, fragment, or user-info component; `BIDSCOPE_TRUSTED_HOSTS` is empty or wildcarded; or `BIDSCOPE_EXTERNAL_SCHEME` is not `https`.
+- Either PostgreSQL DSN uses the wrong explicit driver, omitted credentials/authority/database, a demo default, a fragment, an unknown or target-overriding query parameter, or a TLS query other than `ssl=require` for the asyncpg DSN or `sslmode=require` for the psycopg DSN.
+
+Validation errors are presented as a bounded startup marker and do not print DSNs, passwords, Admin Tokens, model keys, tracebacks, or Pydantic internals.
+
+### Endpoint authorization
+
+The application transport and router boundaries enforce this matrix:
+
+| Endpoint area | Policy |
+|---|---|
+| `/healthz` | Public process liveness only; it does not prove database or object-store readiness |
+| `/assets/*` and SPA GET | Public unless the reverse proxy limits the entry point; no sensitive data is embedded in the static entry |
+| `/api/runs/*`, `/api/reports/*`, `/api/subscriptions/*`, `/api/inbox-events`, `/api/sources/*`, `/api/evaluations/*` | Require `X-Admin-Token` |
+| `/api/test-controls/*` | Only registered in `BIDSCOPE_APP_MODE=test`; requires `X-Test-Control-Token` and is never a production route |
+
+Missing, empty, wrong, or oversized Admin Token headers receive `401` with `{"detail":"invalid admin token"}`. The value is compared against the configured token and is not echoed in errors. Trusted Host rejects unconfigured hosts, and CORS accepts only the explicit configured origins with credentials disabled. The application does not infer a trusted host, external scheme, or origin from arbitrary request headers.
+
+### SPA token handling and rotation
+
+1. Open the SPA at the configured same-origin public URL.
+2. Enter the Admin Token in the Workbench **Admin token** control and choose **Save**.
+3. The browser trims the value and stores it only in the current tab's `sessionStorage`; it sends the value as `X-Admin-Token` on API JSON requests and the fetch-based authenticated SSE stream.
+4. The token is not placed in `localStorage`, cookies, URLs, query strings, hashes, bundles, logs, request bodies, or reports. **Clear** removes it from the current tab.
+5. A `401` clears the current tab's token and returns the UI to the authentication-required state. Enter the token again after correcting the credential.
+
+For rotation, generate a new random token, update the deployment secret, restart both roles, and replace the token in every open browser tab. Do not commit `.env` or secret files. Existing tabs continue to send their old token until cleared or replaced, so rotate during a controlled maintenance window.
+
+### Audit boundary
+
+Critical run creation/confirmation/retry, subscription creation/pause/resume, snapshot import, and report/DOCX operations create bounded audit metadata. Critical mutation audit rows are flushed in the same database transaction as the business operation; a failure prevents the mutation from committing. Read/download observations may be recorded separately and do not block the successful response if audit persistence fails. Audit records contain normalized paths, request and business IDs, outcome, error code, status, and bounded allowlisted details. They never contain Admin Tokens, `Authorization` headers, model API keys, cookies/session values, raw request headers, request bodies, or report bodies.
+
+P1-A does not claim `/readyz`, `/metrics`, structured request/run logging, backup/restore commands, recovery drills, or release rollback automation. Those are P1-B/P1-C deliverables and must not be used as production readiness evidence for this baseline.
 
 ## Production Compose Workflow
 
