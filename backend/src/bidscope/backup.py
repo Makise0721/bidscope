@@ -386,9 +386,39 @@ class BackupService:
         return results[:1000]
 
     def prune(self) -> dict[str, Any]:
-        # Retention policy belongs to the Task 3 core; expose a safe no-op when
-        # that optional policy is not configured in this minimal compatibility core.
-        return {"status": "pruned", "deleted_count": 0}
+        """Remove verified backups outside the configured retention window."""
+        entries: list[tuple[BackupManifest, Path]] = []
+        invalid: list[Path] = []
+        if not self.backup_root.exists():
+            return {"status": "pruned", "deleted_count": 0}
+        for candidate in self.backup_root.iterdir():
+            if not candidate.is_dir():
+                continue
+            try:
+                manifest = verify_manifest(candidate, self.backup_root)
+            except BackupError:
+                invalid.append(candidate)
+                continue
+            entries.append((manifest, candidate))
+        if not entries:
+            return {"status": "pruned", "deleted_count": 0}
+        newest = max(entries, key=lambda item: item[0].created_at)[0].backup_id
+        keep_ids: set[str] = set()
+        for retention, limit in (("daily", 7), ("weekly", 4)):
+            candidates = sorted(
+                (item for item in entries if item[0].retention_class == retention),
+                key=lambda item: item[0].created_at,
+                reverse=True,
+            )
+            keep_ids.update(item[0].backup_id for item in candidates[:limit])
+        keep_ids.add(newest)
+        deleted = 0
+        for manifest, directory in entries:
+            if manifest.backup_id in keep_ids:
+                continue
+            shutil.rmtree(directory)
+            deleted += 1
+        return {"status": "pruned", "deleted_count": deleted}
 
     def create(self, retention_class: str = "daily") -> dict[str, Any]:
         retention = retention_class
