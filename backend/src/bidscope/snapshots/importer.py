@@ -192,7 +192,7 @@ class SnapshotImporter:
                     METRICS_REGISTRY.counter(
                         "bidscope_snapshot_imports_total",
                         {"source": manifest.source.value, "outcome": "failure"},
-                    ).inc()
+                    )
                 except Exception:
                     logger.warning("metrics_import_failure_failed", exc_info=True)
                 raise
@@ -201,7 +201,7 @@ class SnapshotImporter:
             METRICS_REGISTRY.counter(
                 "bidscope_snapshot_imports_total",
                 {"source": manifest.source.value, "outcome": "success"},
-            ).inc()
+            )
         except Exception:
             logger.warning("metrics_import_success_failed", exc_info=True)
         return import_record

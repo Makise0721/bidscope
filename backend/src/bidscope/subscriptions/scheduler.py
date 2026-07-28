@@ -285,7 +285,7 @@ async def run_scheduler_tick(
             try:
                 METRICS_REGISTRY.counter(
                     "bidscope_scheduler_ticks_total", {"outcome": "skipped"}
-                ).inc()
+                )
             except Exception:
                 logger.warning("metrics_tick_skipped_failed", exc_info=True)
             return {"due": 0, "ran": 0, "skipped": 0, "failed": 0}
@@ -314,7 +314,7 @@ async def run_scheduler_tick(
                 try:
                     METRICS_REGISTRY.counter(
                         "bidscope_scheduler_ticks_total", {"outcome": "due"}
-                    ).inc()
+                    )
                 except Exception:
                     logger.warning("metrics_tick_due_failed", exc_info=True)
                 global _last_successful_tick  # noqa: PLW0603
@@ -345,13 +345,13 @@ def _tick(settings: Settings) -> None:
     except TimeoutError:
         logger.warning("scheduler_tick_timeout")
         try:
-            METRICS_REGISTRY.counter("bidscope_scheduler_ticks_total", {"outcome": "timeout"}).inc()
+            METRICS_REGISTRY.counter("bidscope_scheduler_ticks_total", {"outcome": "timeout"})
         except Exception:
             logger.warning("metrics_tick_timeout_failed", exc_info=True)
     except Exception:
         logger.warning("scheduler_tick_failed")
         try:
-            METRICS_REGISTRY.counter("bidscope_scheduler_ticks_total", {"outcome": "failed"}).inc()
+            METRICS_REGISTRY.counter("bidscope_scheduler_ticks_total", {"outcome": "failed"})
         except Exception:
             logger.warning("metrics_tick_failed_counter_failed", exc_info=True)
         raise
