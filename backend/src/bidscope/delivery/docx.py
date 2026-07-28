@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from bidscope.delivery.objects import ObjectStore
 from bidscope.domain.reports import Report
@@ -70,6 +71,25 @@ def _object_key(report_id: str) -> str:
     """Build a deterministic object key from report identity and renderer."""
     safe = _sanitize_filename(report_id)
     return f"reports/{safe}/{RENDERER_VERSION}/bidscope-{safe}.docx"
+
+
+def _normalize_docx_zip(data: bytes) -> bytes:
+    """Remove ZIP metadata that would otherwise vary between renders."""
+    output = io.BytesIO()
+    with ZipFile(io.BytesIO(data), "r") as source, ZipFile(
+        output, "w", compression=ZIP_DEFLATED
+    ) as target:
+        for source_info in source.infolist():
+            target_info = ZipInfo(
+                source_info.filename,
+                date_time=(1980, 1, 1, 0, 0, 0),
+            )
+            target_info.compress_type = source_info.compress_type
+            target_info.create_system = source_info.create_system
+            target_info.external_attr = source_info.external_attr
+            target_info.flag_bits = source_info.flag_bits
+            target.writestr(target_info, source.read(source_info.filename))
+    return output.getvalue()
 
 
 def render_report(report: Report) -> bytes:
@@ -144,7 +164,7 @@ def render_report(report: Report) -> bytes:
 
     buffer = io.BytesIO()
     document.save(buffer)
-    return buffer.getvalue()
+    return _normalize_docx_zip(buffer.getvalue())
 
 
 class ReportDelivery:
