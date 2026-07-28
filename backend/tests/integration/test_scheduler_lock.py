@@ -21,7 +21,7 @@ import pytest_asyncio
 import sqlalchemy as sa
 from bidscope.api.dependencies import RunService, build_demo_graph
 from bidscope.clock import FixedClock
-from bidscope.config import Settings
+from bidscope.config import Settings, get_settings
 from bidscope.db import create_engine_and_session
 from bidscope.delivery.objects import LocalObjectStore
 from bidscope.graph.executor import _to_plain_dsn
@@ -41,18 +41,16 @@ def _next_id(name: str) -> str:
     """Generate a deterministic UUID for a named test subscription."""
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, name))
 
-TEST_DB_URL = "postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test"
-TEST_CHECKPOINT_URL = "postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test"
-
 BATCH_1 = Path("data/demo/batch-1")
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _test_settings(tmp_path: Path) -> Settings:
+    guarded_settings = get_settings()
     return Settings(
         app_mode="test",
-        database_url=TEST_DB_URL,
-        checkpoint_database_url=TEST_CHECKPOINT_URL,
+        database_url=guarded_settings.database_url,
+        checkpoint_database_url=guarded_settings.checkpoint_database_url,
         real_model_enabled=False,
         admin_token="test-admin-token",
         object_store_root=str(tmp_path / "objects"),

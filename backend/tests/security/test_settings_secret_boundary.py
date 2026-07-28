@@ -9,6 +9,7 @@ from collections.abc import Iterator
 import pytest
 from bidscope.config import Settings
 from pydantic import SecretStr, ValidationError
+from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
 
 DSN_PASSWORD = "settings-dsn-password-4a9f"
@@ -137,7 +138,7 @@ def test_production_database_urls_fail_closed_on_unsafe_structure(
 
     error = _settings_validation_error(settings)
 
-    assert field in str(error)
+    assert error.errors(include_context=True)[0]["input"][field] == "**********"
     assert value not in str(error)
     _assert_exception_graph_is_secret_free(error, "password")
 
@@ -148,6 +149,162 @@ def test_production_allows_an_external_database_authority() -> None:
     assert make_url(settings.database_url.get_secret_value()).host == "database.example.test"
     checkpoint_url = make_url(settings.checkpoint_database_url.get_secret_value())
     assert checkpoint_url.host == "database.example.test"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("database_url", "postgresql+asyncpg://database.example.test:5432/bidscope"),
+        ("database_url", "postgresql+asyncpg://:password@database.example.test:5432/bidscope"),
+        ("database_url", "postgresql+asyncpg://user:@database.example.test:5432/bidscope"),
+        ("checkpoint_database_url", "postgresql+psycopg://database.example.test:5432/bidscope"),
+        (
+            "checkpoint_database_url",
+            "postgresql+psycopg://:password@database.example.test:5432/bidscope",
+        ),
+        (
+            "checkpoint_database_url",
+            "postgresql+psycopg://user:@database.example.test:5432/bidscope",
+        ),
+    ),
+)
+def test_production_dsn_requires_explicit_nonempty_username_and_password(
+    field: str, value: str
+) -> None:
+    settings = valid_production_settings()
+    settings[field] = value
+
+    error = _settings_validation_error(settings)
+
+    item = error.errors(include_context=True)[0]
+    assert item["input"][field] == "**********"
+    assert value not in str(error)
+    _assert_exception_graph_is_secret_free(error, value)
+
+
+@pytest.mark.parametrize(
+    ("field", "query_key"),
+    (
+        ("database_url", "ssl"),
+        ("checkpoint_database_url", "sslmode"),
+    ),
+)
+def test_production_allows_only_the_supported_tls_query_for_each_driver(
+    field: str, query_key: str
+) -> None:
+    settings_values = valid_production_settings()
+    settings_values[field] = f"{settings_values[field]}?{query_key}=require"
+
+    settings = Settings(**settings_values)
+    url = make_url(getattr(settings, field).get_secret_value())
+    _args, connect_kwargs = create_engine(url).dialect.create_connect_args(url)
+
+    assert connect_kwargs[query_key] == "require"
+
+
+@pytest.mark.parametrize(
+    ("field", "query"),
+    (
+        ("database_url", "sslmode=require"),
+        ("checkpoint_database_url", "ssl=require"),
+        ("database_url", "ssl="),
+        ("database_url", ""),
+        ("checkpoint_database_url", "sslmode=disable"),
+        ("database_url", "host=override.example.test"),
+        ("database_url", "port=65432"),
+        ("database_url", "database=other_database"),
+        ("checkpoint_database_url", "dbname=other_database"),
+        ("checkpoint_database_url", "service=override-service"),
+        ("database_url", "user=override-user"),
+        ("checkpoint_database_url", "password=query-secret"),
+        ("database_url", "passfile=/tmp/credentials"),
+        ("database_url", "unknown=unsafe"),
+        ("database_url", "ssl=require&ssl=require"),
+    ),
+)
+def test_production_rejects_target_overrides_unknown_and_unsafe_dsn_queries(
+    field: str, query: str
+) -> None:
+    settings = valid_production_settings()
+    value = f"{settings[field]}?{query}"
+    settings[field] = value
+
+    error = _settings_validation_error(settings)
+
+    item = error.errors(include_context=True)[0]
+    assert item["input"][field] == "**********"
+    assert value not in str(error)
+    _assert_exception_graph_is_secret_free(error, value, "query-secret")
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "secrets"),
+    (
+        ("database_url", "postgresql+asyncpg://bare-secret", ("bare-secret",)),
+        (
+            "database_url",
+            "mysql://user:wrong-secret@internal-target.invalid/database-sentinel",
+            ("wrong-secret", "internal-target.invalid", "database-sentinel"),
+        ),
+        (
+            "database_url",
+            "postgresql+asyncpg://user:password@database.example.test:5432/bidscope"
+            "#fragment-secret",
+            ("password", "fragment-secret"),
+        ),
+    ),
+)
+def test_invalid_production_dsn_errors_always_use_a_fixed_mask(
+    field: str, value: str, secrets: tuple[str, ...]
+) -> None:
+    settings = valid_production_settings()
+    settings[field] = value
+
+    error = _settings_validation_error(settings)
+
+    structured = error.errors(include_url=True, include_context=True)
+    item = structured[0]
+    assert item["input"][field] == "**********"
+    context = item.get("ctx", {})
+    assert isinstance(context["error"], ValueError)
+    assert context["error"].__traceback__ is None
+    rendered = (
+        str(error),
+        repr(error),
+        str(structured),
+        error.json(),
+        "".join(traceback.format_exception(error)),
+    )
+    for candidate in (*secrets, value):
+        assert all(candidate not in rendered_value for rendered_value in rendered)
+    _assert_exception_graph_is_secret_free(error, *secrets, value)
+
+
+def _secret_field_type_error(field: str) -> ValidationError:
+    secret = f"{field}-type-secret"
+    settings = valid_production_settings()
+    settings[field] = {"nested": secret}
+    try:
+        Settings(**settings)
+    except ValidationError as error:
+        del settings
+        del secret
+        return error
+    raise AssertionError("Settings should reject a non-string secret field")
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("admin_token", "model_api_key", "s3_access_key", "s3_secret_key"),
+)
+def test_secret_field_type_errors_use_fixed_masks(field: str) -> None:
+    secret = f"{field}-type-secret"
+    error = _secret_field_type_error(field)
+
+    item = next(item for item in error.errors(include_context=True) if item["loc"] == (field,))
+    assert item["input"] == "**********"
+    assert secret not in str(error)
+    _assert_exception_graph_is_secret_free(error, secret)
 
 
 def test_successful_settings_mask_database_urls_in_every_public_serialization() -> None:

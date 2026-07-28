@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from bidscope.api.dependencies import RunService, build_demo_graph
 from bidscope.api.routes.reports import download_docx, get_report
 from bidscope.clock import FixedClock
-from bidscope.config import Settings
+from bidscope.config import Settings, get_settings
 from bidscope.delivery.objects import LocalObjectStore
 from bidscope.delivery.reports import ReportPersistence
 from bidscope.domain.notices import NoticeEvidence as DomainEvidence
@@ -39,6 +39,17 @@ from bidscope.snapshots.importer import SnapshotImporter
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _settings(tmp_path: Path) -> Settings:
+    guarded_settings = get_settings()
+    return Settings(
+        app_mode="test",
+        database_url=guarded_settings.database_url,
+        checkpoint_database_url=guarded_settings.checkpoint_database_url,
+        real_model_enabled=False,
+        object_store_root=str(tmp_path / "graph-reports"),
+    )
 
 
 async def _count(session, model: type) -> int:
@@ -150,13 +161,7 @@ async def test_completed_application_graph_persists_report_and_serves_docx(
     """Imported demo data flows through the real graph, API DTO, and DOCX route."""
     await _seed_imported_report_inputs(session_factory, tmp_path)
     object_store = LocalObjectStore(tmp_path / "graph-reports")
-    settings = Settings(
-        app_mode="test",
-        database_url="postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test",
-        checkpoint_database_url="postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope_test",
-        real_model_enabled=False,
-        object_store_root=str(tmp_path / "graph-reports"),
-    )
+    settings = _settings(tmp_path)
     clock = FixedClock(datetime(2026, 7, 18, 9, 0, tzinfo=UTC))
     dsn = _to_plain_dsn(settings.checkpoint_database_dsn())
     async with AsyncPostgresSaver.from_conn_string(dsn) as checkpointer:

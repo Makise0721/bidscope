@@ -4,6 +4,8 @@ import sys
 from pathlib import Path
 
 import sqlalchemy as sa
+from bidscope.config import get_settings
+from sqlalchemy.engine import make_url
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -51,8 +53,9 @@ async def test_alembic_uses_settings_checkpoint_url() -> None:
     silently migrating a different (e.g. development) database.
     """
     env = os.environ.copy()
-    env["BIDSCOPE_CHECKPOINT_DATABASE_URL"] = (
-        "postgresql+psycopg://bidscope:bidscope@localhost:65432/bidscope_test"
+    guarded_checkpoint_url = make_url(get_settings().checkpoint_database_dsn()).set(port=65432)
+    env["BIDSCOPE_CHECKPOINT_DATABASE_URL"] = guarded_checkpoint_url.render_as_string(
+        hide_password=False
     )
     env.pop("BIDSCOPE_DATABASE_URL", None)
     result = subprocess.run(

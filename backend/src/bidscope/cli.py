@@ -88,11 +88,13 @@ def _require_startup_settings() -> None:
 
 def _build_importer() -> SnapshotImporter:
     """Construct an importer backed by the configured database and object store."""
-    _, session_factory = create_engine_and_session()
+    _require_startup_settings()
+    settings = get_settings()
+    _, session_factory = create_engine_and_session(settings)
     return SnapshotImporter(
         session_factory=session_factory,
         repository_factory=SnapshotRepository,
-        object_store=create_object_store(get_settings()),
+        object_store=create_object_store(settings),
         clock=SystemClock(),
     )
 
@@ -195,6 +197,7 @@ def snapshots_import(
 @checkpoints_app.command("setup")
 def checkpoints_setup() -> None:
     """Create the LangGraph checkpoint tables in the configured database."""
+    _require_startup_settings()
     run_setup_checkpoints(get_settings())
     typer.echo("checkpoint tables ready")
 

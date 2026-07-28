@@ -457,16 +457,12 @@ def test_direct_settings_validation_redacts_dsn_passwords(
         Settings(**settings)
 
     rendered = (str(error.value), str(error.value.errors()), error.value.json())
-    redacted_dsn = (
-        f"postgresql+{driver}://bidscope:**********"
-        "@database.example.test:5432/bidscope"
-    )
     for value in rendered:
         assert password not in value
         assert encoded_password not in value
 
     sanitized_item = error.value.errors()[0]
-    assert sanitized_item["input"][field_name] == redacted_dsn
+    assert sanitized_item["input"][field_name] == "**********"
     assert sanitized_item["type"] == "value_error"
     assert sanitized_item["loc"] == ()
     assert sanitized_item["msg"] == (
@@ -493,9 +489,7 @@ def test_direct_settings_validation_redacts_malformed_raw_dsn_password() -> None
 
     for rendered in (str(error.value), str(error.value.errors()), error.value.json()):
         assert password not in rendered
-    assert error.value.errors()[0]["input"]["database_url"] == (
-        "postgresql+asyncpg://bidscope:**********@database.example.test:5432/bidscope"
-    )
+    assert error.value.errors()[0]["input"]["database_url"] == "**********"
 
 
 @pytest.mark.parametrize(
@@ -536,9 +530,7 @@ def test_direct_settings_validation_redacts_malformed_no_host_dsn_password(
         assert dsn_suffix not in value
     assert error.value.__cause__ is None
     assert error.value.__context__ is None
-    assert error.value.errors()[0]["input"]["database_url"] == (
-        "postgresql+asyncpg://bidscope:**********"
-    )
+    assert error.value.errors()[0]["input"]["database_url"] == "**********"
 
 
 def test_sanitized_settings_validation_error_has_no_raw_exception_chain() -> None:
@@ -620,14 +612,8 @@ def test_environment_settings_validation_redacts_dsn_passwords(
         assert encoded_password not in rendered
 
     sanitized_input = error.value.errors()[0]["input"]
-    assert sanitized_input["database_url"] == (
-        "postgresql+asyncpg://bidscope:**********"
-        "@database.example.test:5432/bidscope"
-    )
-    assert sanitized_input["checkpoint_database_url"] == (
-        "postgresql+psycopg://bidscope:**********"
-        "@database.example.test:5432/bidscope"
-    )
+    assert sanitized_input["database_url"] == "**********"
+    assert sanitized_input["checkpoint_database_url"] == "**********"
 
 
 def test_environment_loaded_production_secrets_stay_masked_structurally(

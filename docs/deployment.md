@@ -16,7 +16,7 @@ The API and scheduler share the same production configuration, PostgreSQL databa
 
 1. Copy `.env.production.example` to the deployment's `.env` file and replace every blank value with deployment-specific values. Do not commit that file.
 2. Generate a long random `BIDSCOPE_ADMIN_TOKEN`, S3 credentials, PostgreSQL credentials, and pre-encoded DSN passwords.
-3. Set `BIDSCOPE_DATABASE_URL` to a full `postgresql+asyncpg://` DSN and `BIDSCOPE_CHECKPOINT_DATABASE_URL` to a full `postgresql+psycopg://` DSN. Both must have an authority/host and database name, and must not contain query parameters or fragments. Percent-encode every reserved character in credentials before placing it in the DSN.
+3. Set `BIDSCOPE_DATABASE_URL` to a full `postgresql+asyncpg://` DSN and `BIDSCOPE_CHECKPOINT_DATABASE_URL` to a full `postgresql+psycopg://` DSN. Both must explicitly contain a non-empty username, a non-empty password, authority/host, and database name. Percent-encode every reserved character in credentials before placing it in the DSN. The only accepted query is `?ssl=require` for the asyncpg application DSN or `?sslmode=require` for the psycopg checkpoint DSN; target override and credential keys (`host`, `port`, `database`, `dbname`, `service`, `user`, `password`, `passfile`) and all unknown keys are rejected. Fragments are rejected.
 4. Set the active JSON `BIDSCOPE_ALLOWED_ORIGINS` and `BIDSCOPE_TRUSTED_HOSTS` values to the real public origin and host. Keep `BIDSCOPE_EXTERNAL_SCHEME=https` behind a TLS reverse proxy.
 5. Validate interpolation and start the stack:
 
@@ -42,8 +42,9 @@ docker compose ps
 - `BIDSCOPE_S3_ENDPOINT`, `BIDSCOPE_S3_REGION`, `BIDSCOPE_S3_BUCKET`, `BIDSCOPE_S3_PREFIX`, `BIDSCOPE_S3_ACCESS_KEY`, and `BIDSCOPE_S3_SECRET_KEY`
 - `BIDSCOPE_REAL_MODEL_ENABLED`; it defaults to `false` in Compose
 - `BIDSCOPE_MODEL_API_KEY` when `BIDSCOPE_REAL_MODEL_ENABLED=true`
+- `BIDSCOPE_MODEL_BASE_URL` and `BIDSCOPE_MODEL_NAME`; Compose passes both values to API and scheduler, defaulting to the Settings values when unset
 
-Production mode rejects the built-in demo database DSNs. It also rejects DSNs with a missing authority, missing database name, unsupported driver scheme, query string, or fragment. The two DSNs are stored as secrets in application settings and are only unwrapped at database, migration, and checkpoint driver boundaries.
+Production mode rejects the built-in demo database DSNs. It also rejects DSNs with missing explicit credentials, missing authority, missing database name, unsupported driver scheme, target-overriding or unknown query parameters, or fragments. The two DSNs are stored as secrets in application settings and are only unwrapped at database, migration, and checkpoint driver boundaries.
 
 ## Network and Storage Boundaries
 

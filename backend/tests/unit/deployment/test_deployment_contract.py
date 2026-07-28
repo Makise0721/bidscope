@@ -82,14 +82,23 @@ def test_compose_production_services_share_required_settings_without_literal_sec
         "BIDSCOPE_S3_SECRET_KEY",
         "BIDSCOPE_REAL_MODEL_ENABLED",
         "BIDSCOPE_MODEL_API_KEY",
+        "BIDSCOPE_MODEL_BASE_URL",
+        "BIDSCOPE_MODEL_NAME",
     )
     for key in required_keys:
         assert f"{key}: ${{{key}:?" in compose or key in {
             "BIDSCOPE_REAL_MODEL_ENABLED",
             "BIDSCOPE_MODEL_API_KEY",
+            "BIDSCOPE_MODEL_BASE_URL",
+            "BIDSCOPE_MODEL_NAME",
         }
     assert "BIDSCOPE_REAL_MODEL_ENABLED: ${BIDSCOPE_REAL_MODEL_ENABLED:-false}" in compose
     assert "BIDSCOPE_MODEL_API_KEY: ${BIDSCOPE_MODEL_API_KEY-}" in compose
+    assert (
+        "BIDSCOPE_MODEL_BASE_URL: ${BIDSCOPE_MODEL_BASE_URL:-https://api.deepseek.com}"
+        in compose
+    )
+    assert "BIDSCOPE_MODEL_NAME: ${BIDSCOPE_MODEL_NAME:-deepseek-chat}" in compose
 
 
 def _service_block(compose: str, service_name: str) -> str:
@@ -143,6 +152,10 @@ def test_rendered_compose_keeps_infrastructure_unpublished(
         "target": api_port["target"],
     } == {"host_ip": "127.0.0.1", "published": "8000", "target": 8000}
     assert services["scheduler"]["healthcheck"]["disable"] is True
+    for service_name in ("api", "scheduler"):
+        environment = services[service_name]["environment"]
+        assert environment["BIDSCOPE_MODEL_BASE_URL"] == "https://model.example.test/v1"
+        assert environment["BIDSCOPE_MODEL_NAME"] == "model-sentinel"
 
 
 def test_compose_requires_preencoded_postgres_dsns_and_keeps_service_credentials() -> None:
@@ -193,6 +206,8 @@ def compose_environment() -> dict[str, str]:
             "BIDSCOPE_POSTGRES_PASSWORD": "p@ss:word/?#[]",
             "BIDSCOPE_REAL_MODEL_ENABLED": "false",
             "BIDSCOPE_MODEL_API_KEY": "",
+            "BIDSCOPE_MODEL_BASE_URL": "https://model.example.test/v1",
+            "BIDSCOPE_MODEL_NAME": "model-sentinel",
             "BIDSCOPE_DATABASE_URL": (
                 "postgresql+asyncpg://bidscope:p%40ss%3Aword%2F%3F%23%5B%5D"
                 "@postgres:5432/bidscope"

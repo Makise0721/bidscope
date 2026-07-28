@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from functools import lru_cache
 from typing import Any, ClassVar, Literal, cast
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from pydantic import AnyHttpUrl, Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     _production_dsn_schemes: ClassVar[dict[str, str]] = {
         "database_url": "postgresql+asyncpg",
         "checkpoint_database_url": "postgresql+psycopg",
+    }
+    _production_dsn_tls_queries: ClassVar[dict[str, tuple[str, frozenset[str]]]] = {
+        "database_url": ("ssl", frozenset({"require"})),
+        "checkpoint_database_url": ("sslmode", frozenset({"require"})),
     }
 
     @classmethod
@@ -107,8 +111,16 @@ class Settings(BaseSettings):
         cls, item: Mapping[str, Any], secret_values: set[str]
     ) -> dict[str, Any]:
         sanitized = dict(item)
+        location = item.get("loc", ())
         if "input" in item:
-            sanitized["input"] = cls._sanitize_error_value(item["input"], secret_values)
+            if isinstance(location, tuple) and any(
+                part in cls._secret_field_names | cls._dsn_field_names
+                for part in location
+                if isinstance(part, str)
+            ):
+                sanitized["input"] = "**********"
+            else:
+                sanitized["input"] = cls._sanitize_error_value(item["input"], secret_values)
         if "ctx" in item:
             sanitized["ctx"] = cls._sanitize_error_context(item["ctx"], secret_values)
         return sanitized
@@ -179,12 +191,9 @@ class Settings(BaseSettings):
             return {
                 key: (
                     "**********"
-                    if key in cls._secret_field_names and value[key] is not None
-                    else (
-                        cls._redact_dsn_password(value[key])
-                        if key in cls._dsn_field_names and isinstance(value[key], str)
-                        else cls._sanitize_error_value(value[key], secret_values)
-                    )
+                    if key in cls._secret_field_names | cls._dsn_field_names
+                    and value[key] is not None
+                    else cls._sanitize_error_value(value[key], secret_values)
                 )
                 for key in value
             }
@@ -336,9 +345,24 @@ class Settings(BaseSettings):
             )
         return self
 
+    @staticmethod
+    def _has_valid_percent_encoding(value: str) -> bool:
+        index = 0
+        while index < len(value):
+            if value[index] == "%":
+                if index + 2 >= len(value) or any(
+                    character not in "0123456789abcdefABCDEF"
+                    for character in value[index + 1 : index + 3]
+                ):
+                    return False
+                index += 3
+                continue
+            index += 1
+        return True
+
     @classmethod
     def _is_valid_production_dsn(cls, field_name: str, value: str | None) -> bool:
-        """Accept only a complete, unambiguous DSN for its runtime consumer."""
+        """Accept one explicit driver target and its minimal TLS configuration."""
         if not value or value == cls._database_dsn_defaults[field_name]:
             return False
         try:
@@ -347,17 +371,42 @@ class Settings(BaseSettings):
                 parsed.scheme != cls._production_dsn_schemes[field_name]
                 or not value.startswith(f"{parsed.scheme}://")
                 or not parsed.netloc
-                or parsed.query
+                or value.endswith("?")
                 or parsed.fragment
                 or parsed.hostname is None
+                or not parsed.hostname.strip()
                 or not parsed.path.startswith("/")
                 or parsed.path.count("/") != 1
                 or not parsed.path[1:].strip()
                 or ";" in parsed.path
             ):
                 return False
+
+            userinfo, separator, _ = parsed.netloc.rpartition("@")
+            if (
+                not separator
+                or not cls._has_valid_percent_encoding(userinfo)
+                or parsed.username is None
+                or parsed.password is None
+                or not unquote(parsed.username).strip()
+                or not unquote(parsed.password).strip()
+            ):
+                return False
+
             if parsed.port is not None and not 1 <= parsed.port <= 65535:
                 return False
+
+            if parsed.query:
+                query_key, valid_values = cls._production_dsn_tls_queries[field_name]
+                if not cls._has_valid_percent_encoding(parsed.query):
+                    return False
+                query_items = parse_qsl(
+                    parsed.query, keep_blank_values=True, strict_parsing=True
+                )
+                if len(query_items) != 1 or query_items[0][0] != query_key:
+                    return False
+                if query_items[0][1] not in valid_values:
+                    return False
         except ValueError:
             return False
         return True
