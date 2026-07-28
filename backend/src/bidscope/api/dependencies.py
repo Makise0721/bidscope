@@ -1140,7 +1140,7 @@ class _RunError(Exception):
 async def create_run_service(
     settings: Settings,
     clock: Clock | None = None,
-) -> AsyncIterator[tuple[RunService, Any]]:
+) -> AsyncIterator[tuple[RunService, Any, AsyncPostgresSaver]]:
     """Own the API's database engines and durable LangGraph checkpointer.
 
     Checkpoint schema provisioning deliberately remains outside this factory. The
@@ -1172,7 +1172,7 @@ async def create_run_service(
                 clock=resolved_clock,
                 checkpointer_kind="postgres",
             )
-            yield service, engine
+            yield service, engine, checkpointer
     finally:
         sync_engine.dispose()
         await engine.dispose()
