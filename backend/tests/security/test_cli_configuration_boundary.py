@@ -152,4 +152,5 @@ def test_admin_cli_commands_bound_malformed_complex_startup_settings(
     assert "BidScope startup configuration is invalid." in output
     assert "SettingsError" not in output
     assert "JSONDecodeError" not in output
+    assert "Traceback (most recent call last):" not in output
     assert malformed_origins not in output
