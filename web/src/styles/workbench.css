@@ -338,6 +338,66 @@ body {
   gap: 20px;
 }
 
+.app-header-main {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  min-width: 0;
+}
+
+.admin-token-control {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  color: var(--color-muted);
+  font-size: 13px;
+}
+
+.admin-token-control input {
+  width: 180px;
+  min-height: 36px;
+  padding: 7px 9px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-panel);
+  color: var(--color-text);
+}
+
+.admin-token-control .secondary-button {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+}
+
+.admin-token-status {
+  flex-basis: 100%;
+  text-align: right;
+  font-size: 12px;
+}
+
+.status-auth_needed {
+  color: #8a5a00;
+}
+
+@media (max-width: 760px) {
+  .app-header-main,
+  .admin-token-control {
+    width: 100%;
+  }
+
+  .admin-token-control {
+    justify-content: flex-start;
+  }
+
+  .admin-token-status {
+    text-align: left;
+  }
+}
+
 .app-nav {
   display: flex;
   flex-wrap: wrap;

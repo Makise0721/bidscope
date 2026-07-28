@@ -2,15 +2,11 @@ import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Download } from "lucide-react";
-import { getReport, docxUrl } from "../../api/client";
+import { downloadDocx, getReport } from "../../api/client";
 import type { ReportItem, ReportRecord } from "../../api/client";
 import { isAllowedSourceUrl } from "../../api/sourceUrl";
 import { EvidenceDrawer } from "./EvidenceDrawer";
 
-/**
- * Route-bound report view at ``/runs/:runId``. Delegates rendering to the
- * presentational ``RunReport`` once the report is loaded.
- */
 export function RunReportRoute() {
   const { runId } = useParams<{ runId: string }>();
   const { data: report, isLoading } = useQuery({
@@ -31,35 +27,45 @@ export function RunReportRoute() {
 
 interface RunReportProps {
   report: ReportRecord;
-  /**
-   * Run id used to build the DOCX download URL. Optional so this component can
-   * be rendered in isolation (e.g. in tests or inline in the workbench) where
-   * the report id alone is enough.
-   */
   runIdForDownload?: string;
 }
 
-/**
- * Presentational report view. Renders the report header (with DOCX download
- * when a run id is available), the opportunity list, and an "Open evidence"
- * trigger that surfaces the citation/provenance drawer.
- */
 export function RunReport({ report, runIdForDownload }: RunReportProps) {
   const [openItem, setOpenItem] = useState<number | null>(null);
+  const [downloadPending, setDownloadPending] = useState(false);
   const downloadId = runIdForDownload ?? report.run_id;
+
+  const handleDownload = async () => {
+    setDownloadPending(true);
+    try {
+      const blob = await downloadDocx(downloadId);
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = `bidscope-${downloadId}.docx`;
+      link.click();
+      URL.revokeObjectURL(objectUrl);
+    } finally {
+      setDownloadPending(false);
+    }
+  };
 
   return (
     <div className="report" role="region" aria-label="report">
       <div className="report-header">
         <h2>Report</h2>
-        <a
+        <button
           className="icon-button"
-          href={docxUrl(downloadId)}
+          type="button"
+          onClick={() => {
+            void handleDownload().catch(() => undefined);
+          }}
+          disabled={downloadPending}
           aria-label="Download DOCX"
         >
           <Download aria-hidden="true" />
-          Download DOCX
-        </a>
+          {downloadPending ? "Preparing DOCX" : "Download DOCX"}
+        </button>
       </div>
       {report.completeness_warning && (
         <p className="status status-warning" role="status">
@@ -92,8 +98,6 @@ interface OpportunityItemProps {
 }
 
 function OpportunityItem({ item, onOpenEvidence }: OpportunityItemProps) {
-  // Synthetic signal lives on provenance.capture_kind in the richer DTO; fall
-  // back to the legacy item.source marker so older fixtures keep working.
   const captureKind = item.provenance?.capture_kind;
   const isSynthetic =
     (captureKind !== undefined && captureKind.startsWith("synthetic")) ||
@@ -129,4 +133,3 @@ function OpportunityItem({ item, onOpenEvidence }: OpportunityItemProps) {
     </div>
   );
 }
-

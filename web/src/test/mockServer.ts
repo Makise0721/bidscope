@@ -6,6 +6,13 @@ export const REPRESENTATIVE_QUERY =
   "预算 500 万以上的招标信息。";
 
 export const RUN_ID = "11111111-1111-1111-1111-111111111111";
+export const TEST_ADMIN_TOKEN = "test-admin-token";
+
+function unauthorizedResponse(request: Request): Response | undefined {
+  return request.headers.get("X-Admin-Token") === TEST_ADMIN_TOKEN
+    ? undefined
+    : HttpResponse.json({ detail: "invalid admin token" }, { status: 401 });
+}
 
 /**
  * A report payload matching the full backend DTO (`_serialize_report` in
@@ -68,19 +75,9 @@ export const reportWithEvidence = {
 };
 
 export const handlers = [
-  http.post("/api/runs", async () => {
-    await delay(0);
-    return HttpResponse.json({
-      id: RUN_ID,
-      // Honest status: this representative query needs confirmation before the
-      // run proceeds. The Workbench branches on this status rather than
-      // assuming every run requires confirmation.
-      status: "awaiting_confirmation",
-      user_request: REPRESENTATIVE_QUERY,
-    });
-  }),
-
-  http.get("/api/runs/:id", async () => {
+  http.post("/api/runs", async ({ request }) => {
+    const unauthorized = unauthorizedResponse(request);
+    if (unauthorized) return unauthorized;
     await delay(0);
     return HttpResponse.json({
       id: RUN_ID,
@@ -89,18 +86,28 @@ export const handlers = [
     });
   }),
 
-  http.post("/api/runs/:id/confirm", async () => {
+  http.get("/api/runs/:id", async ({ request }) => {
+    const unauthorized = unauthorizedResponse(request);
+    if (unauthorized) return unauthorized;
+    await delay(0);
+    return HttpResponse.json({
+      id: RUN_ID,
+      status: "awaiting_confirmation",
+      user_request: REPRESENTATIVE_QUERY,
+    });
+  }),
+
+  http.post("/api/runs/:id/confirm", async ({ request }) => {
+    const unauthorized = unauthorizedResponse(request);
+    if (unauthorized) return unauthorized;
     await delay(0);
     return HttpResponse.json({ id: RUN_ID, status: "completed" });
   }),
 
-  http.get("/api/runs/:id/events", async () => {
+  http.get("/api/runs/:id/events", async ({ request }) => {
+    const unauthorized = unauthorizedResponse(request);
+    if (unauthorized) return unauthorized;
     await delay(0);
-    // Serve a syntactically valid SSE stream so any test that drives a real
-    // ``running`` phase through MSW (without installing the per-test
-    // FakeEventSource) receives ``text/event-stream`` rather than a JSON body
-    // that would trip EventSource's onerror. Per-test stubs replace the
-    // EventSource constructor directly and bypass this handler.
     const body = [
       "event: intent_parsed",
       "id: 0",
@@ -120,7 +127,9 @@ export const handlers = [
     });
   }),
 
-  http.get("/api/reports/:id", async () => {
+  http.get("/api/reports/:id", async ({ request }) => {
+    const unauthorized = unauthorizedResponse(request);
+    if (unauthorized) return unauthorized;
     await delay(0);
     return HttpResponse.json({
       id: RUN_ID,
@@ -139,7 +148,9 @@ export const handlers = [
     });
   }),
 
-  http.get("/api/reports/:id/docx", async () => {
+  http.get("/api/reports/:id/docx", async ({ request }) => {
+    const unauthorized = unauthorizedResponse(request);
+    if (unauthorized) return unauthorized;
     await delay(0);
     return new HttpResponse(new Uint8Array([0x50, 0x4b]), {
       headers: {

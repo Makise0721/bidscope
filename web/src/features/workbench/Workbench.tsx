@@ -7,6 +7,12 @@ import {
   streamRunEvents,
 } from "../../api/client";
 import type { ReportRecord, RunEvent } from "../../api/client";
+import {
+  getAdminToken,
+  onAdminTokenChange,
+  onUnauthorized,
+  UnauthorizedError,
+} from "../../auth/adminToken";
 import { IntentConfirmation } from "./IntentConfirmation";
 import { RunReport } from "./RunReport";
 import { RunTimeline } from "./RunTimeline";
@@ -15,6 +21,7 @@ import { StatusBadge } from "./StatusBadge";
 export type RunPhase =
   | "idle"
   | "loading"
+  | "auth_needed"
   | "awaiting_confirmation"
   | "running"
   | "completed"
@@ -45,8 +52,7 @@ export function Workbench() {
   const [report, setReport] = useState<ReportRecord | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
 
-  // Track the active SSE unsubscribe so we can tear it down on phase change or
-  // unmount. Ref so the cleanup closure stays stable.
+  // Track the active stream so auth failures and phase changes close it promptly.
   const unsubscribeRef = useRef<(() => void) | null>(null);
 
   const stopSubscription = () => {
@@ -60,22 +66,38 @@ export function Workbench() {
     return () => stopSubscription();
   }, []);
 
+  useEffect(() => {
+    const unsubscribeToken = onAdminTokenChange(() => {
+      if (getAdminToken()) setPhase((current) => (current === "auth_needed" ? "idle" : current));
+    });
+    const unsubscribeUnauthorized = onUnauthorized(() => {
+      stopSubscription();
+      setPhase("auth_needed");
+    });
+    return () => {
+      unsubscribeToken();
+      unsubscribeUnauthorized();
+    };
+  }, []);
+
+  const handleRequestError = (error: unknown) => {
+    stopSubscription();
+    setPhase(error instanceof UnauthorizedError ? "auth_needed" : "failed");
+  };
+
   const mutation = useMutation({
     mutationFn: createRun,
     onSuccess: (run) => {
       setRunId(run.id);
       const nextPhase = phaseFromStatus(run.status);
       setPhase(nextPhase);
-      // If the run already reached terminal "completed" without confirmation,
-      // fetch the report directly (the workbench does not assume every query
-      // requires approval).
       if (nextPhase === "completed") {
-        void getReport(run.id).then(setReport).catch(() => setPhase("failed"));
+        void getReport(run.id).then(setReport).catch(handleRequestError);
       } else if (nextPhase === "running") {
         subscribeToEvents(run.id);
       }
     },
-    onError: () => setPhase("failed"),
+    onError: handleRequestError,
   });
 
   const confirmationMutation = useMutation({
@@ -84,19 +106,15 @@ export function Workbench() {
       const nextPhase = phaseFromStatus(run.status);
       setPhase(nextPhase);
       if (nextPhase === "completed") {
-        void getReport(run.id).then(setReport).catch(() => setPhase("failed"));
+        void getReport(run.id).then(setReport).catch(handleRequestError);
       } else if (nextPhase === "running") {
         subscribeToEvents(run.id);
       }
     },
-    onError: () => setPhase("failed"),
+    onError: handleRequestError,
   });
 
-  /**
-   * Subscribe to the SSE event stream, append ordered node events, and fetch
-   * the report on a terminal "completed" status. The subscription is torn down
-   * when the run reaches a terminal state.
-   */
+  /** Subscribe to progress and fetch the report after a completed terminal event. */
   const subscribeToEvents = (id: string) => {
     stopSubscription();
     setEvents([]);
@@ -105,18 +123,11 @@ export function Workbench() {
       undefined,
       (event) => {
         setEvents((previous) => {
-          // Avoid duplicate seqs on reconnect.
-          if (previous.some((existing) => existing.seq === event.seq)) {
-            return previous;
-          }
+          if (previous.some((existing) => existing.seq === event.seq)) return previous;
           return [...previous, event].sort((a, b) => a.seq - b.seq);
         });
       },
       (status) => {
-        // ``awaiting_confirmation`` is a pausing terminal state: the run will
-        // not progress until the operator approves, so the SSE stream closes
-        // with that status and we surface the confirmation panel. ``completed``
-        // fetches the report; anything else is a failure surface.
         const terminalPhase =
           status === "completed"
             ? "completed"
@@ -125,16 +136,17 @@ export function Workbench() {
               : "failed";
         setPhase(terminalPhase);
         if (status === "completed") {
-          void getReport(id).then(setReport).catch(() => setPhase("failed"));
+          void getReport(id).then(setReport).catch(handleRequestError);
         }
         stopSubscription();
       },
+      handleRequestError,
     );
     unsubscribeRef.current = unsubscribe;
   };
 
   const handleSubmit = () => {
-    if (!query.trim()) return;
+    if (!query.trim() || phase === "auth_needed") return;
     stopSubscription();
     setReport(null);
     setEvents([]);
@@ -172,7 +184,7 @@ export function Workbench() {
           type="button"
           className="icon-button"
           onClick={handleSubmit}
-          disabled={phase === "loading" || !query.trim()}
+          disabled={phase === "loading" || phase === "auth_needed" || !query.trim()}
           aria-label="Search"
         >
           Search
@@ -180,7 +192,12 @@ export function Workbench() {
       </div>
 
       <StatusBadge phase={phase} />
-      {confirmationMutation.isError && (
+      {phase === "auth_needed" && (
+        <p className="status status-error" role="alert">
+          Authentication required. Enter an Admin Token above to continue.
+        </p>
+      )}
+      {confirmationMutation.isError && phase !== "auth_needed" && (
         <p className="status status-error" role="alert">
           Unable to confirm this run. Please try again.
         </p>
