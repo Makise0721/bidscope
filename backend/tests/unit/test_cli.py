@@ -141,6 +141,27 @@ def test_admin_token_min_length_must_be_positive() -> None:
 
 
 @pytest.mark.parametrize("app_mode", ("development", "production"))
+@pytest.mark.parametrize("admin_token", (None, " "))
+def test_strict_settings_reject_missing_or_blank_admin_tokens(
+    app_mode: str, admin_token: str | None
+) -> None:
+    settings = valid_production_settings()
+    settings.update(app_mode=app_mode, admin_token=admin_token)
+
+    with pytest.raises(ValidationError, match="admin_token"):
+        Settings(**settings)
+
+
+@pytest.mark.parametrize("app_mode", ("development", "production"))
+@pytest.mark.parametrize("admin_token", ("a" * 4097, " " * 4097))
+def test_strict_settings_reject_overlong_ascii_or_whitespace_admin_tokens(
+    app_mode: str, admin_token: str
+) -> None:
+    with pytest.raises(ValidationError, match="admin_token"):
+        Settings(app_mode=app_mode, admin_token=admin_token)
+
+
+@pytest.mark.parametrize("app_mode", ("development", "production"))
 @pytest.mark.parametrize(
     ("admin_token", "is_valid"),
     (
@@ -164,8 +185,10 @@ def test_strict_settings_bound_admin_token_by_utf8_byte_length(
 
 
 @pytest.mark.parametrize("app_mode", ("demo", "test"))
-def test_bypass_modes_do_not_limit_admin_token_utf8_byte_length(app_mode: str) -> None:
-    admin_token = "é" * 2049
+@pytest.mark.parametrize("admin_token", ("", " ", "a" * 4097, " " * 4097, "é" * 2049))
+def test_bypass_modes_allow_blank_and_overlong_admin_tokens(
+    app_mode: str, admin_token: str
+) -> None:
 
     settings = Settings(app_mode=app_mode, admin_token=admin_token)
 

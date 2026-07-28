@@ -7,6 +7,7 @@ from bidscope.api.auth import MAX_ADMIN_TOKEN_HEADER_LENGTH, require_admin_token
 from bidscope.config import Settings
 from bidscope.main import create_app
 from fastapi import HTTPException, Request
+from pydantic import ValidationError
 
 ADMIN_TOKEN = "test-admin-token-sentinel-0123456789"
 INVALID_TOKEN = "wrong-admin-token-sentinel"
@@ -106,8 +107,15 @@ async def test_demo_and_test_modes_bypass_admin_token_without_a_header(app_mode:
     await require_admin_token(_request(_settings(app_mode)))
 
 
-async def test_development_without_a_configured_admin_token_fails_closed() -> None:
-    with pytest.raises(HTTPException) as raised:
-        await require_admin_token(_request(_settings("development", admin_token=None)))
+@pytest.mark.parametrize("app_mode", ("development", "production"))
+@pytest.mark.parametrize("configured_token", ("", " "))
+async def test_strict_blank_configured_tokens_cannot_reach_successful_authentication(
+    app_mode: str, configured_token: str
+) -> None:
+    with pytest.raises(ValidationError, match="admin_token"):
+        _settings(app_mode, configured_token)
 
-    assert (raised.value.status_code, raised.value.detail) == (401, "invalid admin token")
+
+async def test_development_without_a_configured_admin_token_fails_at_configuration() -> None:
+    with pytest.raises(ValidationError, match="admin_token"):
+        _settings("development", admin_token=None)

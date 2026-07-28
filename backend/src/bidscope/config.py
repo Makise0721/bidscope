@@ -273,10 +273,17 @@ class Settings(BaseSettings):
             return self
 
         raw_token = self._secret_text(self.admin_token)
+        if raw_token is not None:
+            try:
+                token_bytes = raw_token.encode("utf-8")
+            except UnicodeEncodeError as error:
+                raise ValueError("admin_token must be valid UTF-8") from error
+            if len(token_bytes) > MAX_ADMIN_TOKEN_HEADER_LENGTH:
+                raise ValueError("admin_token exceeds the maximum header byte length")
         if raw_token is None or not raw_token.strip():
             if self.app_mode == "production":
                 raise ValueError("admin_token must be non-empty in production")
-            return self
+            raise ValueError("admin_token must be non-empty in development")
         token = raw_token.strip()
         if self.app_mode == "production":
             normalized_token = token.casefold()
@@ -284,12 +291,6 @@ class Settings(BaseSettings):
                 raise ValueError("admin_token must not be a production placeholder")
             if len(token) < self.admin_token_min_length:
                 raise ValueError("admin_token must meet admin_token_min_length in production")
-        try:
-            token_bytes = raw_token.encode("utf-8")
-        except UnicodeEncodeError as error:
-            raise ValueError("admin_token must be valid UTF-8") from error
-        if len(token_bytes) > MAX_ADMIN_TOKEN_HEADER_LENGTH:
-            raise ValueError("admin_token exceeds the maximum header byte length")
         return self
 
     @model_validator(mode="after")
