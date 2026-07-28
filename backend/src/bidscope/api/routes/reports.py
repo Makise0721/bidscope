@@ -12,6 +12,7 @@ from fastapi.responses import Response
 
 from bidscope.api.auth import require_admin_token
 from bidscope.api.dependencies import RunService
+from bidscope.audit import AuditContext, AuditEventType, AuditOutcome, record_audit_event
 from bidscope.delivery.docx import DeliveryError
 from bidscope.delivery.reports import ReportPersistence
 from bidscope.persistence.models import (
@@ -262,6 +263,35 @@ def _serialize_report(
     }
 
 
+async def _record_report_observation(
+    service: RunService,
+    run_id: str,
+    *,
+    report_id: str,
+    event_type: AuditEventType,
+    object_key: str | None = None,
+) -> None:
+    """Record bounded report observation metadata without blocking the response."""
+    try:
+        async with service.session_factory() as session:
+            await record_audit_event(
+                session,
+                AuditContext(
+                    method="GET" if event_type != AuditEventType.DOCX_RETRIED else "POST",
+                    path=f"/api/reports/{run_id}",
+                    run_id=run_id,
+                    report_id=report_id,
+                ),
+                event_type,
+                AuditOutcome.SUCCESS,
+                {"object_key": object_key} if object_key is not None else {},
+            )
+            await session.commit()
+    except Exception:
+        # Observation audit must not break an otherwise successful read.
+        return
+
+
 async def _fetch_report(
     service: RunService, run_id: str
 ) -> tuple[
@@ -353,6 +383,12 @@ async def get_report(
 ) -> dict[str, Any]:
     """Return a bounded evidence-backed online report JSON DTO."""
     report, items, provenance, citations, claims = await _fetch_report(service, run_id)
+    await _record_report_observation(
+        service,
+        run_id,
+        report_id=str(report.id),
+        event_type=AuditEventType.REPORT_VIEWED,
+    )
     return _serialize_report(report, items, provenance, citations, claims)
 
 
@@ -370,6 +406,13 @@ async def retry_docx(
         export = await persistence.export_docx(persisted)
     except DeliveryError as error:
         raise HTTPException(status_code=503, detail="DOCX export failed") from error
+    await _record_report_observation(
+        service,
+        run_id,
+        report_id=export.report_id,
+        event_type=AuditEventType.DOCX_RETRIED,
+        object_key=export.object_key,
+    )
     return {
         "report_id": export.report_id,
         "docx_object_key": export.object_key,
@@ -389,6 +432,13 @@ async def download_docx(
         data = service.object_store.get_bytes(report.docx_object_key)
     except OSError as error:
         raise HTTPException(status_code=404, detail="DOCX object unavailable") from error
+    await _record_report_observation(
+        service,
+        run_id,
+        report_id=str(report.id),
+        event_type=AuditEventType.DOCX_VIEWED,
+        object_key=report.docx_object_key,
+    )
     filename = f"bidscope-{run_id}.docx"
     return Response(
         content=data,
