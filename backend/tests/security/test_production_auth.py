@@ -119,3 +119,14 @@ async def test_strict_blank_configured_tokens_cannot_reach_successful_authentica
 async def test_development_without_a_configured_admin_token_fails_at_configuration() -> None:
     with pytest.raises(ValidationError, match="admin_token"):
         _settings("development", admin_token=None)
+
+
+async def test_strict_dependency_rejects_missing_configured_admin_token() -> None:
+    request = _request(_settings("development"), ADMIN_TOKEN)
+    request.app.state.settings.admin_token = None
+
+    with pytest.raises(HTTPException) as raised:
+        await require_admin_token(request)
+
+    assert (raised.value.status_code, raised.value.detail) == (401, "invalid admin token")
+    assert ADMIN_TOKEN not in str(raised.value)
