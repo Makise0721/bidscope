@@ -22,6 +22,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session, sessionmaker
 
+from bidscope.audit import AuditContext, AuditEventType, AuditOutcome, record_audit_event
 from bidscope.clock import Clock, SystemClock
 from bidscope.config import Settings
 from bidscope.db import create_engine_and_session
@@ -286,10 +287,19 @@ class RunService:
         return None
 
     async def create_run(
-        self, user_request: str, *, run_key: str | None = None
+        self,
+        user_request: str,
+        *,
+        run_key: str | None = None,
+        audit_context: AuditContext | None = None,
     ) -> tuple[str, bool]:
         """Persist or load a ``pending`` run by its idempotency key."""
-        return await create_run(user_request, run_key=run_key, session_factory=self.session_factory)
+        return await create_run(
+            user_request,
+            run_key=run_key,
+            session_factory=self.session_factory,
+            audit_context=audit_context,
+        )
 
     def schedule_run(self, run_id: str, input: Any) -> asyncio.Task[dict[str, Any]]:  # noqa: ANN401
         """Schedule a run and retain it until its task completes."""
@@ -788,6 +798,7 @@ class RunService:
             "awaiting_confirmation",
             "awaiting confirmation",
             "confirmation claim cancelled",
+            audit_event_type=AuditEventType.RUN_CONFIRMED,
         )
         self._add_claimed_run_id(run_id)
         self._add_claimed_run_token(run_id, token)
@@ -800,6 +811,7 @@ class RunService:
             "retryable",
             "retryable",
             "retry claim cancelled",
+            audit_event_type=AuditEventType.RUN_RETRIED,
         )
         self._add_claimed_run_id(run_id)
         self._add_claimed_run_token(run_id, token)
@@ -911,10 +923,11 @@ class RunService:
         eligible_status: str,
         status_name: str,
         cancellation_message: str,
+        audit_event_type: AuditEventType | None = None,
     ) -> str:
         """Claim a run without leaving a committed token stranded on cancellation."""
         claim = asyncio.create_task(
-            self._claim_run(run_id, eligible_status, status_name),
+            self._claim_run(run_id, eligible_status, status_name, audit_event_type),
         )
         try:
             return await asyncio.shield(claim)
@@ -969,7 +982,13 @@ class RunService:
             execution_token=execution_token,
         )
 
-    async def _claim_run(self, run_id: str, eligible_status: str, status_name: str) -> str:
+    async def _claim_run(
+        self,
+        run_id: str,
+        eligible_status: str,
+        status_name: str,
+        audit_event_type: AuditEventType | None = None,
+    ) -> str:
         """Atomically move an eligible run to ``running`` with a fresh token."""
         async with self.session_factory() as session:
             result = await session.execute(
@@ -983,6 +1002,18 @@ class RunService:
                 .returning(QueryRun.execution_token)
             )
             claimed_token = result.scalar_one_or_none()
+            if claimed_token is not None and audit_event_type is not None:
+                await record_audit_event(
+                    session,
+                    AuditContext(
+                        method="POST",
+                        path=f"/api/runs/{run_id}/{audit_event_type.value.rsplit('.', 1)[-1]}",
+                        run_id=run_id,
+                    ),
+                    audit_event_type,
+                    AuditOutcome.SUCCESS,
+                    {"status": "running"},
+                )
             await session.commit()
 
         if claimed_token is not None:

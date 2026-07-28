@@ -50,6 +50,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.types import Command
 from sqlalchemy.exc import IntegrityError
 
+from bidscope.audit import AuditContext, AuditEventType, AuditOutcome, record_audit_event
 from bidscope.config import Settings, get_settings
 from bidscope.persistence.models import QueryRun, RunEvent
 
@@ -619,6 +620,7 @@ async def create_run(
     *,
     run_key: str | None = None,
     session_factory: Any,
+    audit_context: Any | None = None,
 ) -> tuple[str, bool]:
     """Create or load a run keyed by ``run_key``.
 
@@ -643,6 +645,23 @@ async def create_run(
                 checkpoint_thread_id=_thread_id(run_id),
             )
         )
+        if audit_context is not None:
+            await record_audit_event(
+                session,
+                AuditContext(
+                    request_id=audit_context.request_id,
+                    method=audit_context.method,
+                    path=audit_context.path,
+                    run_id=run_id,
+                    subscription_id=audit_context.subscription_id,
+                    report_id=audit_context.report_id,
+                    snapshot_import_id=audit_context.snapshot_import_id,
+                    error_code=audit_context.error_code,
+                ),
+                AuditEventType.RUN_CREATED,
+                AuditOutcome.SUCCESS,
+                {"status": "pending"},
+            )
         try:
             await session.commit()
         except IntegrityError:

@@ -29,7 +29,7 @@ from bidscope.delivery.objects import LocalObjectStore
 from bidscope.delivery.reports import ReportPersistence
 from bidscope.domain.reports import Report
 from bidscope.main import create_app
-from bidscope.persistence.models import QueryRun
+from bidscope.persistence.models import AuditEvent, QueryRun
 from bidscope.persistence.models import Report as ReportModel
 from fastapi.testclient import TestClient
 
@@ -69,6 +69,17 @@ def test_create_run_returns_pending_then_completes(demo_client: TestClient) -> N
     # The background executor drives the run to a terminal/confirmation state.
     final = _poll_status(client, run_id, "completed")
     assert final["id"] == run_id
+
+    async def _audit_rows() -> list[AuditEvent]:
+        async with client.app.state.run_service.session_factory() as session:
+            result = await session.execute(
+                sa.select(AuditEvent).where(AuditEvent.run_id == run_id)
+            )
+            return list(result.scalars())
+
+    assert client.portal is not None
+    audit_rows = client.portal.call(_audit_rows)
+    assert [row.event_type for row in audit_rows] == ["run.created"]
 
 
 def test_create_run_rejects_empty_request(demo_client: TestClient) -> None:
