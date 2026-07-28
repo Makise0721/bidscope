@@ -12,8 +12,11 @@ RUN npm run build
 # --- Stage 2: production image ---------------------------------------------
 FROM python:3.12-slim AS production
 
-# curl is needed for the container healthcheck.
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
+# curl is needed for the container healthcheck; PostgreSQL client tools are
+# used by the explicit, one-shot backup operations profile.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install uv
@@ -42,7 +45,7 @@ RUN uv pip install --system -e .
 # permission error. The S3 backend writes to MinIO, but the directory is
 # harmless to pre-create and keeps the image usable in local mode.
 RUN useradd --uid 1000 --create-home bidscope \
-    && mkdir -p /app/data/objects \
+    && mkdir -p /app/data/objects /app/data/backups \
     && chown -R bidscope:bidscope /app/data
 USER bidscope
 

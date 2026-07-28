@@ -63,7 +63,7 @@ def test_compose_production_services_share_required_settings_without_literal_sec
     compose = _read("compose.yaml")
 
     assert "x-production-environment: &production-environment" in compose
-    assert compose.count("<<: *production-environment") == 2
+    assert compose.count("<<: *production-environment") == 3
     assert "BIDSCOPE_APP_MODE: production" in compose
     assert "BIDSCOPE_OBJECT_STORE_TYPE: s3" in compose
     assert "BIDSCOPE_APP_MODE: demo" not in compose
@@ -158,6 +158,68 @@ def test_rendered_compose_keeps_infrastructure_unpublished(
         assert environment["BIDSCOPE_MODEL_NAME"] == "model-sentinel"
 
 
+def test_dockerfile_includes_postgres_backup_tools_and_writable_backup_root() -> None:
+    dockerfile = _read("Dockerfile")
+
+    assert "postgresql-client" in dockerfile
+    assert "mkdir -p /app/data/objects /app/data/backups" in dockerfile
+    assert "chown -R bidscope:bidscope /app/data" in dockerfile
+    assert "USER bidscope" in dockerfile
+
+
+def test_compose_backup_service_is_ops_profile_one_shot_and_does_not_change_production_roles(
+) -> None:
+    compose = _read("compose.yaml")
+    backup = _service_block(compose, "backup")
+    api = _service_block(compose, "api")
+    scheduler = _service_block(compose, "scheduler")
+
+    assert 'profiles: ["ops"]' in backup
+    assert (
+        'command: ["bidscope", "ops", "backup", "create", "--retention-class", "daily"]'
+        in backup
+    )
+    assert "./data/backups:/app/data/backups" in backup
+    assert "restart:" not in backup
+    assert "profiles:" not in api
+    assert "profiles:" not in scheduler
+    assert 'command: ["bidscope", "api", "serve", "--host", "0.0.0.0", "--port", "8000"]' in api
+    assert 'command: ["bidscope", "scheduler", "start"]' in scheduler
+
+
+def test_production_example_documents_backup_storage_configuration_without_secrets() -> None:
+    env_example = _read(".env.production.example")
+
+    assert "BIDSCOPE_BACKUP_ROOT=/app/data/backups" in env_example
+    assert "BIDSCOPE_BACKUP_S3_ENABLED=false" in env_example
+    for key in (
+        "BIDSCOPE_BACKUP_S3_ENDPOINT",
+        "BIDSCOPE_BACKUP_S3_REGION",
+        "BIDSCOPE_BACKUP_S3_BUCKET",
+        "BIDSCOPE_BACKUP_S3_PREFIX",
+        "BIDSCOPE_BACKUP_S3_ACCESS_KEY",
+        "BIDSCOPE_BACKUP_S3_SECRET_KEY",
+    ):
+        assert key in env_example
+    assert "BIDSCOPE_BACKUP_S3_SECRET_KEY=change-me" not in env_example
+
+
+def test_production_runbook_covers_backup_lifecycle_and_no_automatic_downgrade() -> None:
+    runbook = _read("docs/runbooks/bidscope-production.md")
+
+    for required_text in (
+        "docker compose --profile ops run --rm backup",
+        "backup verify",
+        "backup prune",
+        "backup restore",
+        "密钥轮换",
+        "scheduler",
+        "不自动 downgrade",
+        "migration",
+    ):
+        assert required_text in runbook
+
+
 def test_compose_requires_preencoded_postgres_dsns_and_keeps_service_credentials() -> None:
     compose = _read("compose.yaml")
 
@@ -175,15 +237,53 @@ def test_compose_requires_preencoded_postgres_dsns_and_keeps_service_credentials
     assert compose.count(
         "BIDSCOPE_DATABASE_URL: ${BIDSCOPE_DATABASE_URL:?set BIDSCOPE_DATABASE_URL to a "
         "pre-encoded PostgreSQL application DSN}"
-    ) == 2
+    ) == 3
     assert compose.count(
         "BIDSCOPE_CHECKPOINT_DATABASE_URL: "
         "${BIDSCOPE_CHECKPOINT_DATABASE_URL:?set BIDSCOPE_CHECKPOINT_DATABASE_URL to a "
         "pre-encoded PostgreSQL checkpoint DSN}"
-    ) == 2
+    ) == 3
     assert "${BIDSCOPE_POSTGRES_PASSWORD}@postgres" not in compose
     assert "postgresql+asyncpg://${BIDSCOPE_POSTGRES_USER}" not in compose
     assert "postgresql+psycopg://${BIDSCOPE_POSTGRES_USER}" not in compose
+
+
+def test_backup_service_is_only_rendered_when_ops_profile_is_enabled(
+    compose_environment: dict[str, str],
+) -> None:
+    if shutil.which("docker") is None:
+        pytest.skip("Docker CLI is unavailable")
+
+    default_result = subprocess.run(
+        ["docker", "compose", "config", "--format", "json"],
+        cwd=REPO_ROOT,
+        env=compose_environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert default_result.returncode == 0, default_result.stderr
+    assert "backup" not in json.loads(default_result.stdout)["services"]
+
+    ops_result = subprocess.run(
+        ["docker", "compose", "--profile", "ops", "config", "--format", "json"],
+        cwd=REPO_ROOT,
+        env=compose_environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert ops_result.returncode == 0, ops_result.stderr
+    services = json.loads(ops_result.stdout)["services"]
+    assert services["backup"]["profiles"] == ["ops"]
+    assert services["backup"]["command"] == [
+        "bidscope",
+        "ops",
+        "backup",
+        "create",
+        "--retention-class",
+        "daily",
+    ]
 
 
 @pytest.fixture

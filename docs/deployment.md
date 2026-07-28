@@ -1,9 +1,26 @@
 # Deployment
 
 **Version:** 2026-07-27
-**Applies to:** BidScope P1-A Compose configuration baseline
+**Applies to:** BidScope P1-A Compose configuration baseline and P1-C operations packaging
 
-## Production Compose Workflow
+For the complete production procedure, including migrations, upgrades/rollback,
+backup verify/prune/restore, key rotation, and scheduler diagnosis, use
+[`docs/runbooks/bidscope-production.md`](runbooks/bidscope-production.md).
+
+The image includes `pg_dump`/`pg_restore` from the distribution
+`postgresql-client` package and creates `/app/data/backups` writable by runtime
+UID 1000. Backups are never a daemon: run the one-shot ops profile explicitly.
+
+```bash
+docker compose --profile ops run --rm backup
+docker compose run --rm api bidscope ops backup verify /app/data/backups/<backup-id>
+docker compose run --rm api bidscope ops backup prune
+```
+
+The `backup` service is not rendered by ordinary `docker compose up`; it is
+available only with `--profile ops`. External backup S3 replication remains
+disabled unless `BIDSCOPE_BACKUP_S3_ENABLED=true` and every
+`BIDSCOPE_BACKUP_S3_*` value is configured in the protected deployment env.
 
 BidScope uses one image for two roles:
 

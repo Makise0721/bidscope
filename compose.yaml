@@ -113,6 +113,35 @@ services:
     healthcheck:
       disable: true
 
+  backup:
+    profiles: ["ops"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["bidscope", "ops", "backup", "create", "--retention-class", "daily"]
+    environment:
+      <<: *production-environment
+      BIDSCOPE_DATABASE_URL: ${BIDSCOPE_DATABASE_URL:?set BIDSCOPE_DATABASE_URL to a pre-encoded PostgreSQL application DSN}
+      BIDSCOPE_CHECKPOINT_DATABASE_URL: ${BIDSCOPE_CHECKPOINT_DATABASE_URL:?set BIDSCOPE_CHECKPOINT_DATABASE_URL to a pre-encoded PostgreSQL checkpoint DSN}
+      BIDSCOPE_BACKUP_ROOT: ${BIDSCOPE_BACKUP_ROOT:-/app/data/backups}
+      BIDSCOPE_BACKUP_S3_ENABLED: ${BIDSCOPE_BACKUP_S3_ENABLED:-false}
+      BIDSCOPE_BACKUP_S3_ENDPOINT: ${BIDSCOPE_BACKUP_S3_ENDPOINT-}
+      BIDSCOPE_BACKUP_S3_REGION: ${BIDSCOPE_BACKUP_S3_REGION:-us-east-1}
+      BIDSCOPE_BACKUP_S3_BUCKET: ${BIDSCOPE_BACKUP_S3_BUCKET-}
+      BIDSCOPE_BACKUP_S3_PREFIX: ${BIDSCOPE_BACKUP_S3_PREFIX:-bidscope-backups}
+      BIDSCOPE_BACKUP_S3_ACCESS_KEY: ${BIDSCOPE_BACKUP_S3_ACCESS_KEY-}
+      BIDSCOPE_BACKUP_S3_SECRET_KEY: ${BIDSCOPE_BACKUP_S3_SECRET_KEY-}
+    volumes:
+      - ./data/backups:/app/data/backups
+      - ./data/objects:/app/data/objects:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
 volumes:
   postgres_data:
   minio_data:
