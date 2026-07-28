@@ -164,6 +164,53 @@ def test_production_database_urls_fail_closed_on_unsafe_structure(
 
 
 @pytest.mark.parametrize(
+    ("field", "value", "secrets"),
+    (
+        (
+            "database_url",
+            "postgresql+asyncpg://user:password@database\t.example.test/bidscope",
+            ("password",),
+        ),
+        (
+            "database_url",
+            "postgresql+asyncpg://user:pass\nword@database.example.test/bidscope",
+            ("pass\nword",),
+        ),
+        (
+            "checkpoint_database_url",
+            "postgresql+psycopg://user:password@database.example.test/bid\rscope",
+            ("password",),
+        ),
+        (
+            "checkpoint_database_url",
+            "postgresql+psycopg://user:password@database.example.test/bidscope?sslmode=require\n",
+            ("password",),
+        ),
+        (
+            "database_url",
+            "postgresql+asyncpg://user:password@database.example.test/bid\x00scope",
+            ("password",),
+        ),
+        (
+            "checkpoint_database_url",
+            "postgresql+psycopg://user:password@database.example.test/bid\x7fscope",
+            ("password",),
+        ),
+    ),
+)
+def test_production_database_urls_reject_raw_control_characters(
+    field: str, value: str, secrets: tuple[str, ...]
+) -> None:
+    settings = valid_production_settings()
+    settings[field] = value
+
+    error = _settings_validation_error(settings)
+
+    assert error.errors(include_context=True)[0]["input"][field] == "**********"
+    assert value not in str(error)
+    _assert_exception_graph_is_secret_free(error, *secrets)
+
+@pytest.mark.parametrize(
     ("field", "value"),
     (
         (

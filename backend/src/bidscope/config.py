@@ -365,6 +365,8 @@ class Settings(BaseSettings):
         """Accept one explicit driver target and its minimal TLS configuration."""
         if not value or value == cls._database_dsn_defaults[field_name]:
             return False
+        if any(ord(character) <= 0x1F or ord(character) == 0x7F for character in value):
+            return False
         try:
             parsed = urlsplit(value)
             if (
