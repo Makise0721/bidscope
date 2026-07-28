@@ -110,6 +110,14 @@ def test_production_rejects_the_implicit_demo_database_urls() -> None:
     ("field", "value"),
     (
         ("database_url", "postgresql+asyncpg://user:password@host.example.test"),
+        (
+            "database_url",
+            "postgresql+asyncpg://user:password@host.example.test:/bidscope",
+        ),
+        (
+            "database_url",
+            "postgresql+asyncpg://user:password@[2001:db8::1]:/bidscope",
+        ),
         ("database_url", "postgresql+asyncpg://user:password@/bidscope"),
         ("database_url", "postgresql+asyncpg://user:password@host.example.test:5432/"),
         (
@@ -128,6 +136,10 @@ def test_production_rejects_the_implicit_demo_database_urls() -> None:
             "checkpoint_database_url",
             "postgresql+asyncpg://user:password@host.example.test:5432/bidscope",
         ),
+        (
+            "checkpoint_database_url",
+            "postgresql+psycopg://user:password@host.example.test:/bidscope",
+        ),
     ),
 )
 def test_production_database_urls_fail_closed_on_unsafe_structure(
@@ -143,12 +155,24 @@ def test_production_database_urls_fail_closed_on_unsafe_structure(
     _assert_exception_graph_is_secret_free(error, "password")
 
 
-def test_production_allows_an_external_database_authority() -> None:
-    settings = Settings(**valid_production_settings())
+@pytest.mark.parametrize("host", ("database.example.test", "[2001:db8::1]"))
+def test_production_allows_an_external_database_authority_without_a_port(host: str) -> None:
+    settings_values = valid_production_settings()
+    settings_values["database_url"] = (
+        "postgresql+asyncpg://bidscope:"
+        f"{DSN_PASSWORD}@{host}/bidscope"
+    )
+    settings_values["checkpoint_database_url"] = (
+        "postgresql+psycopg://bidscope:"
+        f"{CHECKPOINT_PASSWORD}@{host}/bidscope"
+    )
 
-    assert make_url(settings.database_url.get_secret_value()).host == "database.example.test"
+    settings = Settings(**settings_values)
+
+    expected_host = host.removeprefix("[").removesuffix("]")
+    assert make_url(settings.database_url.get_secret_value()).host == expected_host
     checkpoint_url = make_url(settings.checkpoint_database_url.get_secret_value())
-    assert checkpoint_url.host == "database.example.test"
+    assert checkpoint_url.host == expected_host
 
 
 @pytest.mark.parametrize(

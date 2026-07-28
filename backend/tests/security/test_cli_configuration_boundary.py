@@ -100,3 +100,56 @@ def test_admin_cli_commands_mask_invalid_startup_settings(command: tuple[str, ..
     assert "validation error for Settings" not in output
     assert malformed_dsn not in output
     assert "bare-secret" not in output
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        ("checkpoints", "setup"),
+        ("snapshots", "inspect", "."),
+        ("snapshots", "import", "."),
+    ),
+)
+def test_admin_cli_commands_bound_malformed_complex_startup_settings(
+    command: tuple[str, ...]
+) -> None:
+    environment = os.environ.copy()
+    malformed_origins = "not-json"
+    environment.update(
+        {
+            "BIDSCOPE_APP_MODE": "production",
+            "BIDSCOPE_ADMIN_TOKEN": "a" * 32,
+            "BIDSCOPE_OBJECT_STORE_TYPE": "s3",
+            "BIDSCOPE_S3_ENDPOINT": "https://s3.example.test",
+            "BIDSCOPE_S3_BUCKET": "bidscope-prod",
+            "BIDSCOPE_S3_ACCESS_KEY": "access-key",
+            "BIDSCOPE_S3_SECRET_KEY": "secret-key",
+            "BIDSCOPE_ALLOWED_ORIGINS": malformed_origins,
+            "BIDSCOPE_TRUSTED_HOSTS": '["bidscope.example.test"]',
+            "BIDSCOPE_EXTERNAL_SCHEME": "https",
+            "BIDSCOPE_DATABASE_URL": (
+                "postgresql+asyncpg://bidscope:database-password"
+                "@database.example.test:5432/bidscope"
+            ),
+            "BIDSCOPE_CHECKPOINT_DATABASE_URL": (
+                "postgresql+psycopg://bidscope:checkpoint-password"
+                "@database.example.test:5432/bidscope"
+            ),
+        }
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-m", "bidscope.cli", *command],
+        cwd=REPO_ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    output = result.stdout + result.stderr
+    assert "BidScope startup configuration is invalid." in output
+    assert "SettingsError" not in output
+    assert "JSONDecodeError" not in output
+    assert malformed_origins not in output

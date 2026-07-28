@@ -23,6 +23,7 @@ from typing import Annotated, Any
 
 import typer
 from pydantic import ValidationError
+from pydantic_settings import SettingsError
 
 from bidscope.api.dependencies import create_object_store
 from bidscope.clock import SystemClock
@@ -81,7 +82,7 @@ def _require_startup_settings() -> None:
     """Exit without rendering settings validation data or tracebacks."""
     try:
         get_settings()
-    except ValidationError:
+    except (SettingsError, ValidationError):
         typer.echo("BidScope startup configuration is invalid.", err=True)
         raise typer.Exit(code=2) from None
 

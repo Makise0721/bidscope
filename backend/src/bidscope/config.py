@@ -382,9 +382,10 @@ class Settings(BaseSettings):
             ):
                 return False
 
-            userinfo, separator, _ = parsed.netloc.rpartition("@")
+            userinfo, separator, authority = parsed.netloc.rpartition("@")
             if (
                 not separator
+                or authority.endswith(":")
                 or not cls._has_valid_percent_encoding(userinfo)
                 or parsed.username is None
                 or parsed.password is None
