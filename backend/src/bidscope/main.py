@@ -21,6 +21,8 @@ from fastapi.staticfiles import StaticFiles
 
 from bidscope.api.auth import require_admin_token
 from bidscope.api.dependencies import create_run_service
+from bidscope.api.health import ReadinessProbe
+from bidscope.api.health import router as health_router
 from bidscope.api.routes import (
     evaluations,
     events,
@@ -54,10 +56,12 @@ async def lifespan(app: FastAPI) -> Any:
     """Initialize shared resources on startup and tear them down on shutdown."""
     settings: Settings = app.state.settings
     clock = SystemClock()
-    async with create_run_service(settings, clock=clock) as (service, engine):
+    async with create_run_service(settings, clock=clock) as (service, engine, checkpointer):
         app.state.clock = clock
         app.state.run_service = service
         app.state.engine = engine
+        app.state.checkpointer = checkpointer
+        app.state.readiness_probe = ReadinessProbe()
         app.state.fail_next_node = False
         stale_before = clock.now() - timedelta(
             seconds=settings.stale_run_after_seconds
@@ -100,6 +104,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @application.get("/healthz")
     async def healthz() -> dict[str, str]:
         return {"status": "ok", "mode": resolved_settings.app_mode}
+
+    application.include_router(health_router)
 
     @application.get("/metrics", dependencies=[Depends(require_admin_token)])
     async def metrics() -> Response:
