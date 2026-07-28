@@ -109,6 +109,14 @@ def test_production_rejects_the_implicit_demo_database_urls() -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     (
+        (
+            "database_url",
+            "postgresql+asyncpg://user:pa@ss@host.example.test/bidscope",
+        ),
+        (
+            "checkpoint_database_url",
+            "postgresql+psycopg://user:pa@ss@host.example.test/bidscope",
+        ),
         ("database_url", "postgresql+asyncpg://user:password@host.example.test"),
         (
             "database_url",
@@ -152,7 +160,31 @@ def test_production_database_urls_fail_closed_on_unsafe_structure(
 
     assert error.errors(include_context=True)[0]["input"][field] == "**********"
     assert value not in str(error)
-    _assert_exception_graph_is_secret_free(error, "password")
+    _assert_exception_graph_is_secret_free(error, "password", "pa@ss")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        (
+            "database_url",
+            "postgresql+asyncpg://user:pa%40ss@database.example.test/bidscope",
+        ),
+        (
+            "checkpoint_database_url",
+            "postgresql+psycopg://user:pa%40ss@database.example.test/bidscope",
+        ),
+    ),
+)
+def test_production_allows_percent_encoded_dsn_credentials(field: str, value: str) -> None:
+    settings_values = valid_production_settings()
+    settings_values[field] = value
+
+    settings = Settings(**settings_values)
+
+    parsed = make_url(getattr(settings, field).get_secret_value())
+    assert parsed.password == "pa@ss"
+    assert parsed.host == "database.example.test"
 
 
 @pytest.mark.parametrize("host", ("database.example.test", "[2001:db8::1]"))
