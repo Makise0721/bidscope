@@ -17,6 +17,8 @@ function labelFor(phase: RunPhase): string {
   switch (phase) {
     case "loading":
       return "Searching…";
+    case "auth_needed":
+      return "Authentication required";
     case "awaiting_confirmation":
       return "Awaiting confirmation";
     case "running":

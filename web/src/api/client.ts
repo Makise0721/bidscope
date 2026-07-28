@@ -1,32 +1,32 @@
 /** Typed API client for the BidScope backend. */
 
+import {
+  buildAuthHeaders,
+  clearAdminToken,
+  notifyUnauthorized,
+  UnauthorizedError,
+} from "../auth/adminToken";
+
 export const API_BASE = "";
 
 export async function createRun(userRequest: string): Promise<RunRecord> {
-  const response = await fetch(`${API_BASE}/api/runs`, {
+  return requestJson<RunRecord>(`${API_BASE}/api/runs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ user_request: userRequest }),
   });
-  if (!response.ok) {
-    throw new Error(`createRun failed: ${response.status}`);
-  }
-  return response.json();
 }
 
 export async function getRun(id: string): Promise<RunRecord> {
-  const response = await fetch(`${API_BASE}/api/runs/${id}`);
-  if (!response.ok) {
-    throw new Error(`getRun failed: ${response.status}`);
-  }
-  return response.json();
+  return requestJson<RunRecord>(`${API_BASE}/api/runs/${id}`);
 }
 
-async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
-  if (!response.ok) {
-    throw new Error(`request failed: ${response.status}`);
-  }
+export async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetch(url, {
+    ...init,
+    headers: buildAuthHeaders(init.headers),
+  });
+  await assertSuccessful(response);
   return response.json() as Promise<T>;
 }
 
@@ -72,83 +72,193 @@ export async function getEvaluations(): Promise<EvaluationRecord[]> {
 }
 
 export async function confirmRun(id: string): Promise<RunRecord> {
-  const response = await fetch(`${API_BASE}/api/runs/${id}/confirm`, {
+  return requestJson<RunRecord>(`${API_BASE}/api/runs/${id}/confirm`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action: "approve" }),
   });
-  if (!response.ok) {
-    throw new Error(`confirmRun failed: ${response.status}`);
-  }
-  return response.json();
 }
 
 export async function getReport(id: string): Promise<ReportRecord> {
-  const response = await fetch(`${API_BASE}/api/reports/${id}`);
-  if (!response.ok) {
-    throw new Error(`getReport failed: ${response.status}`);
-  }
-  return response.json();
+  return requestJson<ReportRecord>(`${API_BASE}/api/reports/${id}`);
 }
 
 /**
- * Subscribe to the run-events SSE stream.
- *
- * Returns an unsubscribe function that closes the underlying EventSource.
- *
- * SSE reconciliation note: the backend always emits frames with an explicit
- * ``event:`` field (e.g. ``event: intent_parsed``). Per the SSE spec, a frame
- * with an ``event:`` field dispatches a *typed* event on EventSource and does
- * NOT trigger ``onmessage`` (which only fires for unnamed frames). We therefore
- * register an explicit listener per known node event name in addition to the
- * ``terminal`` listener. The ``?after_seq=`` query param is supported by the
- * backend route so browser EventSource (which cannot set Last-Event-ID) can
- * resume after a reconnect.
+ * Subscribe to the run-events SSE stream with an authenticated fetch stream.
+ * The callback is invoked asynchronously for HTTP, decoding, and stream errors.
+ * Malformed SSE payloads remain best-effort and are ignored.
  */
 export function streamRunEvents(
   runId: string,
   afterSeq: number | undefined,
   onEvent: (event: RunEvent) => void,
   onTerminal: (status: string) => void,
+  onError: (error: unknown) => void,
 ): () => void {
   const base = `${API_BASE}/api/runs/${encodeURIComponent(runId)}/events`;
-  const url = afterSeq !== undefined ? `${base}?after_seq=${afterSeq}` : base;
-  const source = new EventSource(url);
-  const dispatch = (message: MessageEvent) => {
-    try {
-      onEvent(JSON.parse(message.data) as RunEvent);
-    } catch {
-      /* ignore malformed payloads; SSE is best-effort */
-    }
+  const url = afterSeq !== undefined ? `${base}?after_seq=${encodeURIComponent(afterSeq)}` : base;
+  const controller = new AbortController();
+  let stopped = false;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    controller.abort();
+    void reader?.cancel();
   };
-  // Unnamed frames (e.g. future "data:" only heartbeats) hit onmessage.
-  source.onmessage = dispatch;
-  // Typed node events from the BidScope graph. Keep this list in sync with the
-  // backend event vocabulary; unknown event names are simply ignored here.
-  for (const type of RUN_EVENT_TYPES) {
-    source.addEventListener(type, dispatch as EventListener);
-  }
-  source.addEventListener(
-    "terminal",
-    ((message: MessageEvent) => {
-      try {
-        const payload = JSON.parse(message.data) as { status: string };
-        onTerminal(payload.status);
-      } catch {
-        /* ignore */
-      }
-      source.close();
-    }) as EventListener,
+
+  void consumeEventStream(
+    url,
+    controller,
+    (nextReader) => {
+      reader = nextReader;
+    },
+    (event) => {
+      if (!stopped) onEvent(event);
+    },
+    (status) => {
+      if (stopped) return;
+      stopped = true;
+      onTerminal(status);
+      controller.abort();
+      void reader?.cancel();
+    },
+    (error) => {
+      if (!stopped) onError(error);
+    },
   );
-  source.onerror = () => source.close();
-  return () => source.close();
+
+  return stop;
 }
 
-/**
- * Node-event names emitted by the BidScope graph that the workbench timeline
- * surfaces. Limited to the names the backend persists today so we register a
- * bounded set of typed listeners on EventSource.
- */
+async function consumeEventStream(
+  url: string,
+  controller: AbortController,
+  setReader: (reader: ReadableStreamDefaultReader<Uint8Array>) => void,
+  onEvent: (event: RunEvent) => void,
+  onTerminal: (status: string) => void,
+  onError: (error: unknown) => void,
+): Promise<void> {
+  try {
+    const response = await fetch(url, {
+      headers: buildAuthHeaders({ Accept: "text/event-stream" }),
+      signal: controller.signal,
+    });
+    if (response.status === 401) {
+      clearAdminToken();
+      notifyUnauthorized();
+      throw new UnauthorizedError();
+    }
+    if (!response.ok) {
+      throw new Error(`streamRunEvents failed: ${response.status}`);
+    }
+    if (!response.body) {
+      throw new Error("streamRunEvents failed: empty response body");
+    }
+
+    const reader = response.body.getReader();
+    setReader(reader);
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let done = false;
+
+    while (!done) {
+      const result = await reader.read();
+      done = result.done;
+      if (result.value) buffer += decoder.decode(result.value, { stream: !done });
+      for (;;) {
+        const frameEnd = findSseFrameEnd(buffer);
+        if (frameEnd === -1) break;
+        const [frame, remaining] = splitSseFrame(buffer, frameEnd);
+        buffer = remaining;
+        if (dispatchSseFrame(frame, onEvent, onTerminal)) return;
+      }
+    }
+
+    buffer += decoder.decode();
+    if (buffer.trim()) {
+      dispatchSseFrame(buffer, onEvent, onTerminal);
+    }
+  } catch (error) {
+    if (!isAbortError(error)) onError(error);
+  }
+}
+
+function findSseFrameEnd(buffer: string): number {
+  for (let index = 0; index < buffer.length; index += 1) {
+    if (buffer[index] === "\n" && buffer[index + 1] === "\n") return index + 2;
+    if (buffer[index] === "\r" && buffer[index + 1] === "\n" && buffer[index + 2] === "\r" && buffer[index + 3] === "\n") {
+      return index + 4;
+    }
+  }
+  return -1;
+}
+
+function splitSseFrame(buffer: string, frameEnd: number): [string, string] {
+  const separatorLength = buffer[frameEnd - 4] === "\r" ? 4 : 2;
+  return [buffer.slice(0, frameEnd - separatorLength), buffer.slice(frameEnd)];
+}
+
+function dispatchSseFrame(
+  frame: string,
+  onEvent: (event: RunEvent) => void,
+  onTerminal: (status: string) => void,
+): boolean {
+  let eventType = "message";
+  const data: string[] = [];
+  for (const line of frame.split(/\r\n|\n|\r/)) {
+    if (!line || line.startsWith(":")) continue;
+    const separator = line.indexOf(":");
+    const field = separator === -1 ? line : line.slice(0, separator);
+    const value = separator === -1 ? "" : line.slice(separator + 1).replace(/^ /, "");
+    if (field === "event") eventType = value;
+    if (field === "data") data.push(value);
+  }
+  if (!data.length) return false;
+
+  const payload = data.join("\n");
+  try {
+    if (eventType === "terminal") {
+      const terminal = JSON.parse(payload) as { status?: unknown; terminal?: unknown };
+      if (typeof terminal.status === "string") {
+        onTerminal(terminal.status);
+        return true;
+      }
+      return false;
+    }
+    if (eventType !== "message" && !RUN_EVENT_TYPES.includes(eventType as (typeof RUN_EVENT_TYPES)[number])) {
+      return false;
+    }
+    onEvent(JSON.parse(payload) as RunEvent);
+  } catch {
+    /* Ignore malformed payloads; SSE is best-effort. */
+  }
+  return false;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+async function assertSuccessful(response: Response): Promise<void> {
+  if (response.ok) return;
+  if (response.status === 401) {
+    clearAdminToken();
+    notifyUnauthorized();
+    throw new UnauthorizedError();
+  }
+  throw new Error(`request failed: ${response.status}`);
+}
+
+export async function downloadDocx(id: string): Promise<Blob> {
+  const response = await fetch(`${API_BASE}/api/reports/${encodeURIComponent(id)}/docx`, {
+    headers: buildAuthHeaders(),
+  });
+  await assertSuccessful(response);
+  return response.blob();
+}
+
 export const RUN_EVENT_TYPES = [
   "intent_parsed",
   "intent_valid",
@@ -158,10 +268,6 @@ export const RUN_EVENT_TYPES = [
   "run_failed",
   "evidence_insufficient",
 ] as const;
-
-export function docxUrl(id: string): string {
-  return `${API_BASE}/api/reports/${id}/docx`;
-}
 
 export interface RunRecord {
   id: string;
