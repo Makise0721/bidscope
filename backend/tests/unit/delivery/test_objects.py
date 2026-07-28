@@ -143,6 +143,9 @@ def test_storage_factory_passes_configured_s3_region(monkeypatch: pytest.MonkeyP
     create_object_store(settings)
 
     assert captured["region_name"] == "eu-west-2"
+    assert captured["connect_timeout"] == settings.s3_connect_timeout_seconds
+    assert captured["read_timeout"] == settings.s3_read_timeout_seconds
+    assert captured["max_attempts"] == settings.s3_max_attempts
 
 
 def test_storage_factory_uses_local_root_in_demo(tmp_path: Path) -> None:

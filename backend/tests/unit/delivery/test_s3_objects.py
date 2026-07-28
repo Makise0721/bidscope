@@ -161,6 +161,23 @@ def test_store_builds_client_with_explicit_credentials_when_not_injected() -> No
         assert kwargs.get("region_name") == "us-east-1"
 
 
+def test_store_builds_botocore_config_with_bounded_s3_runtime_options() -> None:
+    with mock.patch("boto3.client") as boto_client:
+        boto_client.return_value = _FakeS3Client()
+        S3ObjectStore(
+            bucket="bidscope",
+            connect_timeout=13,
+            read_timeout=29,
+            max_attempts=4,
+        )
+
+        _, kwargs = boto_client.call_args
+        config = kwargs["config"]
+        assert config.connect_timeout == 13
+        assert config.read_timeout == 29
+        assert config.retries == {"mode": "standard", "max_attempts": 4}
+
+
 def test_ensure_bucket_creates_missing_bucket_then_succeeds() -> None:
     """ensure_bucket creates a missing bucket and is a no-op once it exists."""
     client = _FakeS3Client()

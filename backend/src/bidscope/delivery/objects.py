@@ -82,12 +82,16 @@ class S3ObjectStore:
         aws_access_key_id: str | None = None,
         aws_secret_access_key: str | None = None,
         region_name: str = "us-east-1",
+        connect_timeout: int = 5,
+        read_timeout: int = 60,
+        max_attempts: int = 3,
         client: Any = None,
     ) -> None:
         if client is not None:
             self.client: Any = client
         else:
             import boto3  # type: ignore[import-untyped]
+            from botocore.config import Config  # type: ignore[import-untyped]
 
             self.client = boto3.client(
                 "s3",
@@ -95,6 +99,11 @@ class S3ObjectStore:
                 aws_access_key_id=aws_access_key_id,
                 aws_secret_access_key=aws_secret_access_key,
                 region_name=region_name,
+                config=Config(
+                    connect_timeout=connect_timeout,
+                    read_timeout=read_timeout,
+                    retries={"mode": "standard", "max_attempts": max_attempts},
+                ),
             )
         self.bucket = bucket
         self.prefix = prefix.strip("/")

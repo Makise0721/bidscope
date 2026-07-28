@@ -255,6 +255,20 @@ class Settings(BaseSettings):
     #: Optional logical key prefix applied to every stored object (e.g.
     #: ``imports/2026``). Defaults to no prefix.
     s3_prefix: str = ""
+    db_pool_size: int = Field(default=10, gt=0)
+    db_max_overflow: int = Field(default=20, gt=0)
+    db_pool_recycle_seconds: int = Field(default=1800, gt=0)
+    db_connect_timeout_seconds: int = Field(default=5, gt=0)
+    db_command_timeout_seconds: int = Field(default=30, gt=0)
+    s3_connect_timeout_seconds: int = Field(default=5, gt=0)
+    s3_read_timeout_seconds: int = Field(default=60, gt=0)
+    s3_max_attempts: int = Field(default=3, gt=0)
+    max_concurrent_runs: int = Field(default=4, gt=0)
+    max_request_body_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
+    max_sse_connections: int = Field(default=100, gt=0)
+    max_report_items: int = Field(default=100, gt=0)
+    graceful_shutdown_seconds: int = Field(default=30, gt=0)
+    scheduler_tick_timeout_seconds: int = Field(default=25, gt=0)
     stale_run_after_seconds: int = Field(default=300, gt=0)
     run_heartbeat_seconds: int = Field(default=30, gt=0)
     #: Token required by the ``/api/test-controls/*`` routes. Those routes are
@@ -265,6 +279,14 @@ class Settings(BaseSettings):
     def validate_run_heartbeat_interval(self) -> Settings:
         if self.run_heartbeat_seconds >= self.stale_run_after_seconds:
             raise ValueError("run_heartbeat_seconds must be less than stale_run_after_seconds")
+        return self
+
+    @model_validator(mode="after")
+    def validate_shutdown_timeout(self) -> Settings:
+        if self.scheduler_tick_timeout_seconds >= self.graceful_shutdown_seconds:
+            raise ValueError(
+                "scheduler_tick_timeout_seconds must be less than graceful_shutdown_seconds"
+            )
         return self
 
     @model_validator(mode="after")

@@ -125,6 +125,55 @@ def test_settings_default_to_safe_nonproduction_configuration() -> None:
     assert settings.s3_region == "us-east-1"
 
 
+def test_settings_default_to_bounded_runtime_limits() -> None:
+    settings = Settings()
+
+    assert settings.db_pool_size > 0
+    assert settings.db_max_overflow > 0
+    assert settings.db_pool_recycle_seconds > 0
+    assert settings.db_connect_timeout_seconds > 0
+    assert settings.db_command_timeout_seconds > 0
+    assert settings.s3_connect_timeout_seconds > 0
+    assert settings.s3_read_timeout_seconds > 0
+    assert settings.s3_max_attempts > 0
+    assert settings.max_concurrent_runs > 0
+    assert settings.max_request_body_bytes > 0
+    assert settings.max_sse_connections > 0
+    assert settings.max_report_items > 0
+    assert settings.graceful_shutdown_seconds > settings.scheduler_tick_timeout_seconds
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    (
+        "db_pool_size",
+        "db_max_overflow",
+        "db_pool_recycle_seconds",
+        "db_connect_timeout_seconds",
+        "db_command_timeout_seconds",
+        "s3_connect_timeout_seconds",
+        "s3_read_timeout_seconds",
+        "s3_max_attempts",
+        "max_concurrent_runs",
+        "max_request_body_bytes",
+        "max_sse_connections",
+        "max_report_items",
+        "graceful_shutdown_seconds",
+        "scheduler_tick_timeout_seconds",
+    ),
+)
+def test_runtime_limits_must_be_positive(field_name: str) -> None:
+    with pytest.raises(ValidationError, match=field_name):
+        Settings(**{field_name: 0})
+
+
+def test_graceful_shutdown_must_cover_scheduler_tick_timeout() -> None:
+    with pytest.raises(ValidationError, match="scheduler_tick_timeout_seconds"):
+        Settings(graceful_shutdown_seconds=10, scheduler_tick_timeout_seconds=10)
+    with pytest.raises(ValidationError, match="scheduler_tick_timeout_seconds"):
+        Settings(graceful_shutdown_seconds=10, scheduler_tick_timeout_seconds=11)
+
+
 def test_test_mode_keeps_safe_local_defaults() -> None:
     settings = Settings(app_mode="test")
 

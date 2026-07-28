@@ -80,6 +80,9 @@ def create_object_store(settings: Settings) -> ObjectStore:
                 else None
             ),
             region_name=settings.s3_region,
+            connect_timeout=settings.s3_connect_timeout_seconds,
+            read_timeout=settings.s3_read_timeout_seconds,
+            max_attempts=settings.s3_max_attempts,
         )
     return LocalObjectStore(root=settings.object_store_root)
 
