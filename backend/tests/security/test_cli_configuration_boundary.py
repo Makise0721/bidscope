@@ -15,6 +15,10 @@ DSN_PASSWORD = "cli-boundary-dsn-password-51f0"
 
 def test_api_cli_masks_invalid_production_database_url_in_process_output() -> None:
     environment = os.environ.copy()
+    unsafe_database_url = (
+        "postgresql+asyncpg://bidscope:"
+        f"{DSN_PASSWORD}@database.example.test:5432/bidscope?host=override.example.test"
+    )
     environment.update(
         {
             "BIDSCOPE_APP_MODE": "production",
@@ -27,10 +31,7 @@ def test_api_cli_masks_invalid_production_database_url_in_process_output() -> No
             "BIDSCOPE_ALLOWED_ORIGINS": '["https://bidscope.example.test"]',
             "BIDSCOPE_TRUSTED_HOSTS": '["bidscope.example.test"]',
             "BIDSCOPE_EXTERNAL_SCHEME": "https",
-            "BIDSCOPE_DATABASE_URL": (
-                "postgresql+asyncpg://bidscope:"
-                f"{DSN_PASSWORD}@database.example.test:5432/bidscope?host=override.example.test"
-            ),
+            "BIDSCOPE_DATABASE_URL": unsafe_database_url,
             "BIDSCOPE_CHECKPOINT_DATABASE_URL": (
                 "postgresql+psycopg://bidscope:checkpoint-password"
                 "@database.example.test:5432/bidscope"
@@ -39,7 +40,7 @@ def test_api_cli_masks_invalid_production_database_url_in_process_output() -> No
     )
 
     result = subprocess.run(
-        [sys.executable, "-c", "from bidscope.cli import api_serve; api_serve()"],
+        [sys.executable, "-m", "bidscope.cli", "api", "serve"],
         cwd=REPO_ROOT,
         env=environment,
         check=False,
@@ -47,8 +48,14 @@ def test_api_cli_masks_invalid_production_database_url_in_process_output() -> No
         text=True,
     )
 
-    assert result.returncode != 0
+    assert result.returncode == 2
     output = result.stdout + result.stderr
+    assert "BidScope startup configuration is invalid." in output
+    assert "SettingsError" not in output
+    assert "JSONDecodeError" not in output
+    assert "ValidationError" not in output
+    assert "Traceback (most recent call last):" not in output
+    assert unsafe_database_url not in output
     assert DSN_PASSWORD not in output
     assert "database.example.test" not in output
 
