@@ -201,7 +201,15 @@ def snapshots_import(
 def _build_backup_service() -> BackupService:
     _require_startup_settings()
     settings = get_settings()
-    return BackupService(backup_root=getattr(settings, "backup_root", "data/backups"))
+    return BackupService(
+        backup_root=getattr(settings, "backup_root", "data/backups"),
+        database_urls={
+            "application": settings.database_dsn(),
+            "checkpoint": settings.checkpoint_database_dsn(),
+        },
+        object_store=create_object_store(settings),
+        tool_timeout=getattr(settings, "backup_tool_timeout_seconds", 900),
+    )
 
 
 def _backup_error(error: BackupError, json_output: bool) -> None:

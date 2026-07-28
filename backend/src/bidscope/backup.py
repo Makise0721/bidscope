@@ -12,9 +12,11 @@ import hashlib
 import json
 import shutil
 import subprocess
+import uuid
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 from urllib.parse import unquote, urlsplit
 
 from pydantic import AwareDatetime, BaseModel, Field, ValidationError
@@ -238,12 +240,18 @@ class BackupService:
         command_runner: CommandRunner | None = None,
         database_inspector: DatabaseInspector | None = None,
         object_store: Any = None,
+        database_urls: Mapping[str, str] | None = None,
+        app_version: str = "0.1.0",
+        git_commit: str = "unknown",
         tool_timeout: int = 900,
     ) -> None:
         self.backup_root = Path(backup_root)
         self.command_runner = command_runner or _SubprocessRunner()
         self.database_inspector = database_inspector or _PostgresInspector()
         self.object_store = object_store
+        self.database_urls = dict(database_urls or {})
+        self.app_version = app_version
+        self.git_commit = git_commit
         self.tool_timeout = tool_timeout
 
     def restore(
@@ -383,12 +391,116 @@ class BackupService:
         return {"status": "pruned", "deleted_count": 0}
 
     def create(self, retention_class: str = "daily") -> dict[str, Any]:
-        if retention_class not in {"daily", "weekly"}:
+        retention = retention_class
+        if retention not in {"daily", "weekly"}:
             raise BackupError(
                 "backup_retention_class_invalid",
                 "retention class must be daily or weekly",
             )
-        raise BackupError("backup_creation_unavailable", "backup creation core is not available")
+        if not self.database_urls:
+            raise BackupError(
+                "backup_configuration_missing",
+                "backup database configuration is missing",
+            )
+
+        self.backup_root.mkdir(parents=True, exist_ok=True)
+        backup_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
+        backup_dir = self.backup_root / backup_id
+        backup_dir.mkdir()
+        try:
+            parsed: dict[str, dict[str, str]] = {
+                role: _parse_database_url(url) for role, url in self.database_urls.items()
+            }
+            distinct: dict[tuple[str, str, str], tuple[str, dict[str, str]]] = {}
+            for role, parts in parsed.items():
+                distinct.setdefault(_database_identity(parts), (role, parts))
+
+            database_dumps: dict[str, str] = {}
+            dump_hashes: dict[str, str] = {}
+            revisions: dict[str, str] = {}
+            for index, (_identity, (first_role, parts)) in enumerate(distinct.items()):
+                filename = "application.dump" if index == 0 else f"{first_role}.dump"
+                dump_path = backup_dir / filename
+                args = [
+                    "pg_dump",
+                    "--format=custom",
+                    "--file",
+                    str(dump_path),
+                    parts["database"],
+                ]
+                self.command_runner(
+                    args,
+                    env=_command_database_env(parts),
+                    timeout=self.tool_timeout,
+                )
+                if not dump_path.is_file():
+                    raise BackupError("backup_dump_missing", "database dump was not created")
+                digest = sha256_file(dump_path)
+                revision = self.database_inspector.current_revision(
+                    _format_database_url(parts)
+                )
+                roles = [
+                    role
+                    for role, role_parts in parsed.items()
+                    if _database_identity(role_parts) == _identity
+                ]
+                for role in roles:
+                    database_dumps[role] = filename
+                    dump_hashes[role] = digest
+                    revisions[role] = revision
+
+            objects: list[BackupObject] = []
+            if self.object_store is not None:
+                archive_dir = backup_dir / "objects"
+                archive_dir.mkdir()
+                for index, key in enumerate(self.object_store.list_keys(), start=1):
+                    _safe_object_key(key)
+                    data = self.object_store.get_bytes(key)
+                    archive_path = archive_dir / f"object-{index:06d}.bin"
+                    archive_path.write_bytes(data)
+                    objects.append(
+                        BackupObject(
+                            key=key,
+                            archive_path=archive_path.relative_to(backup_dir).as_posix(),
+                            size=len(data),
+                            sha256=hashlib.sha256(data).hexdigest(),
+                        )
+                    )
+
+            manifest = BackupManifest(
+                backup_version="p1-v1",
+                backup_id=backup_id,
+                created_at=datetime.now(UTC),
+                app_version=self.app_version,
+                git_commit=self.git_commit,
+                migration_revisions=revisions,
+                database_dumps=database_dumps,
+                database_dump_sha256=dump_hashes,
+                objects=objects,
+                counts={"databases": len(distinct), "objects": len(objects)},
+                retention_class=cast(Literal["daily", "weekly"], retention),
+            )
+            manifest_path = backup_dir / "manifest.json"
+            temporary_manifest = backup_dir / ".manifest.json.tmp"
+            temporary_manifest.write_text(
+                json.dumps(manifest.model_dump(mode="json"), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            temporary_manifest.replace(manifest_path)
+            verify_manifest(backup_dir, self.backup_root)
+            return {
+                "status": "verified",
+                "backup_id": backup_id,
+                "path": str(backup_dir),
+                "object_count": len(objects),
+                "database_count": len(distinct),
+            }
+        except BackupError:
+            shutil.rmtree(backup_dir, ignore_errors=True)
+            raise
+        except Exception as error:
+            shutil.rmtree(backup_dir, ignore_errors=True)
+            raise BackupError("backup_creation_failed", "backup creation failed") from error
 
 
 def _format_database_url(parts: Mapping[str, str]) -> str:
