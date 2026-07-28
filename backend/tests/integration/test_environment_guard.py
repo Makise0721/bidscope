@@ -37,7 +37,11 @@ def _call_guard_with_env(overrides: dict[str, str]) -> None:
 def test_non_test_app_mode_is_rejected() -> None:
     with pytest.raises(_GUARD_FAILURE):
         _call_guard_with_env(
-            {"BIDSCOPE_APP_MODE": "development", "BIDSCOPE_DATABASE_URL": "postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test"}
+            {
+                "BIDSCOPE_APP_MODE": "development",
+                "BIDSCOPE_ADMIN_TOKEN": "development-test-token",
+                "BIDSCOPE_DATABASE_URL": "postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope_test",
+            }
         )
 
 
@@ -106,8 +110,8 @@ def test_valid_test_environment_is_accepted() -> None:
     )
 
 
-def test_fail_closed_message_mentions_required_suffix() -> None:
-    """The rejection message must tell the user what database name is required."""
+def test_fail_closed_message_is_constant_and_secret_free() -> None:
+    """The rejection message must not disclose the required database suffix."""
     from bidscope.config import get_settings
 
     get_settings.cache_clear()
@@ -119,7 +123,7 @@ def test_fail_closed_message_mentions_required_suffix() -> None:
         ):
             with pytest.raises(_GUARD_FAILURE) as error:
                 enforce_test_environment()
-            assert "_test" in str(error.value) or "_e2e" in str(error.value)
+            assert str(error.value) == "Integration test database URLs are invalid or mismatched."
     finally:
         get_settings.cache_clear()
 
