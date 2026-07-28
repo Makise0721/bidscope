@@ -34,6 +34,26 @@ logger = logging.getLogger(__name__)
 TICK_MINUTES = 1
 KEY_NEXT_RUN_AT = "__next_run_at"
 
+#: Timestamp of the last successful scheduler tick (set after due subscriptions
+#: are processed without error).  Exposed via :func:`get_last_successful_tick`
+#: and :func:`get_scheduler_health` for readiness probes.
+_last_successful_tick: datetime | None = None
+
+
+def get_last_successful_tick() -> datetime | None:
+    """Return the timestamp of the last successful scheduler tick."""
+    return _last_successful_tick
+
+
+def get_scheduler_health() -> dict[str, Any]:
+    """Return a scheduler health summary for readiness probes."""
+    return {
+        "last_successful_tick": (
+            _last_successful_tick.isoformat() if _last_successful_tick else None
+        ),
+        "tick_timeout_seconds": get_settings().scheduler_tick_timeout_seconds,
+    }
+
 
 def _as_utc(value: datetime) -> datetime:
     """Normalize naive or offset-aware datetimes for due comparisons."""
@@ -297,6 +317,16 @@ async def run_scheduler_tick(
                     ).inc()
                 except Exception:
                     logger.warning("metrics_tick_due_failed", exc_info=True)
+                global _last_successful_tick  # noqa: PLW0603
+                _last_successful_tick = datetime.now(UTC)
+                logger.info(
+                    "scheduler_tick_completed",
+                    extra={
+                        "due": len(due),
+                        "ran": result.get("ran", 0),
+                        "failed": result.get("failed", 0),
+                    },
+                )
                 return result
         finally:
             sync_engine.dispose()
