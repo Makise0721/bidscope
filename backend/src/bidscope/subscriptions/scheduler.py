@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
@@ -25,6 +26,8 @@ from bidscope.api.dependencies import create_object_store
 from bidscope.config import Settings, get_settings
 from bidscope.db import create_engine_and_session
 from bidscope.persistence.models import Subscription
+
+logger = logging.getLogger(__name__)
 
 #: One-minute tick, matching the documented APScheduler schedule.
 TICK_MINUTES = 1
@@ -285,11 +288,21 @@ async def run_scheduler_tick(
             sync_engine.dispose()
     finally:
         await engine.dispose()
-
-
 def _tick(settings: Settings) -> None:
     """Run one async scheduler tick from APScheduler's sync worker."""
-    asyncio.run(run_scheduler_tick(settings))
+    resolved = settings or get_settings()
+    try:
+        asyncio.run(
+            asyncio.wait_for(
+                run_scheduler_tick(settings),
+                timeout=resolved.scheduler_tick_timeout_seconds,
+            )
+        )
+    except TimeoutError:
+        logger.warning("scheduler_tick_timeout")
+    except Exception:
+        logger.warning("scheduler_tick_failed")
+        raise
 
 
 def start_scheduler(settings: Settings | None = None) -> Any:

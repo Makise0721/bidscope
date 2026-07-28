@@ -17,6 +17,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from bidscope.api.auth import require_admin_token
 from bidscope.api.dependencies import RunService
+from bidscope.observability import METRICS_REGISTRY
 from bidscope.persistence.models import RunEvent
 
 router = APIRouter(
@@ -78,6 +79,13 @@ async def stream_events(
 
     last_event_id = _parse_last_event_id(request)
 
+    max_connections = getattr(service.settings, "max_sse_connections", 100)
+    active = int(getattr(request.app.state, "active_sse_connections", 0))
+    if active >= max_connections:
+        raise HTTPException(status_code=429, detail="sse connection capacity exhausted")
+    request.app.state.active_sse_connections = active + 1
+    METRICS_REGISTRY.increment_gauge("bidscope_sse_connections")
+
     async def event_generator() -> Any:
         after_seq = last_event_id
         next_heartbeat_at = asyncio.get_running_loop().time() + HEARTBEAT_INTERVAL
@@ -105,7 +113,16 @@ async def stream_events(
             except asyncio.CancelledError:
                 return
 
-    return EventSourceResponse(event_generator())
+    async def tracked_generator() -> Any:
+        try:
+            async for item in event_generator():
+                yield item
+        finally:
+            current = int(getattr(request.app.state, "active_sse_connections", 1))
+            request.app.state.active_sse_connections = max(0, current - 1)
+            METRICS_REGISTRY.decrement_gauge("bidscope_sse_connections")
+
+    return EventSourceResponse(tracked_generator())
 
 
 def _parse_last_event_id(request: Request) -> int:
