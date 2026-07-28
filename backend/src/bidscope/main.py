@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -33,6 +35,16 @@ from bidscope.config import Settings, get_settings
 from bidscope.graph.executor import mark_stale_runs_retryable
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _cors_origins(settings: Settings) -> list[str]:
+    """Return configured web origins without paths, credentials, or default ports."""
+    origins: list[str] = []
+    for origin in settings.allowed_origins:
+        default_port = 443 if origin.scheme == "https" else 80
+        port = "" if origin.port == default_port else f":{origin.port}"
+        origins.append(f"{origin.scheme}://{origin.host}{port}")
+    return origins
 
 
 @asynccontextmanager
@@ -63,6 +75,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     resolved_settings = settings or get_settings()
     application = FastAPI(title="BidScope", version="0.1.0", lifespan=lifespan)
     application.state.settings = resolved_settings
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins(resolved_settings),
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=[
+            "Content-Type",
+            "Idempotency-Key",
+            "Last-Event-ID",
+            "X-Admin-Token",
+        ],
+    )
+    if resolved_settings.trusted_hosts:
+        application.add_middleware(
+            TrustedHostMiddleware, allowed_hosts=resolved_settings.trusted_hosts
+        )
 
     @application.get("/healthz")
     async def healthz() -> dict[str, str]:
