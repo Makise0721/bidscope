@@ -30,12 +30,14 @@ import pytest
 import pytest_asyncio
 import sqlalchemy as sa
 from bidscope.api.dependencies import RunService, build_demo_graph
+from bidscope.api.routes.subscriptions import pause_subscription, resume_subscription
 from bidscope.clock import FixedClock
 from bidscope.config import Settings, get_settings
 from bidscope.db import create_engine_and_session
 from bidscope.delivery.objects import LocalObjectStore
 from bidscope.graph.executor import _to_plain_dsn
 from bidscope.persistence.models import (
+    AuditEvent,
     InboxEvent,
     QueryRun,
     Subscription,
@@ -231,6 +233,27 @@ async def test_subscription_requires_completed_confirmed_scheduled_run(
     assert next_run_raw
     next_run = datetime.fromisoformat(next_run_raw)
     assert next_run.tzinfo is not None
+
+    paused = await pause_subscription(sub.id, service)
+    assert paused == {"id": sub.id, "status": "paused"}
+    resumed = await resume_subscription(sub.id, service)
+    assert resumed == {"id": sub.id, "status": "active"}
+
+    async with run_service.session_factory() as session:
+        events = (
+            await session.execute(
+                sa.select(AuditEvent)
+                .where(AuditEvent.subscription_id == str(sub.id))
+                .order_by(AuditEvent.occurred_at, AuditEvent.id)
+            )
+        ).scalars().all()
+
+    assert [event.event_type for event in events] == [
+        "subscription.created",
+        "subscription.paused",
+        "subscription.resumed",
+    ]
+    assert all("user_request" not in event.details for event in events)
 
 
 # ------------------------------------------------------- execution + report ---

@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 
+from bidscope.audit import AuditContext, AuditEventType, AuditOutcome, record_audit_event
 from bidscope.delivery.reports import PersistedReport, ReportPersistence
 from bidscope.domain.intents import SearchIntent
 from bidscope.persistence.models import (
@@ -467,6 +468,21 @@ class SubscriptionService:
                 trigger_key=str(uuid.uuid4()),
             )
             session.add(subscription)
+            await record_audit_event(
+                session,
+                AuditContext(
+                    method="POST",
+                    path="/api/subscriptions",
+                    run_id=run_id,
+                    subscription_id=str(subscription.id),
+                ),
+                AuditEventType.SUBSCRIPTION_CREATED,
+                AuditOutcome.SUCCESS,
+                {
+                    "status": subscription.status,
+                    "cron_expression": subscription.cron_expression,
+                },
+            )
             await session.commit()
             await session.refresh(subscription)
         return subscription

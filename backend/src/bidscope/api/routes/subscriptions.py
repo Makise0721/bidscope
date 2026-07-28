@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from bidscope.api.auth import require_admin_token
 from bidscope.api.dependencies import RunService
+from bidscope.audit import AuditContext, AuditEventType, AuditOutcome, record_audit_event
 from bidscope.delivery.reports import ReportPersistence
 from bidscope.persistence.models import Subscription
 from bidscope.subscriptions.service import (
@@ -110,6 +111,17 @@ async def pause_subscription(
         if sub.status != "active":
             raise HTTPException(status_code=409, detail="subscription is not active")
         sub.status = "paused"
+        await record_audit_event(
+            session,
+            AuditContext(
+                method="POST",
+                path=f"/api/subscriptions/{subscription_id}/pause",
+                subscription_id=str(sub.id),
+            ),
+            AuditEventType.SUBSCRIPTION_PAUSED,
+            AuditOutcome.SUCCESS,
+            {"status": sub.status},
+        )
         await session.commit()
     return {"id": sub.id, "status": sub.status}
 
@@ -127,5 +139,16 @@ async def resume_subscription(
         if sub.status != "paused":
             raise HTTPException(status_code=409, detail="subscription is not paused")
         sub.status = "active"
+        await record_audit_event(
+            session,
+            AuditContext(
+                method="POST",
+                path=f"/api/subscriptions/{subscription_id}/resume",
+                subscription_id=str(sub.id),
+            ),
+            AuditEventType.SUBSCRIPTION_RESUMED,
+            AuditOutcome.SUCCESS,
+            {"status": sub.status},
+        )
         await session.commit()
     return {"id": sub.id, "status": sub.status}

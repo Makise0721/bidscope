@@ -35,6 +35,7 @@ import json
 from pathlib import Path
 from typing import Any, Protocol
 
+from bidscope.audit import AuditContext, AuditEventType, AuditOutcome, record_audit_event
 from bidscope.clock import Clock, SystemClock
 from bidscope.delivery.objects import LocalObjectStore, ObjectStore
 from bidscope.domain.enums import SourceName
@@ -128,7 +129,10 @@ class SnapshotImporter:
         idempotency_key = self._derive_idempotency_key(manifest.bundle_id, notices)
 
         async with UnitOfWork(self.session_factory) as uow:
-            repository = self.repository_factory(uow.session)
+            if uow.session is None:
+                raise RuntimeError("snapshot import session was not initialized")
+            session = uow.session
+            repository = self.repository_factory(session)
 
             # Idempotent short-circuit: a successful import for this exact
             # bundle content already exists, so return it unchanged.
@@ -160,6 +164,21 @@ class SnapshotImporter:
                     await self._import_notice(repository, manifest, snapshot_bundle, notice)
                 await repository.mark_import_success(
                     import_record.id, self.clock.now()
+                )
+                await record_audit_event(
+                    session,
+                    AuditContext(
+                        method="CLI",
+                        path="snapshots/import",
+                        snapshot_import_id=str(import_record.id),
+                    ),
+                    AuditEventType.SNAPSHOT_IMPORT_SUCCEEDED,
+                    AuditOutcome.SUCCESS,
+                    {
+                        "bundle_id": manifest.bundle_id,
+                        "status": "success",
+                        "notice_count": len(notices),
+                    },
                 )
             except BaseException:
                 # No partial application: the UnitOfWork rolls back on exit, so a
