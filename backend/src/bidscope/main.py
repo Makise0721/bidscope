@@ -13,12 +13,13 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from bidscope.api.auth import require_admin_token
 from bidscope.api.dependencies import create_run_service
 from bidscope.api.routes import (
     evaluations,
@@ -33,6 +34,7 @@ from bidscope.api.routes import (
 from bidscope.clock import SystemClock
 from bidscope.config import Settings, get_settings
 from bidscope.graph.executor import mark_stale_runs_retryable
+from bidscope.observability import METRICS_REGISTRY, RequestContextMiddleware
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -75,6 +77,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     resolved_settings = settings or get_settings()
     application = FastAPI(title="BidScope", version="0.1.0", lifespan=lifespan)
     application.state.settings = resolved_settings
+    application.state.metrics = METRICS_REGISTRY
+    application.add_middleware(RequestContextMiddleware)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=_cors_origins(resolved_settings),
@@ -85,6 +89,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "Idempotency-Key",
             "Last-Event-ID",
             "X-Admin-Token",
+            "X-Request-ID",
         ],
     )
     if resolved_settings.trusted_hosts:
@@ -95,6 +100,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @application.get("/healthz")
     async def healthz() -> dict[str, str]:
         return {"status": "ok", "mode": resolved_settings.app_mode}
+
+    @application.get("/metrics", dependencies=[Depends(require_admin_token)])
+    async def metrics() -> Response:
+        return Response(
+            content=application.state.metrics.render_prometheus(),
+            media_type="text/plain; version=0.0.4",
+        )
 
     application.include_router(runs.router)
     application.include_router(events.router)
