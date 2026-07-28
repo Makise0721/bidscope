@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from bidscope.api.dependencies import create_object_store
 from bidscope.config import Settings, get_settings
 from bidscope.db import create_engine_and_session
+from bidscope.observability import METRICS_REGISTRY
 from bidscope.persistence.models import Subscription
 
 logger = logging.getLogger(__name__)
@@ -261,6 +262,12 @@ async def run_scheduler_tick(
     try:
         due = await list_due_subscriptions(session_factory, reference)
         if not due:
+            try:
+                METRICS_REGISTRY.counter(
+                    "bidscope_scheduler_ticks_total", {"outcome": "skipped"}
+                ).inc()
+            except Exception:
+                logger.warning("metrics_tick_skipped_failed", exc_info=True)
             return {"due": 0, "ran": 0, "skipped": 0, "failed": 0}
 
         # Process-local graph + run service over a dedicated checkpointer.
@@ -283,7 +290,14 @@ async def run_scheduler_tick(
                     SystemClock(),
                     checkpointer,
                 )
-                return await _run_due_subscriptions(session_factory, due, run_service)
+                result = await _run_due_subscriptions(session_factory, due, run_service)
+                try:
+                    METRICS_REGISTRY.counter(
+                        "bidscope_scheduler_ticks_total", {"outcome": "due"}
+                    ).inc()
+                except Exception:
+                    logger.warning("metrics_tick_due_failed", exc_info=True)
+                return result
         finally:
             sync_engine.dispose()
     finally:
@@ -300,8 +314,16 @@ def _tick(settings: Settings) -> None:
         )
     except TimeoutError:
         logger.warning("scheduler_tick_timeout")
+        try:
+            METRICS_REGISTRY.counter("bidscope_scheduler_ticks_total", {"outcome": "timeout"}).inc()
+        except Exception:
+            logger.warning("metrics_tick_timeout_failed", exc_info=True)
     except Exception:
         logger.warning("scheduler_tick_failed")
+        try:
+            METRICS_REGISTRY.counter("bidscope_scheduler_ticks_total", {"outcome": "failed"}).inc()
+        except Exception:
+            logger.warning("metrics_tick_failed_counter_failed", exc_info=True)
         raise
 
 

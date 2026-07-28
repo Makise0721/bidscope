@@ -7,6 +7,8 @@ store failure cannot discard a report that has already passed evidence checks.
 
 from __future__ import annotations
 
+import logging
+import time
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -27,6 +29,7 @@ from bidscope.domain.reports import (
 from bidscope.domain.reports import (
     ReportItem as DomainItem,
 )
+from bidscope.observability import METRICS_REGISTRY
 from bidscope.persistence.models import (
     NoticeEvidence,
     ReportCitation,
@@ -37,6 +40,8 @@ from bidscope.persistence.models import (
 from bidscope.persistence.models import Report as ReportModel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+logger = logging.getLogger(__name__)
 
 EvidenceBinding = DomainEvidence | list[DomainEvidence] | tuple[DomainEvidence, ...]
 
@@ -74,54 +79,65 @@ class ReportPersistence:
         every citation resolves to an immutable ``notice_evidence`` row before
         the transaction can commit.
         """
-        async with self._session_factory() as session:
-            try:
-                async with session.begin():
-                    existing = await self._find_by_run_id(session, report.run_id)
-                    if existing is not None:
-                        return await self._project(session, existing)
+        start = time.monotonic()
+        try:
+            async with self._session_factory() as session:
+                try:
+                    async with session.begin():
+                        existing = await self._find_by_run_id(session, report.run_id)
+                        if existing is not None:
+                            return await self._project(session, existing)
 
-                    row = ReportModel(
-                        run_id=report.run_id,
-                        export_key=f"online:{report.run_id}",
-                        conditions=report.query_conditions,
-                        freshness_window=report.freshness_window,
-                        source_availability=report.source_availability,
-                        completeness_warning=report.completeness_warning,
-                        generated_at=report.generated_at,
-                    )
-                    session.add(row)
-                    await session.flush()
-
-                    for rank, item in enumerate(report.items):
-                        persisted_item = ReportItem(
-                            report_id=row.id,
-                            rank=rank,
-                            notice_version_id=item.notice_id,
-                            title=item.title,
-                            known_fields=item.known_fields,
-                            unknown_fields=item.unknown_fields,
-                            relevance_reason=item.relevance_reason,
-                            risk_note=item.risk_note,
+                        row = ReportModel(
+                            run_id=report.run_id,
+                            export_key=f"online:{report.run_id}",
+                            conditions=report.query_conditions,
+                            freshness_window=report.freshness_window,
+                            source_availability=report.source_availability,
+                            completeness_warning=report.completeness_warning,
+                            generated_at=report.generated_at,
                         )
-                        session.add(persisted_item)
+                        session.add(row)
                         await session.flush()
 
-                        evidence_ids = await self._persist_item_citations(
-                            session, persisted_item, item, evidence_by_hash
-                        )
-                        await self._persist_claims(
-                            session, persisted_item, item, evidence_ids, evidence_by_hash
-                        )
+                        for rank, item in enumerate(report.items):
+                            persisted_item = ReportItem(
+                                report_id=row.id,
+                                rank=rank,
+                                notice_version_id=item.notice_id,
+                                title=item.title,
+                                known_fields=item.known_fields,
+                                unknown_fields=item.unknown_fields,
+                                relevance_reason=item.relevance_reason,
+                                risk_note=item.risk_note,
+                            )
+                            session.add(persisted_item)
+                            await session.flush()
 
-                return PersistedReport(
-                    id=str(row.id), report=report, docx_object_key=row.docx_object_key
+                            evidence_ids = await self._persist_item_citations(
+                                session, persisted_item, item, evidence_by_hash
+                            )
+                            await self._persist_claims(
+                                session, persisted_item, item, evidence_ids, evidence_by_hash
+                            )
+
+                    return PersistedReport(
+                        id=str(row.id), report=report, docx_object_key=row.docx_object_key
+                    )
+                except IntegrityError:
+                    existing = await self._find_by_run_id(session, report.run_id)
+                    if existing is None:
+                        raise
+                    return await self._project(session, existing)
+        finally:
+            try:
+                METRICS_REGISTRY.observe(
+                    "bidscope_report_delivery_duration_seconds",
+                    max(time.monotonic() - start, 0.0),
+                    {"format": "json"},
                 )
-            except IntegrityError:
-                existing = await self._find_by_run_id(session, report.run_id)
-                if existing is None:
-                    raise
-                return await self._project(session, existing)
+            except Exception:
+                logger.warning("metrics_json_delivery_failed", exc_info=True)
 
     async def load_online_report(self, run_id: str) -> PersistedReport | None:
         """Hydrate the complete persisted report for a delivery-only retry."""
@@ -131,7 +147,18 @@ class ReportPersistence:
 
     async def export_docx(self, persisted: PersistedReport) -> ExportRecord:
         """Render and attach a DOCX to an already durable online report."""
-        return await self._delivery.export_report(persisted)
+        start = time.monotonic()
+        try:
+            return await self._delivery.export_report(persisted)
+        finally:
+            try:
+                METRICS_REGISTRY.observe(
+                    "bidscope_report_delivery_duration_seconds",
+                    max(time.monotonic() - start, 0.0),
+                    {"format": "docx"},
+                )
+            except Exception:
+                logger.warning("metrics_docx_delivery_failed", exc_info=True)
 
     async def _persist_item_citations(
         self,

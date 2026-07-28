@@ -29,8 +29,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import logging
 import re
 import selectors
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from contextlib import suppress
 from contextvars import ContextVar
@@ -52,7 +54,10 @@ from sqlalchemy.exc import IntegrityError
 
 from bidscope.audit import AuditContext, AuditEventType, AuditOutcome, record_audit_event
 from bidscope.config import Settings, get_settings
+from bidscope.observability import METRICS_REGISTRY
 from bidscope.persistence.models import QueryRun, RunEvent
+
+logger = logging.getLogger(__name__)
 
 
 def _to_datetime(value: Any) -> datetime:
@@ -112,6 +117,23 @@ class EventReconciliationError(RuntimeError):
 
 class RunOwnershipLostError(RuntimeError):
     """The worker no longer owns the relational run row."""
+
+
+_VALID_NODE_NAMES = frozenset({"intent", "duplicate", "retrieval", "report", "persist", "unknown"})
+
+
+def _resolve_node_name(name: str) -> str:
+    """Map a graph node name to the valid metric label vocabulary."""
+    return name if name in _VALID_NODE_NAMES else "unknown"
+
+
+def _error_code_for(exc: BaseException) -> str:
+    """Derive a ``bidscope_run_failures_total`` error code from an exception."""
+    if isinstance(exc, RunOwnershipLostError):
+        return "ownership_lost"
+    if isinstance(exc, EventReconciliationError):
+        return "graph_node_error"
+    return "unknown"
 
 
 CheckpointWriteGuard = Callable[[], Awaitable[None]]
@@ -518,21 +540,45 @@ async def execute(
     await _ensure_active(ensure_active)
 
     write_guard_token = _checkpoint_write_guard.set(ensure_checkpoint_write_allowed)
+    _node_timer_start = time.monotonic()
     try:
-        async for state in graph.astream(input, config, stream_mode="values"):
-            events = state.get("node_events", [])
-            new_count = len(events)
-            if new_count > persisted:
-                await _append_events(
-                    run_id,
-                    events,
-                    persisted,
-                    session_factory,
-                    seq_offset=persisted_seq_offset,
-                    ensure_active=ensure_active,
-                    execution_token=execution_token,
+        try:
+            async for state in graph.astream(input, config, stream_mode="values"):
+                _node_elapsed = time.monotonic() - _node_timer_start
+                _node_timer_start = time.monotonic()
+                events = state.get("node_events", [])
+                new_count = len(events)
+                if new_count > persisted:
+                    _latest_node = (
+                        events[new_count - 1].get("node", "unknown") if events else "unknown"
+                    )
+                    try:
+                        METRICS_REGISTRY.observe(
+                            "bidscope_run_node_duration_seconds",
+                            min(max(_node_elapsed, 0.0), 3600.0),
+                            {"node": _resolve_node_name(str(_latest_node))},
+                        )
+                    except Exception:
+                        logger.warning("metrics_node_duration_failed", exc_info=True)
+                    await _append_events(
+                        run_id,
+                        events,
+                        persisted,
+                        session_factory,
+                        seq_offset=persisted_seq_offset,
+                        ensure_active=ensure_active,
+                        execution_token=execution_token,
+                    )
+                    persisted = new_count
+        except BaseException as exc:
+            try:
+                METRICS_REGISTRY.counter(
+                    "bidscope_run_failures_total",
+                    {"error_code": _error_code_for(exc)},
                 )
-                persisted = new_count
+            except Exception:
+                logger.warning("metrics_run_failure_counter_failed", exc_info=True)
+            raise
     finally:
         _checkpoint_write_guard.reset(write_guard_token)
 

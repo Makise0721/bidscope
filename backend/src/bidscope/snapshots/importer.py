@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -39,6 +40,7 @@ from bidscope.audit import AuditContext, AuditEventType, AuditOutcome, record_au
 from bidscope.clock import Clock, SystemClock
 from bidscope.delivery.objects import LocalObjectStore, ObjectStore
 from bidscope.domain.enums import SourceName
+from bidscope.observability import METRICS_REGISTRY
 from bidscope.persistence.repositories import SnapshotRepository
 from bidscope.persistence.unit_of_work import UnitOfWork
 from bidscope.snapshots import _parse
@@ -46,6 +48,8 @@ from bidscope.snapshots.adapters import inspect_bundle
 from bidscope.snapshots.ccgp import CcgpSnapshotAdapter
 from bidscope.snapshots.demo import DemoSnapshotAdapter
 from bidscope.snapshots.ggzy import GgzySnapshotAdapter
+
+logger = logging.getLogger(__name__)
 
 
 class BundleAdapter(Protocol):
@@ -184,8 +188,22 @@ class SnapshotImporter:
                 # No partial application: the UnitOfWork rolls back on exit, so a
                 # failed import leaves no database rows and no audit record.
                 # The original request is returned unchanged for callers to retry.
+                try:
+                    METRICS_REGISTRY.counter(
+                        "bidscope_snapshot_imports_total",
+                        {"source": manifest.source.value, "outcome": "failure"},
+                    ).inc()
+                except Exception:
+                    logger.warning("metrics_import_failure_failed", exc_info=True)
                 raise
 
+        try:
+            METRICS_REGISTRY.counter(
+                "bidscope_snapshot_imports_total",
+                {"source": manifest.source.value, "outcome": "success"},
+            ).inc()
+        except Exception:
+            logger.warning("metrics_import_success_failed", exc_info=True)
         return import_record
 
     def import_inspect(self, bundle: Path) -> Any:
