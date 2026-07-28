@@ -38,7 +38,10 @@ def _client_for_mode(mode: str, tmp_path: Path) -> TestClient:
         test_control_token="test-controls-token",
         **production_values,
     )
-    return TestClient(create_app(settings=settings))
+    app = create_app(settings=settings)
+    if mode == "production":
+        return TestClient(app, base_url="https://bidscope.test")
+    return TestClient(app)
 
 
 def test_test_controls_404_in_demo_mode(tmp_path: Path) -> None:

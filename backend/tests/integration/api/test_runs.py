@@ -171,7 +171,9 @@ def test_docx_retry_exports_persisted_report_without_running_graph(tmp_path: Pat
         object_store_root=str(tmp_path / "objects"),
     )
     headers = {"X-Admin-Token": PRODUCTION_ADMIN_TOKEN}
-    with TestClient(create_app(settings=settings)) as client:
+    with TestClient(
+        create_app(settings=settings), base_url="https://bidscope.test"
+    ) as client:
         service = client.app.state.run_service
         service.object_store = LocalObjectStore(tmp_path / "objects")
         graph = CountingGraph()
@@ -265,7 +267,9 @@ def test_docx_retry_recreates_a_missing_attached_object_with_the_same_key(tmp_pa
     )
     headers = {"X-Admin-Token": PRODUCTION_ADMIN_TOKEN}
     store = CountingObjectStore(tmp_path / "objects")
-    with TestClient(create_app(settings=settings)) as client:
+    with TestClient(
+        create_app(settings=settings), base_url="https://bidscope.test"
+    ) as client:
         service = client.app.state.run_service
         service.graph = object()
         service.object_store = store

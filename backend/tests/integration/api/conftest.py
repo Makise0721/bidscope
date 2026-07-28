@@ -71,7 +71,9 @@ def production_settings(tmp_path: Path) -> Settings:
 @pytest.fixture()
 def production_client(production_settings: Settings) -> Iterator[TestClient]:
     """Production-mode client for admin-authentication coverage."""
-    with TestClient(create_app(settings=production_settings)) as client:
+    with TestClient(
+        create_app(settings=production_settings), base_url="https://bidscope.test"
+    ) as client:
         client.app.state.run_service.object_store = LocalObjectStore(
             production_settings.object_store_root
         )

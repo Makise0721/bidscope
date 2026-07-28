@@ -1014,6 +1014,36 @@ def test_production_settings_reject_wildcard_allowed_origins() -> None:
         Settings(**settings)
 
 
+@pytest.mark.parametrize(
+    "origin",
+    (
+        "https://user:password@bidscope.example.test",
+        "https://bidscope.example.test/admin",
+        "https://bidscope.example.test/?source=campaign",
+        "https://bidscope.example.test/#section",
+    ),
+)
+def test_production_settings_reject_allowed_origins_that_are_not_exact_origins(
+    origin: str,
+) -> None:
+    settings = valid_production_settings()
+    settings["allowed_origins"] = [origin]
+
+    with pytest.raises(ValidationError, match="allowed_origins"):
+        Settings(**settings)
+
+
+def test_production_settings_accept_non_default_allowed_origin_port() -> None:
+    settings = valid_production_settings()
+    settings["allowed_origins"] = ["https://bidscope.example.test:8443"]
+
+    result = Settings(**settings)
+
+    assert [str(origin) for origin in result.allowed_origins] == [
+        "https://bidscope.example.test:8443/"
+    ]
+
+
 def test_production_settings_require_nonempty_trusted_hosts() -> None:
     settings = valid_production_settings()
     settings["trusted_hosts"] = []

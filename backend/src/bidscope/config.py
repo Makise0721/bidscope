@@ -331,7 +331,10 @@ class Settings(BaseSettings):
                 invalid_fields.append(field_name)
         if self.object_store_type != "s3":
             invalid_fields.append("object_store_type")
-        if not self.allowed_origins or any("*" in str(origin) for origin in self.allowed_origins):
+        if not self.allowed_origins or any(
+            "*" in str(origin) or not self._is_exact_production_origin(origin)
+            for origin in self.allowed_origins
+        ):
             invalid_fields.append("allowed_origins")
         if not self.trusted_hosts or any(
             not host.strip() or "*" in host for host in self.trusted_hosts
@@ -344,6 +347,16 @@ class Settings(BaseSettings):
                 "production requires valid values for: " + ", ".join(invalid_fields)
             )
         return self
+
+    @staticmethod
+    def _is_exact_production_origin(origin: AnyHttpUrl) -> bool:
+        return (
+            origin.username is None
+            and origin.password is None
+            and origin.path == "/"
+            and origin.query is None
+            and origin.fragment is None
+        )
 
     @staticmethod
     def _has_valid_percent_encoding(value: str) -> bool:

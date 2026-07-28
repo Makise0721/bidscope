@@ -33,7 +33,7 @@ def demo_client(demo_settings: object) -> TestClient:
 def production_client(production_settings: object) -> TestClient:
     """A synchronous ``TestClient`` wrapping a production-mode app."""
     settings = cast(Settings, production_settings)
-    return TestClient(create_app(settings=settings))
+    return TestClient(create_app(settings=settings), base_url="https://bidscope.test")
 
 
 @pytest.fixture()
