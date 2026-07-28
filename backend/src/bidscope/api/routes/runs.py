@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from bidscope.api.auth import require_admin_token
-from bidscope.api.dependencies import RunQueryResult, RunService
+from bidscope.api.dependencies import RunCapacityError, RunQueryResult, RunService
 from bidscope.audit import AuditContext
 from bidscope.persistence.models import QueryRun
 
@@ -87,7 +87,18 @@ async def create_run(
         )
     if created:
         # Schedule only after the pending row commits, so acknowledged work is durable.
-        service.schedule_run(run_id, {"user_request": user_request})
+        try:
+            service.schedule_run(run_id, {"user_request": user_request})
+        except RunCapacityError as error:
+            await service._update_status(
+                run_id,
+                "retryable",
+                error={"code": error.code, "message": "run capacity exhausted", "details": {}},
+                expected_status="pending",
+            )
+            response.status_code = 429
+            response.headers["Retry-After"] = "5"
+            raise HTTPException(status_code=429, detail=error.code) from error
     else:
         response.status_code = 200
     return RunQueryResult.from_row(run).__dict__ if run else {
@@ -146,6 +157,12 @@ async def confirm_run(
     """Approve a run awaiting confirmation, resuming it through completion."""
     try:
         result = await service.confirm(run_id)
+    except RunCapacityError as error:
+        raise HTTPException(
+            status_code=429,
+            detail=error.code,
+            headers={"Retry-After": "5"},
+        ) from error
     except Exception as error:  # noqa: BLE001 - translate service errors to HTTP
         status = getattr(error, "status_code", 409)
         raise HTTPException(status_code=status, detail=str(error)) from error
@@ -160,6 +177,12 @@ async def retry_run(
     """Retry a retryable run."""
     try:
         result = await service.retry(run_id)
+    except RunCapacityError as error:
+        raise HTTPException(
+            status_code=429,
+            detail=error.code,
+            headers={"Retry-After": "5"},
+        ) from error
     except Exception as error:  # noqa: BLE001 - translate service errors to HTTP
         status = getattr(error, "status_code", 409)
         raise HTTPException(status_code=status, detail=str(error)) from error

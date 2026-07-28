@@ -260,6 +260,30 @@ class RunService:
         self._run_tasks: set[asyncio.Task[dict[str, Any]]] = set()
         self._completed_task_errors: deque[BaseException] = deque(maxlen=32)
         self._shutting_down = False
+        self._active_run_reservations = 0
+
+    def _try_reserve_run(self) -> bool:
+        """Reserve one bounded execution slot without waiting in a request."""
+        active = getattr(self, "_active_run_reservations", 0)
+        settings = getattr(self, "settings", None)
+        limit = getattr(settings, "max_concurrent_runs", 1_000_000)
+        if active >= limit:
+            return False
+        self._active_run_reservations = active + 1
+        return True
+
+    def _release_run_reservation(self) -> None:
+        active = getattr(self, "_active_run_reservations", 0)
+        if active > 0:
+            self._active_run_reservations = active - 1
+
+    async def _execute_reserved(
+        self, run_id: str, input: Any, *, force_fresh: bool = False
+    ) -> dict[str, Any]:  # noqa: ANN401
+        try:
+            return await self.execute_run(run_id, input, force_fresh=force_fresh)
+        finally:
+            self._release_run_reservation()
 
     def _add_claimed_run_id(self, run_id: str) -> None:
         """Record a relational claim in only the current task's context."""
@@ -307,8 +331,14 @@ class RunService:
     def schedule_run(self, run_id: str, input: Any) -> asyncio.Task[dict[str, Any]]:  # noqa: ANN401
         """Schedule a run and retain it until its task completes."""
         if self._shutting_down:
-            raise RuntimeError("run service is shutting down")
-        task = asyncio.create_task(self.execute_run(run_id, input))
+            raise RunCapacityError("run service is shutting down")
+        if not self._try_reserve_run():
+            raise RunCapacityError("run capacity exhausted")
+        try:
+            task = asyncio.create_task(self._execute_reserved(run_id, input))
+        except BaseException:
+            self._release_run_reservation()
+            raise
         self._run_tasks.add(task)
         task.add_done_callback(self._on_run_task_done)
         return task
@@ -796,29 +826,49 @@ class RunService:
 
     async def confirm(self, run_id: str) -> dict[str, Any]:
         """Resume an awaiting-confirmation run. Raises if not confirmable."""
-        token = await self._claim_run_safely(
-            run_id,
-            "awaiting_confirmation",
-            "awaiting confirmation",
-            "confirmation claim cancelled",
-            audit_event_type=AuditEventType.RUN_CONFIRMED,
-        )
-        self._add_claimed_run_id(run_id)
-        self._add_claimed_run_token(run_id, token)
-        return await self.execute_run(run_id, Command(resume={"action": "approve"}))
+        if not self._try_reserve_run():
+            raise RunCapacityError()
+        handed_off = False
+        try:
+            token = await self._claim_run_safely(
+                run_id,
+                "awaiting_confirmation",
+                "awaiting confirmation",
+                "confirmation claim cancelled",
+                audit_event_type=AuditEventType.RUN_CONFIRMED,
+            )
+            self._add_claimed_run_id(run_id)
+            self._add_claimed_run_token(run_id, token)
+            handed_off = True
+            return await self._execute_reserved(
+                run_id, Command(resume={"action": "approve"})
+            )
+        finally:
+            if not handed_off:
+                self._release_run_reservation()
 
     async def retry(self, run_id: str) -> dict[str, Any]:
         """Resume a retryable checkpoint or restart the original request."""
-        token = await self._claim_run_safely(
-            run_id,
-            "retryable",
-            "retryable",
-            "retry claim cancelled",
-            audit_event_type=AuditEventType.RUN_RETRIED,
-        )
-        self._add_claimed_run_id(run_id)
-        self._add_claimed_run_token(run_id, token)
-        return await self._retry_after_claim_safely(run_id)
+        if not self._try_reserve_run():
+            raise RunCapacityError()
+        released = False
+        try:
+            token = await self._claim_run_safely(
+                run_id,
+                "retryable",
+                "retryable",
+                "retry claim cancelled",
+                audit_event_type=AuditEventType.RUN_RETRIED,
+            )
+            self._add_claimed_run_id(run_id)
+            self._add_claimed_run_token(run_id, token)
+            result = await self._retry_after_claim_safely(run_id)
+            self._release_run_reservation()
+            released = True
+            return result
+        finally:
+            if not released:
+                self._release_run_reservation()
 
     async def _retry_after_claim_safely(self, run_id: str) -> dict[str, Any]:
         """Look up retry state and repair the claim when cancellation interrupts it."""
@@ -1125,6 +1175,16 @@ def _json_safe(value: Any) -> Any:
     if hasattr(value, "value"):
         return _json_safe(value.value)
     return value
+
+
+class RunCapacityError(Exception):
+    """Bounded error raised when no execution slot is immediately available."""
+
+    status_code = 429
+    code = "run_capacity_exhausted"
+
+    def __init__(self, message: str = "run capacity exhausted") -> None:
+        super().__init__(message)
 
 
 class _RunError(Exception):
