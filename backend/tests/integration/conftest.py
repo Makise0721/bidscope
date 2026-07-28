@@ -191,7 +191,7 @@ async def _truncate_test_tables(
         # CASCADE among themselves via their foreign keys.
         await session.execute(
             sa.text(
-                "TRUNCATE TABLE source_notices, canonical_notices, query_runs CASCADE"
+                "TRUNCATE TABLE audit_events, source_notices, canonical_notices, query_runs CASCADE"
             )
         )
         await session.commit()

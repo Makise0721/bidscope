@@ -203,6 +203,32 @@ class RunEvent(Base, TimestampMixin):
     )
 
 
+class AuditEvent(Base):
+    """Bounded security and lifecycle event metadata without business FKs."""
+
+    __tablename__ = "audit_events"
+
+    id: Mapped[str] = _pk()
+    occurred_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True), server_default=_NOW_DEFAULT, nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(sa.Text, nullable=False, index=True)
+    outcome: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    request_id: Mapped[str | None] = mapped_column(sa.Text, index=True)
+    method: Mapped[str | None] = mapped_column(sa.Text)
+    path: Mapped[str | None] = mapped_column(sa.Text)
+    run_id: Mapped[str | None] = mapped_column(sa.Text, index=True)
+    subscription_id: Mapped[str | None] = mapped_column(sa.Text, index=True)
+    report_id: Mapped[str | None] = mapped_column(sa.Text, index=True)
+    snapshot_import_id: Mapped[str | None] = mapped_column(sa.Text, index=True)
+    error_code: Mapped[str | None] = mapped_column(sa.Text)
+    details: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=_EMPTY_JSON)
+
+    __table_args__ = (
+        sa.Index("ix_audit_events_occurred_at", "occurred_at"),
+    )
+
+
 # ------------------------------------------------------------------ reports ---
 
 
