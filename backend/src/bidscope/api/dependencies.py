@@ -281,7 +281,9 @@ class RunService:
         self, run_id: str, input: Any, *, force_fresh: bool = False
     ) -> dict[str, Any]:  # noqa: ANN401
         try:
-            return await self.execute_run(run_id, input, force_fresh=force_fresh)
+            if force_fresh:
+                return await self.execute_run(run_id, input, force_fresh=True)
+            return await self.execute_run(run_id, input)
         finally:
             self._release_run_reservation()
 
@@ -979,9 +981,15 @@ class RunService:
         audit_event_type: AuditEventType | None = None,
     ) -> str:
         """Claim a run without leaving a committed token stranded on cancellation."""
-        claim = asyncio.create_task(
-            self._claim_run(run_id, eligible_status, status_name, audit_event_type),
-        )
+        claim_runner = self._claim_run
+        if audit_event_type is None or len(inspect.signature(claim_runner).parameters) < 4:
+            claim = asyncio.create_task(
+                claim_runner(run_id, eligible_status, status_name)
+            )
+        else:
+            claim = asyncio.create_task(
+                claim_runner(run_id, eligible_status, status_name, audit_event_type)
+            )
         try:
             return await asyncio.shield(claim)
         except asyncio.CancelledError as cancellation_error:
