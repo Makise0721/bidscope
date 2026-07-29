@@ -316,6 +316,17 @@ def test_recovery_drill_uses_a_batch_matchable_scheduled_query(tmp_path: Path) -
     assert evidence["old_report_evidence_version"] == "version-1"
 
 
+def test_recovery_drill_traverses_report_list_indices_with_py_launcher(
+    tmp_path: Path,
+) -> None:
+    """The evidence path resolves the first item from a nonempty report list."""
+    result, evidence_path = _run_drill(tmp_path, python_command="py -3")
+
+    assert result.returncode == 0, result.stderr
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["old_report_evidence_version"] == "version-1"
+
+
 def test_recovery_drill_parses_large_reports_via_python_stdin(tmp_path: Path) -> None:
     """The multi-token launcher rejects a report passed as one huge argument."""
     result, evidence_path = _run_drill(

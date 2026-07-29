@@ -148,7 +148,7 @@ json_nested_field() {
   local json="$1"
   local path="$2"
   printf '%s' "${json}" | "${PYTHON_COMMAND[@]}" -c \
-    'from functools import reduce; import json, sys; print(reduce(lambda value, key: value[key], sys.argv[1].split("."), json.load(sys.stdin)))' "${path}"
+    'from functools import reduce; import json, sys; print(reduce(lambda value, key: value[int(key)] if isinstance(value, list) else value[key], sys.argv[1].split("."), json.load(sys.stdin)))' "${path}"
 }
 
 wait_ready() {
