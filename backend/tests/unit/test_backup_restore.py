@@ -36,6 +36,7 @@ def _run_drill(
     uname_output: str | None = None,
     cygpath_output: Path | None = None,
     require_msys_no_pathconv: bool = False,
+    require_writable_mounts: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     """Run the shell drill against local command doubles, never Docker/network."""
     # Keep source inspection encoding-explicit on Windows; execution below is
@@ -101,6 +102,12 @@ if [[ "$args" == *" config "* ]]; then
   [[ "${FAKE_FAIL_CONFIG:-0}" == "1" ]] && exit 41
   exit 0
 fi
+if [[ "$args" == *"bidscope snapshots import"* \
+  && "${FAKE_REQUIRE_WRITABLE_MOUNTS:-0}" == "1" ]]; then
+  for directory in "${BIDSCOPE_RECOVERY_BACKUP_DIR}" "${BIDSCOPE_RECOVERY_OBJECT_DIR}"; do
+    [[ "$(stat -c '%a' "${directory}")" == "777" ]] || exit 75
+  done
+fi
 if [[ "$args" == *"bidscope ops backup create"* ]]; then
   if [[ "${FAKE_FAIL_BACKUP_CLI:-0}" == "1" ]]; then
     printf '%s\\n' '{"code":"backup_tool_failed"}'
@@ -123,6 +130,11 @@ if [[ "$args" == *"bidscope ops backup create"* ]]; then
 fi
 if [[ "$args" == *"bidscope ops backup restore"* ]]; then
   [[ "${FAKE_REQUIRE_MSYS_NO_PATHCONV:-0}" != "1" || "${MSYS_NO_PATHCONV:-}" == "1" ]] || exit 68
+  if [[ "${FAKE_REQUIRE_WRITABLE_MOUNTS:-0}" == "1" ]]; then
+    for directory in "${BIDSCOPE_RECOVERY_BACKUP_DIR}" "${BIDSCOPE_RECOVERY_OBJECT_DIR}"; do
+      [[ "$(stat -c '%a' "${directory}")" == "777" ]] || exit 75
+    done
+  fi
   printf '%s' "$args" > "${FAKE_STATE_DIR}/restore-command"
 fi
 """,
@@ -255,6 +267,7 @@ exit 69
             "FAKE_MISSING_BACKUP_MANIFEST": "1" if missing_backup_manifest else "0",
             "FAKE_PRETTY_BACKUP_JSON": "1" if pretty_backup_json else "0",
             "FAKE_REQUIRE_MSYS_NO_PATHCONV": "1" if require_msys_no_pathconv else "0",
+            "FAKE_REQUIRE_WRITABLE_MOUNTS": "1" if require_writable_mounts else "0",
             "BIDSCOPE_RECOVERY_EVIDENCE_PATH": str(evidence_path),
             "BIDSCOPE_PYTHON_COMMAND": python_command or "python3",
             "FAKE_LARGE_REPORT": "1" if large_report else "0",
@@ -368,6 +381,14 @@ def test_recovery_drill_uses_a_batch_matchable_scheduled_query(tmp_path: Path) -
     assert result.returncode == 0, result.stderr
     evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
     assert evidence["old_report_evidence_version"] == "version-1"
+
+
+def test_recovery_drill_prepares_writable_bind_mounts_for_non_root_api(tmp_path: Path) -> None:
+    """The non-root image user must be able to write each drill-owned mount."""
+    result, evidence_path = _run_drill(tmp_path, require_writable_mounts=True)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(evidence_path.read_text(encoding="utf-8"))["passed"] is True
 
 
 def test_recovery_drill_traverses_report_list_indices_with_py_launcher(

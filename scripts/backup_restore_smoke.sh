@@ -174,6 +174,10 @@ export BIDSCOPE_RECOVERY_PORT="${BIDSCOPE_RECOVERY_PORT:-$((18000 + RANDOM % 100
 
 base_url="http://127.0.0.1:${BIDSCOPE_RECOVERY_PORT}"
 mkdir -p "${BACKUP_DIR}" "${SOURCE_OBJECT_DIR}" "${TARGET_OBJECT_DIR}"
+# The image runs as UID 1000, while CI creates these bind-mount directories as
+# the runner user. They are unique to this drill and removed during cleanup, so
+# make each mount writable before handing it to the non-root container user.
+chmod 0777 "${BACKUP_DIR}" "${SOURCE_OBJECT_DIR}" "${TARGET_OBJECT_DIR}"
 
 json_field() {
   local json="$1"
