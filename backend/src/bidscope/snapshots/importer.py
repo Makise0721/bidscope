@@ -161,6 +161,13 @@ class SnapshotImporter:
                 idempotency_key=idempotency_key,
                 started_at=self.clock.now(),
                 status="running",
+                warnings={},
+                metrics={
+                    "manifest_sha256": inspection.manifest_sha256,
+                    "payload_file_count": len(inspection.actual_hashes),
+                    "notice_count": len(notices),
+                    "reprocessing": "new",
+                },
             )
 
             try:

@@ -166,6 +166,29 @@ async def test_reimport_is_idempotent(importer, ccgp_bundle, session_factory) ->
         assert await _count(session, NoticeVersion) == 1
 
 
+async def test_import_records_auditable_manifest_metrics(
+    importer, ccgp_bundle, session_factory
+) -> None:
+    result = await importer.import_bundle(ccgp_bundle)
+
+    expected_manifest_hash = hashlib.sha256(
+        (ccgp_bundle / "manifest.json").read_bytes()
+    ).hexdigest()
+
+    assert result.metrics == {
+        "manifest_sha256": expected_manifest_hash,
+        "payload_file_count": 2,
+        "notice_count": 1,
+        "reprocessing": "new",
+    }
+    assert result.warnings == {}
+
+    async with session_factory() as session:
+        stored = await session.get(SnapshotImport, result.id)
+        assert stored is not None
+        assert stored.metrics["manifest_sha256"] == expected_manifest_hash
+
+
 async def test_reimport_does_not_duplicate_source_notice(
     importer, demo_batch_1, session_factory
 ) -> None:

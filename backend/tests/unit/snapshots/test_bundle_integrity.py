@@ -38,6 +38,20 @@ def _manifest(payload_files: dict[str, str] | None = None, **overrides: object) 
     }
 
 
+def _authorized_contract(*, review_status: str = "approved") -> dict[str, object]:
+    return {
+        "contract_version": "ccgp-curated-v1",
+        "authorization_ref": "pilot-ccgp-20260729",
+        "data_owner": "internal-pilot-owner",
+        "regions": ["全国"],
+        "categories": ["central-public-tender"],
+        "review_status": review_status,
+        "reviewed_at": "2026-07-29T09:00:00+00:00",
+        "update_sla": "weekly",
+        "retention_days": 365,
+    }
+
+
 def test_inspect_bundle_rejects_modified_file(tmp_path: Path) -> None:
     files = {"detail.html": "<html>original</html>"}
     bundle = _write_bundle(tmp_path, files, _manifest(files))
@@ -49,6 +63,91 @@ def test_inspect_bundle_rejects_modified_file(tmp_path: Path) -> None:
     assert any(error.code == "snapshot_integrity_error" for error in inspection.errors)
 
 
+def test_schema_v2_requires_authorized_data_contract(tmp_path: Path) -> None:
+    files = {"detail.html": "<html>authorized</html>"}
+    manifest = _manifest(files, schema_version=2, batch_id="ccgp-batch-20260729")
+    bundle = _write_bundle(tmp_path, files, manifest)
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert inspection.disposition == "quarantined"
+    assert any(error.code == "missing_data_contract" for error in inspection.errors)
+
+
+def test_schema_v2_accepts_approved_authorized_contract(tmp_path: Path) -> None:
+    files = {"detail.html": "<html>authorized</html>"}
+    manifest = _manifest(
+        files,
+        schema_version=2,
+        batch_id="ccgp-batch-20260729",
+        data_contract=_authorized_contract(),
+    )
+    bundle = _write_bundle(tmp_path, files, manifest)
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is True
+    assert inspection.disposition == "accepted"
+    assert inspection.manifest is not None
+    assert inspection.manifest.batch_id == "ccgp-batch-20260729"
+    assert inspection.manifest.data_contract is not None
+    assert inspection.manifest.data_contract.authorization_ref == "pilot-ccgp-20260729"
+
+
+def test_schema_v2_quarantines_unapproved_contract(tmp_path: Path) -> None:
+    files = {"detail.html": "<html>pending</html>"}
+    manifest = _manifest(
+        files,
+        schema_version=2,
+        batch_id="ccgp-batch-20260729",
+        data_contract=_authorized_contract(review_status="pending"),
+    )
+    bundle = _write_bundle(tmp_path, files, manifest)
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert inspection.disposition == "quarantined"
+    assert any(error.code == "authorization_not_approved" for error in inspection.errors)
+
+
+def test_schema_v2_rejects_batch_id_path_separators(tmp_path: Path) -> None:
+    files = {"detail.html": "<html>invalid batch</html>"}
+    manifest = _manifest(
+        files,
+        schema_version=2,
+        batch_id="../ccgp-batch-20260729",
+        data_contract=_authorized_contract(),
+    )
+    bundle = _write_bundle(tmp_path, files, manifest)
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert inspection.disposition == "quarantined"
+    assert any(error.code == "invalid_manifest_field" for error in inspection.errors)
+
+
+def test_schema_v2_requires_review_timestamp_for_approved_contract(tmp_path: Path) -> None:
+    files = {"detail.html": "<html>unreviewed</html>"}
+    contract = _authorized_contract()
+    contract.pop("reviewed_at")
+    manifest = _manifest(
+        files,
+        schema_version=2,
+        batch_id="ccgp-batch-20260729",
+        data_contract=contract,
+    )
+    bundle = _write_bundle(tmp_path, files, manifest)
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert inspection.disposition == "quarantined"
+    assert any(error.code == "invalid_manifest_field" for error in inspection.errors)
+
+
 def test_fixture_hash_is_sha256(tmp_path: Path) -> None:
     files = {"detail.html": "<html>hello</html>"}
     bundle = _write_bundle(tmp_path, files, _manifest(files))
@@ -58,6 +157,9 @@ def test_fixture_hash_is_sha256(tmp_path: Path) -> None:
 
     assert inspection.valid is True
     assert inspection.actual_hashes["detail.html"] == hashlib.sha256(payload).hexdigest()
+    assert inspection.manifest_sha256 == hashlib.sha256(
+        (bundle / "manifest.json").read_bytes()
+    ).hexdigest()
 
 
 def test_inspect_bundle_rejects_undeclared_file(tmp_path: Path) -> None:

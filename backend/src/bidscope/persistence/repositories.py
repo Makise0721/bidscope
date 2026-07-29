@@ -14,6 +14,7 @@ repository never generates random defaults, consistent with the schema's
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
@@ -90,12 +91,16 @@ class SnapshotRepository:
         idempotency_key: str,
         started_at: datetime,
         status: str = "running",
+        warnings: dict[str, Any] | None = None,
+        metrics: dict[str, Any] | None = None,
     ) -> SnapshotImport:
         import_record = SnapshotImport(
             snapshot_bundle_id=snapshot_bundle_id,
             idempotency_key=idempotency_key,
             status=status,
             started_at=started_at,
+            warnings=warnings or {},
+            metrics=metrics or {},
         )
         self.session.add(import_record)
         await self.session.flush()

@@ -2,7 +2,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from bidscope.domain.snapshots import SnapshotManifest
 from pydantic import ValidationError
@@ -21,6 +21,8 @@ class InspectionResult:
     bundle_id: str | None = None
     errors: list[InspectionError] = field(default_factory=list)
     actual_hashes: dict[str, str] = field(default_factory=dict)
+    disposition: Literal["accepted", "quarantined"] = "quarantined"
+    manifest_sha256: str | None = None
     #: The parsed manifest, available when inspection succeeded. Adapters read
     #: this instead of re-parsing ``manifest.json`` a second time.
     manifest: SnapshotManifest | None = None
@@ -88,7 +90,13 @@ def _convert_manifest_errors(data: dict[str, Any]) -> list[InspectionError]:
             err_type = err["type"]
             msg = err["msg"]
             if err_type == "value_error":
-                if "source=synthetic_demo" in msg or "synthetic_demo bundles" in msg:
+                if "requires a data_contract" in msg:
+                    code = "missing_data_contract"
+                elif "review_status must be approved" in msg:
+                    code = "authorization_not_approved"
+                elif "schema_version 2" in msg:
+                    code = "invalid_data_contract"
+                elif "source=synthetic_demo" in msg or "synthetic_demo bundles" in msg:
                     code = "source_capture_mismatch"
                 elif "HTTPS" in msg or "example.invalid" in msg:
                     code = "invalid_source_url"
@@ -123,7 +131,9 @@ def inspect_bundle(bundle_path: Path) -> InspectionResult:
         )
 
     try:
-        raw = json.loads(manifest_file.read_text(encoding="utf-8"))
+        manifest_bytes = manifest_file.read_bytes()
+        manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+        raw = json.loads(manifest_bytes.decode("utf-8"))
     except json.JSONDecodeError as error:
         return InspectionResult(
             valid=False,
@@ -219,5 +229,7 @@ def inspect_bundle(bundle_path: Path) -> InspectionResult:
         bundle_id=manifest.bundle_id,
         errors=errors,
         actual_hashes=actual_hashes,
+        disposition="accepted" if valid else "quarantined",
+        manifest_sha256=manifest_sha256,
         manifest=manifest if valid else None,
     )

@@ -1,6 +1,6 @@
 import re
 from collections import deque
-from typing import Annotated, cast
+from typing import Annotated, Literal, cast
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
@@ -12,6 +12,52 @@ from bidscope.domain.provenance import (
 from bidscope.domain.types import AwareDatetime
 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_CONTRACT_VERSION_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*-v[0-9]+$")
+_BATCH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+BoundedContractLabel = Annotated[str, Field(min_length=1, max_length=128)]
+
+
+class AuthorizedSourceContract(BaseModel):
+    """Bounded, non-secret admission metadata for an authorized source batch."""
+
+    contract_version: Annotated[str, Field(min_length=1, max_length=64)]
+    authorization_ref: BoundedContractLabel
+    data_owner: BoundedContractLabel
+    regions: Annotated[list[BoundedContractLabel], Field(min_length=1, max_length=50)]
+    categories: Annotated[list[BoundedContractLabel], Field(min_length=1, max_length=50)]
+    review_status: Literal["approved", "pending", "rejected"]
+    reviewed_at: AwareDatetime | None = None
+    update_sla: Literal["weekly"]
+    retention_days: Annotated[int, Field(gt=0, le=3650)]
+
+    @field_validator("contract_version")
+    @classmethod
+    def _validate_contract_version(cls, value: str) -> str:
+        if not _CONTRACT_VERSION_RE.fullmatch(value):
+            raise ValueError("contract_version must use a name-vN format")
+        return value
+
+    @field_validator("authorization_ref", "data_owner", "regions", "categories")
+    @classmethod
+    def _reject_control_characters(cls, value: object) -> object:
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            if isinstance(item, str) and (
+                not item.strip()
+                or any(ord(character) <= 0x1F or ord(character) == 0x7F for character in item)
+            ):
+                raise ValueError(
+                    "contract labels must be non-blank and contain no control characters"
+                )
+        return value
+
+    @model_validator(mode="after")
+    def _validate_review(self) -> "AuthorizedSourceContract":
+        if self.review_status == "approved" and self.reviewed_at is None:
+            raise ValueError("approved data_contract requires reviewed_at")
+        return self
 
 
 class SnapshotManifest(BaseModel):
@@ -33,6 +79,8 @@ class SnapshotManifest(BaseModel):
     retrieval_outcome: Annotated[str, Field(min_length=1)]
     parser_version: Annotated[str, Field(min_length=1)]
     files: Annotated[dict[str, str], Field(min_length=1)]
+    batch_id: Annotated[str, Field(min_length=1, max_length=128)] | None = None
+    data_contract: AuthorizedSourceContract | None = None
 
     @field_validator("source_urls", mode="before")
     @classmethod
@@ -75,6 +123,13 @@ class SnapshotManifest(BaseModel):
                 )
         return value
 
+    @field_validator("batch_id")
+    @classmethod
+    def _validate_batch_id(cls, value: str | None) -> str | None:
+        if value is not None and not _BATCH_ID_RE.fullmatch(value):
+            raise ValueError("batch_id must be a bounded identifier without path separators")
+        return value
+
     @model_validator(mode="after")
     def _validate_provenance(self) -> "SnapshotManifest":
         # Source/capture_kind agreement is enforced uniformly via the shared
@@ -86,4 +141,23 @@ class SnapshotManifest(BaseModel):
                 host=url.host,
                 external_id=self.bundle_id,
             ).raise_invalid()
+        return self
+
+    @model_validator(mode="after")
+    def _validate_authorized_contract(self) -> "SnapshotManifest":
+        if self.schema_version < 2:
+            return self
+        if (
+            self.source != SourceName.CCGP
+            or self.capture_kind != CaptureKind.CURATED_PUBLIC_EXCERPT
+        ):
+            raise ValueError(
+                "schema_version 2 is reserved for CCGP curated_public_excerpt bundles"
+            )
+        if self.batch_id is None:
+            raise ValueError("schema_version 2 requires batch_id")
+        if self.data_contract is None:
+            raise ValueError("schema_version 2 requires a data_contract")
+        if self.data_contract.review_status != "approved":
+            raise ValueError("authorized data contract review_status must be approved")
         return self

@@ -132,6 +132,7 @@ def snapshots_inspect(
             "valid": False,
             "bundle_id": None,
             "status": "invalid",
+            "disposition": "quarantined",
             "errors": [str(error)],
         }
         if json_output:
@@ -144,6 +145,7 @@ def snapshots_inspect(
         "valid": inspection.valid,
         "bundle_id": inspection.bundle_id,
         "status": "valid" if inspection.valid else "invalid",
+        "disposition": inspection.disposition,
         "errors": [
             {"code": e.code, "message": e.message, "path": e.path}
             for e in inspection.errors
@@ -190,6 +192,9 @@ def snapshots_import(
         "bundle_id": record.snapshot_bundle_id,
         "status": record.status,
         "import_id": str(record.id),
+        "bundle_hash": getattr(record, "metrics", {}).get("manifest_sha256"),
+        "metrics": getattr(record, "metrics", {}),
+        "warnings": getattr(record, "warnings", {}),
         "errors": [],
     }
     if json_output:
