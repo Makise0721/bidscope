@@ -73,7 +73,7 @@ cleanup() {
       down -v --remove-orphans >/dev/null 2>&1 || true
   fi
   if [[ -n "${TEMP_ROOT}" && -d "${TEMP_ROOT}" ]]; then
-    rm -rf -- "${TEMP_ROOT}"
+    rm -rf -- "${TEMP_ROOT}" || true
   fi
 }
 

@@ -26,6 +26,7 @@ def _run_drill(
     tick_responses: list[dict[str, int | str]] | None = None,
     fail_config: bool = False,
     fail_date: bool = False,
+    fail_cleanup: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     """Run the shell drill against local command doubles, never Docker/network."""
     # Keep source inspection encoding-explicit on Windows; execution below is
@@ -155,6 +156,13 @@ else
 fi
 """,
     )
+    if fail_cleanup:
+        _write_executable(
+            fake_bin / "rm",
+            """#!/usr/bin/env bash
+exit 91
+""",
+        )
 
     environment = os.environ.copy()
     environment.update(
@@ -237,6 +245,20 @@ def test_recovery_drill_emits_failure_evidence_before_temporary_setup(tmp_path: 
     assert evidence["passed"] is False
     assert evidence["error"] == "initialize-timestamps"
     assert evidence["started_at"]
+
+
+def test_recovery_drill_preserves_original_failure_when_cleanup_fails(
+    tmp_path: Path,
+) -> None:
+    """Best-effort cleanup must not replace the failed Compose exit status."""
+    result, evidence_path = _run_drill(
+        tmp_path, fail_config=True, fail_cleanup=True
+    )
+
+    assert result.returncode == 41
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["passed"] is False
+    assert evidence["exit_code"] == 41
 
 
 def test_recovery_rto_includes_final_restore_validation(tmp_path: Path) -> None:
