@@ -26,6 +26,7 @@ def _run_drill(
     fail_config: bool = False,
     fail_date: bool = False,
     fail_cleanup: bool = False,
+    python_command: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     """Run the shell drill against local command doubles, never Docker/network."""
     # Keep source inspection encoding-explicit on Windows; execution below is
@@ -47,12 +48,28 @@ def _run_drill(
         {"run_scheduler_tick": "ok", "ran": 1, "failed": 0},
     ]
     (state_dir / "ticks.json").write_text(json.dumps(tick_payloads), encoding="utf-8")
+    if python_command == "py -3":
+        _write_executable(
+            fake_bin / "py",
+            """#!/usr/bin/env bash
+[[ "${1:-}" == "-3" ]] && shift
+exec python3 "$@"
+""",
+        )
 
     _write_executable(
         fake_bin / "docker",
         """#!/usr/bin/env bash
 set -eu
 args="$*"
+for ((index = 1; index <= $#; index++)); do
+  if [[ "${!index}" == "-p" ]]; then
+    next_index=$((index + 1))
+    project_name="${!next_index}"
+    [[ "$project_name" =~ ^[a-z0-9][a-z0-9_.-]*$ ]] || exit 52
+    break
+  fi
+done
 if [[ "$args" == *" config "* ]]; then
   [[ "${FAKE_FAIL_CONFIG:-0}" == "1" ]] && exit 41
   exit 0
@@ -174,6 +191,7 @@ exit 91
             "FAKE_FAIL_CONFIG": "1" if fail_config else "0",
             "FAKE_FAIL_DATE": "1" if fail_date else "0",
             "BIDSCOPE_RECOVERY_EVIDENCE_PATH": str(evidence_path),
+            "BIDSCOPE_PYTHON_COMMAND": python_command or "python3",
         }
     )
     result = subprocess.run(
@@ -260,6 +278,18 @@ def test_recovery_drill_preserves_original_failure_when_cleanup_fails(
     evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
     assert evidence["passed"] is False
     assert evidence["exit_code"] == 41
+
+
+def test_recovery_drill_supports_a_multi_token_python_launcher(tmp_path: Path) -> None:
+    """A command array preserves arguments and stdin for failure evidence."""
+    result, evidence_path = _run_drill(
+        tmp_path, fail_config=True, python_command="py -3"
+    )
+
+    assert result.returncode == 41
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["passed"] is False
+    assert evidence["error"] == "compose-config"
 
 
 def test_recovery_rto_includes_final_restore_validation(tmp_path: Path) -> None:

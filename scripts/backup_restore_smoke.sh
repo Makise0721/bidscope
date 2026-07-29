@@ -23,6 +23,7 @@ rto_seconds=""
 old_evidence_version=""
 current_step="bootstrap"
 evidence_emitted=false
+PYTHON_COMMAND=(python3)
 
 compose() {
   docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${RECOVERY_COMPOSE_FILE}" "$@" >&2
@@ -37,7 +38,7 @@ emit_evidence() {
   local error_context="${2:-}"
   local exit_code="${3:-0}"
   local payload
-  payload="$(python3 - "${backup_id}" "${manifest_hash}" "${started_at}" "${backup_created_at}" "${old_evidence_version}" "${rpo_hours:-null}" "${rto_seconds:-null}" "${passed}" "${error_context}" "${exit_code}" <<'PY'
+  payload="$("${PYTHON_COMMAND[@]}" - "${backup_id}" "${manifest_hash}" "${started_at}" "${backup_created_at}" "${old_evidence_version}" "${rpo_hours:-null}" "${rto_seconds:-null}" "${passed}" "${error_context}" "${exit_code}" <<'PY'
 import json
 import sys
 from datetime import datetime, timezone
@@ -88,6 +89,12 @@ on_exit() {
 }
 trap 'on_exit $?' EXIT
 
+current_step="python-launcher-setup"
+read -r -a PYTHON_COMMAND <<< "${BIDSCOPE_PYTHON_COMMAND:-python3}" || true
+if [[ "${#PYTHON_COMMAND[@]}" -eq 0 ]]; then
+  PYTHON_COMMAND=(python3)
+fi
+
 current_step="resolve-script-directory"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -97,7 +104,7 @@ cd "${PROJECT_ROOT}"
 
 current_step="initialize-timestamps"
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}"
+RUN_ID="$(date -u +%Y%m%dt%H%M%Sz)-$$-${RANDOM}"
 PROJECT_NAME="bidscope-recovery-${RUN_ID}"
 current_step="temporary-workspace"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/bidscope-recovery.XXXXXX")"
@@ -133,13 +140,13 @@ mkdir -p "${BACKUP_DIR}" "${SOURCE_OBJECT_DIR}" "${TARGET_OBJECT_DIR}"
 json_field() {
   local json="$1"
   local field="$2"
-  python3 -c 'import json, sys; print(json.loads(sys.argv[1])[sys.argv[2]])' "${json}" "${field}"
+  "${PYTHON_COMMAND[@]}" -c 'import json, sys; print(json.loads(sys.argv[1])[sys.argv[2]])' "${json}" "${field}"
 }
 
 json_nested_field() {
   local json="$1"
   local path="$2"
-  python3 -c 'from functools import reduce; import json, sys; print(reduce(lambda value, key: value[key], sys.argv[2].split("."), json.loads(sys.argv[1])))' "${json}" "${path}"
+  "${PYTHON_COMMAND[@]}" -c 'from functools import reduce; import json, sys; print(reduce(lambda value, key: value[key], sys.argv[2].split("."), json.loads(sys.argv[1])))' "${json}" "${path}"
 }
 
 wait_ready() {
@@ -175,7 +182,7 @@ assert_docx() {
   local run_id="$1"
   local path="${TEMP_ROOT}/${run_id}.docx"
   curl -fsS "${base_url}/api/reports/${run_id}/docx" -o "${path}"
-  python3 - "${path}" <<'PY'
+  "${PYTHON_COMMAND[@]}" - "${path}" <<'PY'
 from pathlib import Path
 import sys
 
@@ -187,7 +194,7 @@ PY
 create_and_complete_scheduled_run() {
   local scheduled_request='每周一上午 9 点，汇总近 7 天四川和重庆与智算中心服务器有关的预算 500 万以上的招标信息。'
   local created run_id
-  created="$(curl -fsS -X POST "${base_url}/api/runs" -H 'Content-Type: application/json' --data "$(python3 -c 'import json,sys; print(json.dumps({"user_request": sys.argv[1]}))' "${scheduled_request}")")"
+  created="$(curl -fsS -X POST "${base_url}/api/runs" -H 'Content-Type: application/json' --data "$("${PYTHON_COMMAND[@]}" -c 'import json,sys; print(json.dumps({"user_request": sys.argv[1]}))' "${scheduled_request}")")"
   run_id="$(json_field "${created}" id)"
   wait_for_status "${run_id}" "awaiting_confirmation"
   curl -fsS -X POST "${base_url}/api/runs/${run_id}/confirm" -H 'Content-Type: application/json' --data '{"action":"approve"}' >/dev/null
@@ -219,7 +226,7 @@ old_report="$(curl -fsS "${base_url}/api/reports/${old_run_id}")"
 old_evidence_version="$(json_nested_field "${old_report}" 'items.0.provenance.source_version_id')"
 assert_docx "${old_run_id}"
 current_step="source-subscription-create"
-curl -fsS -X POST "${base_url}/api/subscriptions" -H 'Content-Type: application/json' --data "$(python3 -c 'import json,sys; print(json.dumps({"run_id": sys.argv[1]}))' "${old_run_id}")" >/dev/null
+curl -fsS -X POST "${base_url}/api/subscriptions" -H 'Content-Type: application/json' --data "$("${PYTHON_COMMAND[@]}" -c 'import json,sys; print(json.dumps({"run_id": sys.argv[1]}))' "${old_run_id}")" >/dev/null
 current_step="source-scheduler-tick"
 source_tick="$(curl -fsS -X POST "${base_url}/api/test-controls/run-scheduler-tick" -H "X-Test-Control-Token: ${BIDSCOPE_TEST_CONTROL_TOKEN}")"
 [[ "$(json_field "${source_tick}" run_scheduler_tick)" == "ok" ]]
@@ -229,14 +236,14 @@ source_tick="$(curl -fsS -X POST "${base_url}/api/test-controls/run-scheduler-ti
 current_step="backup-create"
 backup_json="$(compose_capture run --rm --no-deps api bidscope ops backup create --retention-class daily --json | tail -n 1)"
 backup_id="$(json_field "${backup_json}" backup_id)"
-backup_created_at="$(python3 - "${BACKUP_DIR}/${backup_id}/manifest.json" <<'PY'
+backup_created_at="$("${PYTHON_COMMAND[@]}" - "${BACKUP_DIR}/${backup_id}/manifest.json" <<'PY'
 import json
 import sys
 print(json.load(open(sys.argv[1], encoding="utf-8"))["created_at"])
 PY
 )"
 manifest_hash="$(sha256sum "${BACKUP_DIR}/${backup_id}/manifest.json" | awk '{print $1}')"
-rpo_hours="$(python3 - "${backup_created_at}" <<'PY'
+rpo_hours="$("${PYTHON_COMMAND[@]}" - "${backup_created_at}" <<'PY'
 from datetime import datetime, timezone
 import sys
 
@@ -274,7 +281,7 @@ assert_docx "${old_run_id}"
 current_step="restored-new-run-validation"
 new_run_id="$(create_and_complete_scheduled_run)"
 current_step="restored-subscription-create"
-curl -fsS -X POST "${base_url}/api/subscriptions" -H 'Content-Type: application/json' --data "$(python3 -c 'import json,sys; print(json.dumps({"run_id": sys.argv[1]}))' "${new_run_id}")" >/dev/null
+curl -fsS -X POST "${base_url}/api/subscriptions" -H 'Content-Type: application/json' --data "$("${PYTHON_COMMAND[@]}" -c 'import json,sys; print(json.dumps({"run_id": sys.argv[1]}))' "${new_run_id}")" >/dev/null
 current_step="restored-scheduler-tick"
 restored_tick="$(curl -fsS -X POST "${base_url}/api/test-controls/run-scheduler-tick" -H "X-Test-Control-Token: ${BIDSCOPE_TEST_CONTROL_TOKEN}")"
 [[ "$(json_field "${restored_tick}" run_scheduler_tick)" == "ok" ]]
@@ -283,7 +290,7 @@ restored_tick="$(curl -fsS -X POST "${base_url}/api/test-controls/run-scheduler-
 rto_seconds="$(( $(date +%s) - restore_started ))"
 
 current_step="rpo-rto-threshold-gate"
-if python3 - "${rpo_hours}" "${rto_seconds}" <<'PY'
+if "${PYTHON_COMMAND[@]}" - "${rpo_hours}" "${rto_seconds}" <<'PY'
 import sys
 rpo, rto = map(float, sys.argv[1:])
 raise SystemExit(0 if rpo <= 24 and rto <= 14400 else 1)
