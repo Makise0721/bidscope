@@ -226,7 +226,7 @@ _METRIC_DEFINITIONS: dict[str, _MetricDefinition] = {
         ("outcome", "source"),
         {
             "outcome": frozenset({"success", "failed", "skipped"}),
-            "source": frozenset({"ccgp", "ggzy", "demo", "unknown"}),
+            "source": frozenset({"ccgp", "ggzy", "synthetic_demo", "unknown"}),
         },
     ),
     "bidscope_report_delivery_duration_seconds": _MetricDefinition(

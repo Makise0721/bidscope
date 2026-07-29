@@ -97,6 +97,21 @@ def test_metrics_registry_only_accepts_known_names_and_bounded_labels() -> None:
         registry.counter("bidscope_http_requests_total", {"status": "/api/runs/123"})
 
 
+def test_snapshot_import_metrics_accept_canonical_synthetic_demo_source() -> None:
+    """The fixed source vocabulary matches the snapshot manifest enum."""
+    registry = MetricsRegistry()
+
+    registry.counter(
+        "bidscope_snapshot_imports_total",
+        {"source": "synthetic_demo", "outcome": "success"},
+    )
+    with pytest.raises(ValueError):
+        registry.counter(
+            "bidscope_snapshot_imports_total",
+            {"source": "demo", "outcome": "success"},
+        )
+
+
 def test_metrics_registry_renders_prometheus_histograms_without_arbitrary_ids() -> None:
     registry = MetricsRegistry()
 
