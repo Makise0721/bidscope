@@ -96,9 +96,11 @@ async def create_run(
                 error={"code": error.code, "message": "run capacity exhausted", "details": {}},
                 expected_status="pending",
             )
-            response.status_code = 429
-            response.headers["Retry-After"] = "5"
-            raise HTTPException(status_code=429, detail=error.code) from error
+            raise HTTPException(
+                status_code=429,
+                detail=error.code,
+                headers={"Retry-After": "5"},
+            ) from error
     else:
         response.status_code = 200
     return RunQueryResult.from_row(run).__dict__ if run else {
