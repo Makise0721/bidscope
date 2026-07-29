@@ -267,10 +267,24 @@ async def test_invalid_bundle_fails_before_transaction(
 
 
 async def test_mid_import_error_rolls_back(
-    importer_cls, repository_cls, session_factory, object_store, clock, demo_batch_1
+    importer_cls,
+    repository_cls,
+    session_factory,
+    object_store,
+    clock,
+    demo_batch_1,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A database error mid-import must leave no partial records."""
     from bidscope.persistence.repositories import SnapshotRepository
+    from bidscope.snapshots import importer as importer_module
+
+    metric_calls: list[tuple[str, dict[str, str]]] = []
+    monkeypatch.setattr(
+        importer_module.METRICS_REGISTRY,
+        "counter",
+        lambda name, labels: metric_calls.append((name, dict(labels or {}))),
+    )
 
     class FaultyRepository(SnapshotRepository):
         async def create_version(self, **kwargs):  # type: ignore[override]
@@ -285,6 +299,13 @@ async def test_mid_import_error_rolls_back(
 
     with pytest.raises(RuntimeError, match="injected db fault"):
         await faulty_importer.import_bundle(demo_batch_1)
+
+    assert metric_calls == [
+        (
+            "bidscope_snapshot_imports_total",
+            {"source": "synthetic_demo", "outcome": "failed"},
+        )
+    ]
 
     async with session_factory() as session:
         assert await _count(session, SnapshotBundle) == 0
