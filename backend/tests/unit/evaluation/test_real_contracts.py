@@ -67,6 +67,23 @@ def _evaluation_result(**overrides: object) -> dict[str, object]:
     return result
 
 
+def _snapshot_catalog() -> dict[str, object]:
+    return {
+        "schema_version": "snapshot-admission-catalog-v1",
+        "snapshots": [
+            {
+                "bundle_id": "ccgp-batch-20260729",
+                "bundle_hash": "a" * 64,
+                "batch_id": "ccgp-batch-20260729",
+                "source": "ccgp",
+                "capture_kind": "curated_public_excerpt",
+                "schema_version": 2,
+                "review_status": "approved",
+            }
+        ],
+    }
+
+
 def test_real_dataset_manifest_rejects_synthetic_source() -> None:
     manifest = _dataset_manifest()
     manifest["source"] = "synthetic_demo"
@@ -92,9 +109,30 @@ def test_real_result_requires_failure_reason_when_hard_gate_is_false() -> None:
         RealEvaluationResult.model_validate(result)
 
 
+def test_failed_real_result_requires_safe_failure_code_and_allows_missing_metrics() -> None:
+    result = _evaluation_result(
+        status="failed",
+        metrics=None,
+        failure_codes=["provider_unavailable"],
+    )
+
+    validated = RealEvaluationResult.model_validate(result)
+
+    assert validated.metrics is None
+    assert validated.failure_codes == ["provider_unavailable"]
+
+
+def test_real_result_rejects_sensitive_failure_code() -> None:
+    result = _evaluation_result(failure_codes=["provider_unavailable\nsecret=token"])
+
+    with pytest.raises(ValidationError):
+        RealEvaluationResult.model_validate(result)
+
+
 def test_real_evaluation_files_validate_dataset_linkage_and_hash(tmp_path: Path) -> None:
     manifest_path = tmp_path / "dataset-manifest.json"
     result_path = tmp_path / "result.json"
+    catalog_path = tmp_path / "snapshot-admission-catalog.json"
     manifest_path.write_text(
         json.dumps(_dataset_manifest(), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -106,16 +144,22 @@ def test_real_evaluation_files_validate_dataset_linkage_and_hash(tmp_path: Path)
         json.dumps(result, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    catalog_path.write_text(
+        json.dumps(_snapshot_catalog(), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
-    validated = validate_real_evaluation_files(manifest_path, result_path)
+    validated = validate_real_evaluation_files(manifest_path, result_path, catalog_path)
 
     assert validated.manifest.dataset_id == "ccgp-pilot-eval"
     assert validated.result.run_id == "real-eval-run-20260729-01"
+    assert len(validated.snapshot_catalog_sha256) == 64
 
 
 def test_real_evaluation_files_reject_manifest_hash_mismatch(tmp_path: Path) -> None:
     manifest_path = tmp_path / "dataset-manifest.json"
     result_path = tmp_path / "result.json"
+    catalog_path = tmp_path / "snapshot-admission-catalog.json"
     manifest_path.write_text(
         json.dumps(_dataset_manifest(), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -124,6 +168,36 @@ def test_real_evaluation_files_reject_manifest_hash_mismatch(tmp_path: Path) -> 
         json.dumps(_evaluation_result(), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    catalog_path.write_text(
+        json.dumps(_snapshot_catalog(), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
     with pytest.raises(ValueError, match="manifest hash"):
-        validate_real_evaluation_files(manifest_path, result_path)
+        validate_real_evaluation_files(manifest_path, result_path, catalog_path)
+
+
+def test_real_evaluation_files_reject_unapproved_snapshot_catalog(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "dataset-manifest.json"
+    result_path = tmp_path / "result.json"
+    catalog_path = tmp_path / "snapshot-admission-catalog.json"
+    manifest_path.write_text(
+        json.dumps(_dataset_manifest(), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    result = _evaluation_result(
+        dataset_manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    )
+    result_path.write_text(
+        json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    catalog = _snapshot_catalog()
+    catalog["snapshots"][0]["review_status"] = "pending"  # type: ignore[index]
+    catalog_path.write_text(
+        json.dumps(catalog, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="approved"):
+        validate_real_evaluation_files(manifest_path, result_path, catalog_path)

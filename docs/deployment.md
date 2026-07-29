@@ -173,13 +173,15 @@ changes the deterministic CI gate:
 ```bash
 bidscope eval validate-real \
   --manifest /controlled/staging/evaluation/dataset-manifest.json \
+  --catalog /controlled/staging/evaluation/snapshot-admission-catalog.json \
   --result /controlled/staging/evaluation/result.json \
   --json
 ```
 
-The validator checks dataset/version linkage, snapshot IDs, exact manifest
-SHA-256, bounded model metadata, sample count and citation/provenance hard-gate
-outcomes. A valid completed result reports `status=validated` and
+The validator checks dataset/version linkage, snapshot IDs, exact manifest and
+admission-catalog SHA-256 values, approved CCGP schema-v2 catalog entries,
+bounded model metadata, sample count and citation/provenance hard-gate outcomes.
+A valid completed result reports `status=validated` and
 `release_decision=review_required`; it does not emit or reuse
 `deterministic_target_pass`. A failed or hard-gate-invalid result is blocked.
 The command performs no network access and does not run a model.

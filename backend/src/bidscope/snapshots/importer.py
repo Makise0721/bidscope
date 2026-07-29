@@ -33,6 +33,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -70,6 +72,19 @@ ADAPTERS: dict[SourceName, BundleAdapter] = {
 class SnapshotImportError(Exception):
     """Raised when a bundle cannot be imported (integrity or provenance)."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        errors: list[dict[str, str | None]] | None = None,
+        bundle_id: str | None = None,
+        manifest_sha256: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.errors = errors or []
+        self.bundle_id = bundle_id
+        self.manifest_sha256 = manifest_sha256
+
 
 def _content_hash(notice: Any) -> str:
     """Deterministic content hash for a :class:`NormalizedNotice`.
@@ -93,6 +108,11 @@ def _payload_object_key(bundle_id: str, content_hash: str) -> str:
     return f"snapshots/{bundle_id}/{content_hash}"
 
 
+def _mark_reprocessing(record: Any, value: str) -> None:
+    """Attach a non-persistent CLI result marker to a returned ORM record."""
+    record._reprocessing = value
+
+
 class SnapshotImporter:
     """Import snapshot bundles idempotently and preserve notice versions."""
 
@@ -111,6 +131,19 @@ class SnapshotImporter:
     # ------------------------------------------------------------- public
 
     async def import_bundle(self, bundle: Path) -> Any:
+        """Materialize, validate and import one immutable bundle snapshot."""
+        bundle = bundle.resolve()
+        try:
+            with tempfile.TemporaryDirectory(prefix="bidscope-import-") as temp_root:
+                staged_bundle = Path(temp_root) / bundle.name
+                shutil.copytree(bundle, staged_bundle, symlinks=True)
+                return await self._import_verified_bundle(staged_bundle)
+        except OSError as error:
+            raise SnapshotImportError(
+                f"could not materialize bundle for import: {error}"
+            ) from error
+
+    async def _import_verified_bundle(self, bundle: Path) -> Any:
         """Import a snapshot bundle, returning its ``SnapshotImport`` record.
 
         Re-importing an identical bundle (same content) returns the existing
@@ -121,16 +154,34 @@ class SnapshotImporter:
         # Step 1: integrity inspection BEFORE any write. An invalid bundle
         # raises here — no database rows, no objects are ever produced.
         inspection = inspect_bundle(bundle)
-        if not inspection.valid:
+        if not inspection.valid or inspection.manifest is None:
             raise SnapshotImportError(
                 f"bundle failed integrity inspection: "
-                f"{[e.code for e in inspection.errors]}"
+                f"{[e.code for e in inspection.errors]}",
+                errors=[
+                    {"code": error.code, "message": error.message, "path": error.path}
+                    for error in inspection.errors
+                ],
+                bundle_id=inspection.bundle_id,
+                manifest_sha256=inspection.manifest_sha256,
             )
 
-        manifest = _parse.load_manifest(bundle)
-        notices = self._parse(bundle)
+        manifest = inspection.manifest
+        try:
+            notices = self._parse(bundle)
+        except SnapshotImportError:
+            raise
+        except Exception as error:
+            raise SnapshotImportError(
+                "bundle parser rejected the staged payload",
+                errors=[{"code": "parse_failed", "message": type(error).__name__, "path": None}],
+                bundle_id=manifest.bundle_id,
+                manifest_sha256=inspection.manifest_sha256,
+            ) from error
 
-        idempotency_key = self._derive_idempotency_key(manifest.bundle_id, notices)
+        idempotency_key = self._derive_idempotency_key(
+            manifest.bundle_id, notices, inspection.manifest_sha256
+        )
 
         async with UnitOfWork(self.session_factory) as uow:
             if uow.session is None:
@@ -142,7 +193,16 @@ class SnapshotImporter:
             # bundle content already exists, so return it unchanged.
             existing = await repository.find_import(idempotency_key)
             if existing is not None and existing.status == "success":
+                _mark_reprocessing(existing, "reused")
                 return existing
+
+            manifest_payload = manifest.model_dump(mode="json")
+            existing_bundle = await repository.find_bundle_by_external_id(manifest.bundle_id)
+            if existing_bundle is not None and existing_bundle.manifest != manifest_payload:
+                raise SnapshotImportError(
+                    "bundle_id already exists with a different manifest; "
+                    "use a new immutable bundle_id for the revised batch"
+                )
 
             snapshot_bundle = await repository.get_or_create_bundle(
                 bundle_id=manifest.bundle_id,
@@ -153,8 +213,10 @@ class SnapshotImporter:
                 retrieved_at=manifest.retrieved_at,
                 retrieval_outcome=manifest.retrieval_outcome,
                 parser_version=manifest.parser_version,
-                manifest=manifest.model_dump(mode="json"),
+                manifest=manifest_payload,
             )
+
+            reprocessing = "new_version" if existing_bundle is not None else "new"
 
             import_record = await repository.create_import(
                 snapshot_bundle_id=snapshot_bundle.id,
@@ -166,7 +228,7 @@ class SnapshotImporter:
                     "manifest_sha256": inspection.manifest_sha256,
                     "payload_file_count": len(inspection.actual_hashes),
                     "notice_count": len(notices),
-                    "reprocessing": "new",
+                    "reprocessing": reprocessing,
                 },
             )
 
@@ -189,6 +251,7 @@ class SnapshotImporter:
                         "bundle_id": manifest.bundle_id,
                         "status": "success",
                         "notice_count": len(notices),
+                        "reprocessing": reprocessing,
                     },
                 )
             except BaseException:
@@ -232,14 +295,19 @@ class SnapshotImporter:
             )
         return adapter.parse(bundle)
 
-    def _derive_idempotency_key(self, bundle_id: str, notices: list[Any]) -> str:
+    def _derive_idempotency_key(
+        self,
+        bundle_id: str,
+        notices: list[Any],
+        manifest_sha256: str | None = None,
+    ) -> str:
         """Deterministic idempotency key from bundle identity + notice content.
 
         Identical bundle content (re-import) produces the same key; any content
         change produces a different key and therefore a distinct import.
         """
         notice_hashes = sorted(_content_hash(notice) for notice in notices)
-        material = bundle_id + "|" + ",".join(notice_hashes)
+        material = bundle_id + "|" + (manifest_sha256 or "") + "|" + ",".join(notice_hashes)
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     async def _import_notice(

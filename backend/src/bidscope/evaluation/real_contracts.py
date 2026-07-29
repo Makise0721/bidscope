@@ -19,6 +19,7 @@ from bidscope.domain.types import AwareDatetime
 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_FAILURE_CODE_RE = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
 _MAX_REAL_EVALUATION_RECORDS = 1_000_000
 
 BoundedIdentifier = Annotated[str, Field(min_length=1, max_length=128)]
@@ -28,6 +29,52 @@ BoundedCode = Annotated[str, Field(min_length=1, max_length=64)]
 
 class RealEvaluationContractError(ValueError):
     """Raised when two restricted evaluation artifacts cannot be linked safely."""
+
+
+class RealEvaluationSnapshotCatalogEntry(BaseModel):
+    """One immutable snapshot admission record exported for staging review."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    bundle_id: BoundedIdentifier
+    bundle_hash: str
+    batch_id: BoundedIdentifier
+    source: Literal["ccgp"]
+    capture_kind: Literal["curated_public_excerpt"]
+    schema_version: Literal[2]
+    review_status: Literal["approved"]
+
+    @field_validator("bundle_id", "batch_id")
+    @classmethod
+    def _validate_identifier(cls, value: str) -> str:
+        if not _IDENTIFIER_RE.fullmatch(value):
+            raise ValueError("snapshot catalog identifiers must be path-safe labels")
+        return value
+
+    @field_validator("bundle_hash")
+    @classmethod
+    def _validate_bundle_hash(cls, value: str) -> str:
+        if not _SHA256_RE.fullmatch(value):
+            raise ValueError("snapshot catalog bundle_hash must be a SHA-256 hash")
+        return value
+
+
+class RealEvaluationSnapshotCatalog(BaseModel):
+    """Controlled catalog of bundles that passed the snapshot admission gate."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["snapshot-admission-catalog-v1"]
+    snapshots: Annotated[
+        list[RealEvaluationSnapshotCatalogEntry], Field(min_length=1, max_length=100)
+    ]
+
+    @model_validator(mode="after")
+    def _validate_unique_bundles(self) -> RealEvaluationSnapshotCatalog:
+        ids = [snapshot.bundle_id for snapshot in self.snapshots]
+        if len(set(ids)) != len(ids):
+            raise ValueError("snapshot admission catalog bundle IDs must be unique")
+        return self
 
 
 class RealEvaluationDatasetManifest(BaseModel):
@@ -122,7 +169,7 @@ class RealEvaluationResult(BaseModel):
     sample_count: Annotated[int, Field(gt=0, le=_MAX_REAL_EVALUATION_RECORDS)]
     failure_policy: Literal["fail_closed", "record_and_continue"]
     status: Literal["completed", "failed"]
-    metrics: RealEvaluationMetrics
+    metrics: RealEvaluationMetrics | None = None
     citation_provenance_hard_gate: bool
     hard_gate_failures: Annotated[list[BoundedCode], Field(max_length=32)]
     failure_codes: Annotated[list[BoundedCode], Field(max_length=32)]
@@ -158,8 +205,19 @@ class RealEvaluationResult(BaseModel):
             raise ValueError("snapshot_bundle_ids must be unique path-safe identifiers")
         return value
 
+    @field_validator("hard_gate_failures", "failure_codes")
+    @classmethod
+    def _validate_failure_codes(cls, value: list[str]) -> list[str]:
+        if any(not _FAILURE_CODE_RE.fullmatch(code) for code in value):
+            raise ValueError("failure codes must use lowercase safe identifiers")
+        return value
+
     @model_validator(mode="after")
     def _validate_hard_gate(self) -> RealEvaluationResult:
+        if self.status == "completed" and self.metrics is None:
+            raise ValueError("completed evaluation requires metrics")
+        if self.status == "failed" and not self.failure_codes:
+            raise ValueError("failed evaluation requires failure_codes")
         if self.citation_provenance_hard_gate and self.hard_gate_failures:
             raise ValueError("hard_gate_failures must be empty when the hard gate passes")
         if not self.citation_provenance_hard_gate and not self.hard_gate_failures:
@@ -175,6 +233,7 @@ class ValidatedRealEvaluation(BaseModel):
     manifest: RealEvaluationDatasetManifest
     result: RealEvaluationResult
     manifest_sha256: str
+    snapshot_catalog_sha256: str
 
 
 def _load_json(path: Path) -> dict[str, object]:
@@ -188,13 +247,16 @@ def _load_json(path: Path) -> dict[str, object]:
 
 
 def validate_real_evaluation_files(
-    manifest_path: Path, result_path: Path
+    manifest_path: Path, result_path: Path, catalog_path: Path
 ) -> ValidatedRealEvaluation:
     """Validate restricted evaluation metadata and its dataset linkage."""
     manifest_bytes = manifest_path.read_bytes()
+    catalog_bytes = catalog_path.read_bytes()
     manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
+    catalog_hash = hashlib.sha256(catalog_bytes).hexdigest()
     manifest = RealEvaluationDatasetManifest.model_validate(_load_json(manifest_path))
     result = RealEvaluationResult.model_validate(_load_json(result_path))
+    catalog = RealEvaluationSnapshotCatalog.model_validate(_load_json(catalog_path))
 
     if result.dataset_manifest_sha256 != manifest_hash:
         raise RealEvaluationContractError(
@@ -208,6 +270,16 @@ def validate_real_evaluation_files(
         )
     if set(result.snapshot_bundle_ids) != set(manifest.snapshot_bundle_ids):
         raise RealEvaluationContractError("evaluation result snapshot IDs do not match manifest")
+    catalog_by_id = {snapshot.bundle_id: snapshot for snapshot in catalog.snapshots}
+    if set(catalog_by_id) != set(manifest.snapshot_bundle_ids):
+        raise RealEvaluationContractError(
+            "snapshot admission catalog IDs do not match evaluation manifest"
+        )
+    for bundle_id, expected_hash in manifest.snapshot_hashes.items():
+        if catalog_by_id[bundle_id].bundle_hash != expected_hash:
+            raise RealEvaluationContractError(
+                f"snapshot admission catalog hash does not match manifest: {bundle_id}"
+            )
     if result.sample_count > manifest.record_count:
         raise RealEvaluationContractError(
             "evaluation result sample count exceeds dataset record count"
@@ -217,12 +289,15 @@ def validate_real_evaluation_files(
         manifest=manifest,
         result=result,
         manifest_sha256=manifest_hash,
+        snapshot_catalog_sha256=catalog_hash,
     )
 
 
 __all__ = [
     "RealEvaluationContractError",
     "RealEvaluationDatasetManifest",
+    "RealEvaluationSnapshotCatalog",
+    "RealEvaluationSnapshotCatalogEntry",
     "RealEvaluationMetrics",
     "RealEvaluationResult",
     "ValidatedRealEvaluation",

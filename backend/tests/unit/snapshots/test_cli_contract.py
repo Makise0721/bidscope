@@ -60,6 +60,7 @@ def test_snapshot_import_json_exposes_auditable_metrics(
     assert payload["bundle_hash"] == "a" * 64
     assert payload["metrics"] == {"manifest_sha256": "a" * 64, "notice_count": 1}
     assert payload["warnings"] == {"parser": []}
+    assert payload["reprocessing"] == "new"
 
 
 def test_validate_real_evaluation_cli_is_separate_from_deterministic_gate(
@@ -67,6 +68,7 @@ def test_validate_real_evaluation_cli_is_separate_from_deterministic_gate(
 ) -> None:
     manifest_path = tmp_path / "manifest.json"
     result_path = tmp_path / "result.json"
+    catalog_path = tmp_path / "catalog.json"
     manifest = {
         "schema_version": "real-evaluation-dataset-v1",
         "dataset_id": "ccgp-pilot-eval",
@@ -82,6 +84,27 @@ def test_validate_real_evaluation_cli_is_separate_from_deterministic_gate(
         "created_at": "2026-07-29T09:00:00+00:00",
     }
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    catalog_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "snapshot-admission-catalog-v1",
+                "snapshots": [
+                    {
+                        "bundle_id": "ccgp-batch-20260729",
+                        "bundle_hash": "a" * 64,
+                        "batch_id": "ccgp-batch-20260729",
+                        "source": "ccgp",
+                        "capture_kind": "curated_public_excerpt",
+                        "schema_version": 2,
+                        "review_status": "approved",
+                    }
+                ],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     result = {
         "schema_version": "real-evaluation-result-v1",
         "run_id": "real-eval-run-20260729-01",
@@ -125,6 +148,8 @@ def test_validate_real_evaluation_cli_is_separate_from_deterministic_gate(
             str(manifest_path),
             "--result",
             str(result_path),
+            "--catalog",
+            str(catalog_path),
             "--json",
         ],
     )
@@ -141,13 +166,15 @@ def test_validate_real_evaluation_cli_blocks_failed_result(
 ) -> None:
     manifest_path = tmp_path / "manifest.json"
     result_path = tmp_path / "result.json"
+    catalog_path = tmp_path / "catalog.json"
     manifest_path.write_text("{}", encoding="utf-8")
     result_path.write_text("{}", encoding="utf-8")
+    catalog_path.write_text("{}", encoding="utf-8")
 
     monkeypatch.setattr(
         cli,
         "validate_real_evaluation_files",
-        lambda _manifest_path, _result_path: SimpleNamespace(
+        lambda _manifest_path, _result_path, _catalog_path: SimpleNamespace(
             manifest=SimpleNamespace(
                 dataset_id="ccgp-pilot-eval",
                 dataset_version="2026-07-29-v1",
@@ -162,6 +189,7 @@ def test_validate_real_evaluation_cli_blocks_failed_result(
                 failure_codes=["provider_unavailable"],
             ),
             manifest_sha256="a" * 64,
+            snapshot_catalog_sha256="b" * 64,
         ),
     )
 
@@ -174,6 +202,8 @@ def test_validate_real_evaluation_cli_blocks_failed_result(
             str(manifest_path),
             "--result",
             str(result_path),
+            "--catalog",
+            str(catalog_path),
             "--json",
         ],
     )

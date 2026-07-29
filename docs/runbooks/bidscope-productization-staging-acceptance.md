@@ -6,6 +6,8 @@ public tender excerpts.
 ## Admission checklist
 
 - [ ] Data owner and authorization basis are recorded outside the repository.
+- [ ] The external authorization record has been reviewed by the pilot owner;
+  `review_status=approved` in the manifest is not by itself legal proof.
 - [ ] Coverage, retention, correction/takedown and weekly update SLA are
   approved.
 - [ ] Bundle uses `source=ccgp`,
@@ -33,13 +35,17 @@ public tender excerpts.
 
 1. Create a restricted dataset manifest referencing only approved snapshot
    bundle IDs and SHA-256 hashes.
-2. Run the offline baseline and record the dataset, model, prompt and pricing
+2. Export a read-only `snapshot-admission-catalog-v1` from the staging import
+   record. It must show each bundle as CCGP, curated public excerpt, schema v2
+   and review status approved.
+3. Run the offline baseline and record the dataset, model, prompt and pricing
    metadata in a `real-evaluation-result-v1` artifact.
-3. Validate the pair with:
+4. Validate the artifacts with:
 
    ```bash
    bidscope eval validate-real \
      --manifest /controlled/staging/evaluation/dataset-manifest.json \
+     --catalog /controlled/staging/evaluation/snapshot-admission-catalog.json \
      --result /controlled/staging/evaluation/result.json \
      --json
    ```
@@ -62,4 +68,3 @@ Block the pilot when any of the following is true:
   missing;
 - the operator would need a live scraper, captcha bypass, source probing,
   multi-tenant auth or production credentials in Git.
-

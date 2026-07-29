@@ -16,7 +16,10 @@ Each restricted evaluation manifest records a dataset ID/version, the imported
 snapshot bundle IDs and hashes, annotation-guide version, annotation set
 version, record count, access class and creation timestamp. The dataset must
 be derived from approved snapshot versions and must not contain synthetic
-records disguised as official notices.
+records disguised as official notices. A staging validator also requires a
+read-only `snapshot-admission-catalog-v1` exported from the controlled import
+record; its CCGP/schema/review fields and hashes must match the dataset
+manifest.
 
 ## Result contract
 
@@ -46,6 +49,12 @@ after the first baseline and reviewed by the pilot owner. Deterministic
    recorded provider metadata.
 5. Block release on any provenance or citation-support failure; review other
    thresholds against the measured baseline.
+
+The repository command `eval validate-real` is the metadata and admission
+gate only. It deliberately does not execute a provider, read prompts, or
+access restricted records. The offline baseline and optional staging
+live-model runner remain controlled staging operations and must produce the
+result artifact before this gate can support a release decision.
 
 ## Failure and privacy rules
 

@@ -129,16 +129,34 @@ def inspect_bundle(bundle_path: Path) -> InspectionResult:
             valid=False,
             errors=[InspectionError("missing_manifest", "manifest.json not found")],
         )
+    if manifest_file.is_symlink():
+        return InspectionResult(
+            valid=False,
+            errors=[
+                InspectionError(
+                    "invalid_file_type", "manifest.json must be a regular file"
+                )
+            ],
+        )
 
     try:
         manifest_bytes = manifest_file.read_bytes()
         manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
         raw = json.loads(manifest_bytes.decode("utf-8"))
-    except json.JSONDecodeError as error:
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
         return InspectionResult(
             valid=False,
             errors=[
                 InspectionError("invalid_manifest", f"manifest.json is not valid JSON: {error}")
+            ],
+        )
+    except OSError as error:
+        return InspectionResult(
+            valid=False,
+            errors=[
+                InspectionError(
+                    "manifest_read_error", f"could not read manifest.json: {error}"
+                )
             ],
         )
 
@@ -159,9 +177,17 @@ def inspect_bundle(bundle_path: Path) -> InspectionResult:
     # File-integrity checks (hashes, missing and undeclared payload files).
     declared = manifest.files or {}
     actual_hashes: dict[str, str] = {}
-    payload_files = sorted(
-        p for p in bundle_path.rglob("*") if p.is_file() and p.name != "manifest.json"
-    )
+    try:
+        payload_files = sorted(
+            p for p in bundle_path.rglob("*") if p.is_file() and p.name != "manifest.json"
+        )
+    except OSError as error:
+        return InspectionResult(
+            valid=False,
+            bundle_id=manifest.bundle_id,
+            errors=[InspectionError("bundle_read_error", f"could not enumerate bundle: {error}")],
+            manifest_sha256=manifest_sha256,
+        )
 
     for name, expected_hash in declared.items():
         if _contains_symlink(bundle_path, name):

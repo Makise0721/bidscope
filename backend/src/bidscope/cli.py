@@ -181,9 +181,11 @@ def snapshots_import(
     except SnapshotImportError as error:
         payload = {
             "valid": False,
-            "bundle_id": None,
+            "bundle_id": getattr(error, "bundle_id", None),
             "status": "failed",
-            "errors": [str(error)],
+            "disposition": "quarantined",
+            "bundle_hash": getattr(error, "manifest_sha256", None),
+            "errors": getattr(error, "errors", None) or [str(error)],
         }
         if json_output:
             typer.echo(_json_payload(payload))
@@ -191,14 +193,19 @@ def snapshots_import(
             typer.echo(f"import failed: {error}", err=True)
         raise typer.Exit(code=1) from None
 
+    record_metrics = getattr(record, "metrics", None) or {}
     result: dict[str, Any] = {
         "valid": True,
         "bundle_id": record.snapshot_bundle_id,
         "status": record.status,
         "import_id": str(record.id),
-        "bundle_hash": getattr(record, "metrics", {}).get("manifest_sha256"),
-        "metrics": getattr(record, "metrics", {}),
-        "warnings": getattr(record, "warnings", {}),
+        "bundle_hash": record_metrics.get("manifest_sha256"),
+        "metrics": record_metrics,
+        "warnings": getattr(record, "warnings", None) or {},
+        "reprocessing": getattr(
+            record,
+            "_reprocessing", record_metrics.get("reprocessing", "new")
+        ),
         "errors": [],
     }
     if json_output:
@@ -370,11 +377,14 @@ def evaluation_validate_real(
     result: Annotated[
         Path, typer.Option("--result", exists=True, file_okay=True, dir_okay=False)
     ],
+    catalog: Annotated[
+        Path, typer.Option("--catalog", exists=True, file_okay=True, dir_okay=False)
+    ],
     json_output: Annotated[bool, typer.Option("--json", help="Print JSON output.")] = False,
 ) -> None:
-    """Validate restricted real-evaluation artifacts without running a model."""
+    """Validate restricted evaluation artifacts and the approved snapshot catalog."""
     try:
-        validated = validate_real_evaluation_files(manifest, result)
+        validated = validate_real_evaluation_files(manifest, result, catalog)
     except (RealEvaluationContractError, ValidationError, OSError) as error:
         error_payload: dict[str, Any] = {
             "status": "invalid",
@@ -400,8 +410,13 @@ def evaluation_validate_real(
         "dataset_version": validated.manifest.dataset_version,
         "run_id": validated.result.run_id,
         "manifest_sha256": validated.manifest_sha256,
+        "snapshot_catalog_sha256": validated.snapshot_catalog_sha256,
         "mode": validated.result.mode,
-        "metrics": validated.result.metrics.model_dump(mode="json"),
+        "metrics": (
+            validated.result.metrics.model_dump(mode="json")
+            if validated.result.metrics is not None
+            else None
+        ),
         "hard_gate_failures": validated.result.hard_gate_failures,
         "failure_codes": validated.result.failure_codes,
     }

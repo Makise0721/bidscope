@@ -112,6 +112,23 @@ def test_schema_v2_quarantines_unapproved_contract(tmp_path: Path) -> None:
     assert any(error.code == "authorization_not_approved" for error in inspection.errors)
 
 
+def test_unknown_schema_version_is_quarantined(tmp_path: Path) -> None:
+    files = {"detail.html": "<html>unknown schema</html>"}
+    manifest = _manifest(
+        files,
+        schema_version=3,
+        batch_id="ccgp-batch-20260729",
+        data_contract=_authorized_contract(),
+    )
+    bundle = _write_bundle(tmp_path, files, manifest)
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert inspection.disposition == "quarantined"
+    assert any(error.code == "invalid_manifest_field" for error in inspection.errors)
+
+
 def test_schema_v2_rejects_batch_id_path_separators(tmp_path: Path) -> None:
     files = {"detail.html": "<html>invalid batch</html>"}
     manifest = _manifest(
@@ -160,6 +177,35 @@ def test_fixture_hash_is_sha256(tmp_path: Path) -> None:
     assert inspection.manifest_sha256 == hashlib.sha256(
         (bundle / "manifest.json").read_bytes()
     ).hexdigest()
+
+
+def test_invalid_manifest_encoding_is_quarantined(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "manifest.json").write_bytes(b"{\xff")
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert inspection.disposition == "quarantined"
+    assert inspection.errors[0].code == "invalid_manifest"
+
+
+def test_manifest_symlink_is_quarantined(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    target = tmp_path / "manifest-target.json"
+    target.write_text("{}", encoding="utf-8")
+    try:
+        (bundle / "manifest.json").symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable on this platform")
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert inspection.disposition == "quarantined"
+    assert inspection.errors[0].code == "invalid_file_type"
 
 
 def test_inspect_bundle_rejects_undeclared_file(tmp_path: Path) -> None:

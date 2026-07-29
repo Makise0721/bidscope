@@ -31,6 +31,10 @@ writes or search indexing.
 `batch_id` is a bounded identifier and is not interpreted as a filesystem path.
 The contract rejects empty values, control characters, overlong identifiers,
 non-approved review status, naive timestamps and invalid retention values.
+`review_status=approved` is an attestation from the separately controlled
+governance process; the local manifest validator cannot prove a legal grant or
+replace the external authorization record. Operators must retain that record
+and its review trail outside the repository before staging admission.
 
 ## Quarantine semantics
 

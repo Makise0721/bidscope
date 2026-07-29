@@ -145,8 +145,10 @@ class SnapshotManifest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_authorized_contract(self) -> "SnapshotManifest":
-        if self.schema_version < 2:
+        if self.schema_version == 1:
             return self
+        if self.schema_version != 2:
+            raise ValueError(f"unsupported snapshot schema_version: {self.schema_version}")
         if (
             self.source != SourceName.CCGP
             or self.capture_kind != CaptureKind.CURATED_PUBLIC_EXCERPT

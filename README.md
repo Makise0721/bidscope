@@ -203,6 +203,7 @@ running a model or changing the deterministic `target_pass` gate:
 ```bash
 uv run bidscope eval validate-real \
   --manifest /controlled/staging/evaluation/dataset-manifest.json \
+  --catalog /controlled/staging/evaluation/snapshot-admission-catalog.json \
   --result /controlled/staging/evaluation/result.json \
   --json
 ```
