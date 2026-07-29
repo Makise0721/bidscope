@@ -29,6 +29,7 @@ def _run_drill(
     fail_backup_cli: bool = False,
     missing_backup_manifest: bool = False,
     fail_manifest_hash: bool = False,
+    pretty_backup_json: bool = False,
     python_command: str | None = None,
     large_report: bool = False,
     recovery_temp_root: Path | None = None,
@@ -113,7 +114,11 @@ if [[ "$args" == *"bidscope ops backup create"* ]]; then
   created_at="$(/bin/date -u +%Y-%m-%dT%H:%M:%S+00:00)"
   printf '{"created_at":"%s"}' "$created_at" > \
     "${BIDSCOPE_RECOVERY_BACKUP_DIR}/backup-1/manifest.json"
-  printf '%s\\n' '{"backup_id":"backup-1"}'
+  if [[ "${FAKE_PRETTY_BACKUP_JSON:-0}" == "1" ]]; then
+    printf '%s\\n' '{' '  "backup_id": "backup-1"' '}'
+  else
+    printf '%s\\n' '{"backup_id":"backup-1"}'
+  fi
 fi
 """,
     )
@@ -243,6 +248,7 @@ exit 69
             "FAKE_FAIL_DATE": "1" if fail_date else "0",
             "FAKE_FAIL_BACKUP_CLI": "1" if fail_backup_cli else "0",
             "FAKE_MISSING_BACKUP_MANIFEST": "1" if missing_backup_manifest else "0",
+            "FAKE_PRETTY_BACKUP_JSON": "1" if pretty_backup_json else "0",
             "BIDSCOPE_RECOVERY_EVIDENCE_PATH": str(evidence_path),
             "BIDSCOPE_PYTHON_COMMAND": python_command or "python3",
             "FAKE_LARGE_REPORT": "1" if large_report else "0",
@@ -397,6 +403,16 @@ def test_recovery_drill_uses_one_windows_host_path_for_backup_and_manifest(
     assert (tmp_path / "state" / "backup-root").read_text(encoding="utf-8").startswith(
         str(windows_host_root)
     )
+
+
+def test_recovery_drill_parses_pretty_printed_backup_cli_json(tmp_path: Path) -> None:
+    """The backup CLI deliberately formats --json output across lines."""
+    result, evidence_path = _run_drill(tmp_path, pretty_backup_json=True)
+
+    assert result.returncode == 0, result.stderr
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["passed"] is True
+    assert evidence["backup_id"] == "backup-1"
 
 
 @pytest.mark.parametrize(

@@ -260,7 +260,9 @@ source_tick="$(curl -fsS -X POST "${base_url}/api/test-controls/run-scheduler-ti
 [[ "$(json_field "${source_tick}" failed)" -eq 0 ]]
 
 current_step="backup-cli"
-backup_json="$(compose_capture run --rm --no-deps api bidscope ops backup create --retention-class daily --json | tail -n 1)"
+# The CLI deliberately pretty-prints --json, so retain the whole document.
+# Compose progress is emitted on stderr by compose(), leaving stdout as JSON.
+backup_json="$(compose_capture run --rm --no-deps api bidscope ops backup create --retention-class daily --json)"
 backup_id="$(json_field "${backup_json}" backup_id)"
 current_step="backup-manifest-read"
 backup_created_at="$("${PYTHON_COMMAND[@]}" - "${BACKUP_DIR}/${backup_id}/manifest.json" <<'PY'
