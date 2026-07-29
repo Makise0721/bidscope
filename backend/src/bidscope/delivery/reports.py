@@ -80,13 +80,16 @@ class ReportPersistence:
         the transaction can commit.
         """
         start = time.monotonic()
+        outcome = "failed"
         try:
             async with self._session_factory() as session:
                 try:
                     async with session.begin():
                         existing = await self._find_by_run_id(session, report.run_id)
                         if existing is not None:
-                            return await self._project(session, existing)
+                            persisted = await self._project(session, existing)
+                            outcome = "success"
+                            return persisted
 
                         row = ReportModel(
                             run_id=report.run_id,
@@ -121,20 +124,24 @@ class ReportPersistence:
                                 session, persisted_item, item, evidence_ids, evidence_by_hash
                             )
 
-                    return PersistedReport(
+                    persisted = PersistedReport(
                         id=str(row.id), report=report, docx_object_key=row.docx_object_key
                     )
+                    outcome = "success"
+                    return persisted
                 except IntegrityError:
                     existing = await self._find_by_run_id(session, report.run_id)
                     if existing is None:
                         raise
-                    return await self._project(session, existing)
+                    persisted = await self._project(session, existing)
+                    outcome = "success"
+                    return persisted
         finally:
             try:
                 METRICS_REGISTRY.observe(
                     "bidscope_report_delivery_duration_seconds",
                     max(time.monotonic() - start, 0.0),
-                    {"format": "json"},
+                    {"outcome": outcome},
                 )
             except Exception:
                 logger.warning("metrics_json_delivery_failed", exc_info=True)
@@ -148,14 +155,17 @@ class ReportPersistence:
     async def export_docx(self, persisted: PersistedReport) -> ExportRecord:
         """Render and attach a DOCX to an already durable online report."""
         start = time.monotonic()
+        outcome = "failed"
         try:
-            return await self._delivery.export_report(persisted)
+            exported = await self._delivery.export_report(persisted)
+            outcome = "success"
+            return exported
         finally:
             try:
                 METRICS_REGISTRY.observe(
                     "bidscope_report_delivery_duration_seconds",
                     max(time.monotonic() - start, 0.0),
-                    {"format": "docx"},
+                    {"outcome": outcome},
                 )
             except Exception:
                 logger.warning("metrics_docx_delivery_failed", exc_info=True)

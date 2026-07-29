@@ -18,6 +18,7 @@ from bidscope.delivery.objects import LocalObjectStore
 from bidscope.delivery.reports import ReportPersistence
 from bidscope.domain.notices import NoticeEvidence as DomainEvidence
 from bidscope.domain.reports import Report, ReportCitation, ReportClaim, ReportItem
+from bidscope.observability import MetricsRegistry
 from bidscope.persistence.models import (
     CanonicalNotice,
     NoticeEvidence,
@@ -159,6 +160,27 @@ async def test_persist_online_report_stores_items_claims_evidence_and_docx(
         stored = await session.get(ReportModel, persisted.id)
         assert stored is not None
         assert stored.docx_object_key == export.object_key
+
+
+@pytest.mark.asyncio
+async def test_report_delivery_duration_metrics_record_success_for_online_and_docx(
+    session_factory,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both delivery stages must use the registry's bounded outcome label."""
+    registry = MetricsRegistry()
+    monkeypatch.setattr("bidscope.delivery.reports.METRICS_REGISTRY", registry)
+    report, evidence_by_hash = await _seed_report_inputs(session_factory)
+    persistence = ReportPersistence(session_factory, LocalObjectStore(tmp_path / "objects"))
+
+    persisted = await persistence.persist_online_report(report, evidence_by_hash)
+    await persistence.export_docx(persisted)
+
+    assert (
+        'bidscope_report_delivery_duration_seconds_count{outcome="success"} 2'
+        in registry.render_prometheus()
+    )
 
 
 @pytest.mark.asyncio

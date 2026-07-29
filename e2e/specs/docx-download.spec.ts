@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /**
- * Flow: complete an unscheduled run, click the DOCX download link, verify the
+ * Flow: complete an unscheduled run, click the DOCX download button, verify the
  * downloaded file is a valid Office Open XML (.docx) archive.
  *
  * The representative query auto-confirms, so no Approve click is needed. The
- * DOCX asset is produced by the delivery node and fetched via an ``<a>`` link;
- * we assert the report is present before triggering the download.
+ * DOCX asset is produced by the delivery node and fetched with authenticated
+ * browser code before a temporary ``<a>`` triggers the download. We assert the
+ * report is present before clicking the accessible control.
  */
 test.describe("DOCX download", () => {
   test("downloads a valid DOCX file for a completed run", async ({ page }) => {
@@ -19,15 +20,15 @@ test.describe("DOCX download", () => {
     await input.fill("四川服务器招标");
     await page.getByRole("button", { name: "Search" }).click();
 
-    // The run completes and the report renders inline with its download link.
+    // The run completes and the report renders inline with its download button.
     const report = page.getByRole("region", { name: "report" });
     await expect(report).toBeVisible({ timeout: 30_000 });
 
-    const downloadLink = page.getByRole("link", { name: "Download DOCX" });
-    await expect(downloadLink).toBeVisible();
+    const downloadButton = page.getByRole("button", { name: "Download DOCX" });
+    await expect(downloadButton).toBeVisible();
 
     const downloadPromise = page.waitForEvent("download");
-    await downloadLink.click();
+    await downloadButton.click();
     const download = await downloadPromise;
 
     // Save the download to a temp file and verify the magic bytes.
