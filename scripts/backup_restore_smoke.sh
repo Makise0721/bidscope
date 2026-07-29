@@ -26,12 +26,27 @@ current_step="bootstrap"
 evidence_emitted=false
 PYTHON_COMMAND=(python3)
 
+is_windows_posix_shell() {
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 compose() {
-  docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${RECOVERY_COMPOSE_FILE}" "$@" >&2
+  if is_windows_posix_shell; then
+    MSYS_NO_PATHCONV=1 docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${RECOVERY_COMPOSE_FILE}" "$@" >&2
+  else
+    docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${RECOVERY_COMPOSE_FILE}" "$@" >&2
+  fi
 }
 
 compose_capture() {
-  docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${RECOVERY_COMPOSE_FILE}" "$@"
+  if is_windows_posix_shell; then
+    MSYS_NO_PATHCONV=1 docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${RECOVERY_COMPOSE_FILE}" "$@"
+  else
+    docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${RECOVERY_COMPOSE_FILE}" "$@"
+  fi
 }
 
 emit_evidence() {
@@ -102,20 +117,15 @@ fi
 # optional base directory; cleanup removes only its unique TEMP_ROOT child.
 resolve_recovery_temp_base() {
   local requested_base="${BIDSCOPE_RECOVERY_TEMP_ROOT:-${TMPDIR:-/tmp}}"
-  local platform
-  platform="$(uname -s 2>/dev/null || true)"
-  case "${platform}" in
-    MINGW*|MSYS*|CYGWIN*)
-      if ! command -v cygpath >/dev/null 2>&1; then
-        echo "cygpath is required to create Docker-resolvable recovery paths" >&2
-        return 1
-      fi
-      cygpath -m "${requested_base}"
-      ;;
-    *)
-      printf '%s\n' "${requested_base}"
-      ;;
-  esac
+  if is_windows_posix_shell; then
+    if ! command -v cygpath >/dev/null 2>&1; then
+      echo "cygpath is required to create Docker-resolvable recovery paths" >&2
+      return 1
+    fi
+    cygpath -m "${requested_base}"
+  else
+    printf '%s\n' "${requested_base}"
+  fi
 }
 
 current_step="resolve-script-directory"
@@ -123,6 +133,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 COMPOSE_FILE="${PROJECT_ROOT}/compose.yaml"
 RECOVERY_COMPOSE_FILE="${SCRIPT_DIR}/recovery-compose.override.yaml"
+if is_windows_posix_shell; then
+  COMPOSE_FILE="$(cygpath -m "${COMPOSE_FILE}")"
+  RECOVERY_COMPOSE_FILE="$(cygpath -m "${RECOVERY_COMPOSE_FILE}")"
+fi
 cd "${PROJECT_ROOT}"
 
 current_step="initialize-timestamps"

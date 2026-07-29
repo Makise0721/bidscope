@@ -35,6 +35,7 @@ def _run_drill(
     recovery_temp_root: Path | None = None,
     uname_output: str | None = None,
     cygpath_output: Path | None = None,
+    require_msys_no_pathconv: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     """Run the shell drill against local command doubles, never Docker/network."""
     # Keep source inspection encoding-explicit on Windows; execution below is
@@ -119,6 +120,10 @@ if [[ "$args" == *"bidscope ops backup create"* ]]; then
   else
     printf '%s\\n' '{"backup_id":"backup-1"}'
   fi
+fi
+if [[ "$args" == *"bidscope ops backup restore"* ]]; then
+  [[ "${FAKE_REQUIRE_MSYS_NO_PATHCONV:-0}" != "1" || "${MSYS_NO_PATHCONV:-}" == "1" ]] || exit 68
+  printf '%s' "$args" > "${FAKE_STATE_DIR}/restore-command"
 fi
 """,
     )
@@ -249,6 +254,7 @@ exit 69
             "FAKE_FAIL_BACKUP_CLI": "1" if fail_backup_cli else "0",
             "FAKE_MISSING_BACKUP_MANIFEST": "1" if missing_backup_manifest else "0",
             "FAKE_PRETTY_BACKUP_JSON": "1" if pretty_backup_json else "0",
+            "FAKE_REQUIRE_MSYS_NO_PATHCONV": "1" if require_msys_no_pathconv else "0",
             "BIDSCOPE_RECOVERY_EVIDENCE_PATH": str(evidence_path),
             "BIDSCOPE_PYTHON_COMMAND": python_command or "python3",
             "FAKE_LARGE_REPORT": "1" if large_report else "0",
@@ -403,6 +409,23 @@ def test_recovery_drill_uses_one_windows_host_path_for_backup_and_manifest(
     assert (tmp_path / "state" / "backup-root").read_text(encoding="utf-8").startswith(
         str(windows_host_root)
     )
+
+
+def test_recovery_drill_preserves_container_restore_path_on_msys(tmp_path: Path) -> None:
+    """MSYS must not rewrite /app paths passed to docker.exe."""
+    windows_host_root = tmp_path / "windows-host-root"
+    result, evidence_path = _run_drill(
+        tmp_path,
+        uname_output="MSYS_NT-10.0",
+        cygpath_output=windows_host_root,
+        require_msys_no_pathconv=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(evidence_path.read_text(encoding="utf-8"))["passed"] is True
+    assert "/app/data/backups/backup-1" in (
+        tmp_path / "state" / "restore-command"
+    ).read_text(encoding="utf-8")
 
 
 def test_recovery_drill_parses_pretty_printed_backup_cli_json(tmp_path: Path) -> None:
