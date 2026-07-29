@@ -26,8 +26,14 @@ def _run_drill(
     fail_config: bool = False,
     fail_date: bool = False,
     fail_cleanup: bool = False,
+    fail_backup_cli: bool = False,
+    missing_backup_manifest: bool = False,
+    fail_manifest_hash: bool = False,
     python_command: str | None = None,
     large_report: bool = False,
+    recovery_temp_root: Path | None = None,
+    uname_output: str | None = None,
+    cygpath_output: Path | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     """Run the shell drill against local command doubles, never Docker/network."""
     # Keep source inspection encoding-explicit on Windows; execution below is
@@ -60,6 +66,21 @@ done
 exec python3 "$@"
 """,
         )
+    if uname_output is not None:
+        _write_executable(
+            fake_bin / "uname",
+            f"""#!/usr/bin/env bash
+printf '%s\\n' {uname_output!r}
+""",
+        )
+    if cygpath_output is not None:
+        cygpath_output.mkdir()
+        _write_executable(
+            fake_bin / "cygpath",
+            f"""#!/usr/bin/env bash
+printf '%s\\n' {str(cygpath_output)!r}
+""",
+        )
 
     _write_executable(
         fake_bin / "docker",
@@ -79,7 +100,16 @@ if [[ "$args" == *" config "* ]]; then
   exit 0
 fi
 if [[ "$args" == *"bidscope ops backup create"* ]]; then
+  if [[ "${FAKE_FAIL_BACKUP_CLI:-0}" == "1" ]]; then
+    printf '%s\\n' '{"code":"backup_tool_failed"}'
+    exit 67
+  fi
+  printf '%s' "${BIDSCOPE_RECOVERY_BACKUP_DIR}" > "${FAKE_STATE_DIR}/backup-root"
   mkdir -p "${BIDSCOPE_RECOVERY_BACKUP_DIR}/backup-1"
+  if [[ "${FAKE_MISSING_BACKUP_MANIFEST:-0}" == "1" ]]; then
+    printf '%s\\n' '{"backup_id":"backup-1"}'
+    exit 0
+  fi
   created_at="$(/bin/date -u +%Y-%m-%dT%H:%M:%S+00:00)"
   printf '{"created_at":"%s"}' "$created_at" > \
     "${BIDSCOPE_RECOVERY_BACKUP_DIR}/backup-1/manifest.json"
@@ -195,6 +225,13 @@ fi
 exit 91
 """,
         )
+    if fail_manifest_hash:
+        _write_executable(
+            fake_bin / "sha256sum",
+            """#!/usr/bin/env bash
+exit 69
+""",
+        )
 
     environment = os.environ.copy()
     environment.update(
@@ -204,11 +241,16 @@ exit 91
             "FAKE_STATE_DIR": str(state_dir),
             "FAKE_FAIL_CONFIG": "1" if fail_config else "0",
             "FAKE_FAIL_DATE": "1" if fail_date else "0",
+            "FAKE_FAIL_BACKUP_CLI": "1" if fail_backup_cli else "0",
+            "FAKE_MISSING_BACKUP_MANIFEST": "1" if missing_backup_manifest else "0",
             "BIDSCOPE_RECOVERY_EVIDENCE_PATH": str(evidence_path),
             "BIDSCOPE_PYTHON_COMMAND": python_command or "python3",
             "FAKE_LARGE_REPORT": "1" if large_report else "0",
         }
     )
+    if recovery_temp_root is not None:
+        recovery_temp_root.mkdir()
+        environment["BIDSCOPE_RECOVERY_TEMP_ROOT"] = str(recovery_temp_root)
     result = subprocess.run(
         [bash, str(SCRIPT_PATH)],
         cwd=PROJECT_ROOT,
@@ -336,6 +378,48 @@ def test_recovery_drill_parses_large_reports_via_python_stdin(tmp_path: Path) ->
     assert result.returncode == 0, result.stderr
     evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
     assert evidence["old_report_evidence_version"] == "version-1"
+
+
+def test_recovery_drill_uses_one_windows_host_path_for_backup_and_manifest(
+    tmp_path: Path,
+) -> None:
+    """MSYS conversion supplies one host path to Compose and shell checks."""
+    windows_host_root = tmp_path / "windows-host-root"
+    result, evidence_path = _run_drill(
+        tmp_path,
+        uname_output="MSYS_NT-10.0",
+        cygpath_output=windows_host_root,
+    )
+
+    assert result.returncode == 0, result.stderr
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["passed"] is True
+    assert (tmp_path / "state" / "backup-root").read_text(encoding="utf-8").startswith(
+        str(windows_host_root)
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_stage", "expected_exit"),
+    [
+        ({"fail_backup_cli": True}, "backup-cli", 67),
+        ({"missing_backup_manifest": True}, "backup-manifest-read", 1),
+        ({"fail_manifest_hash": True}, "backup-manifest-hash", 69),
+    ],
+)
+def test_recovery_drill_reports_precise_backup_failure_stage(
+    tmp_path: Path,
+    kwargs: dict[str, bool],
+    expected_stage: str,
+    expected_exit: int,
+) -> None:
+    """Backup evidence distinguishes CLI, manifest, and digest failures."""
+    result, evidence_path = _run_drill(tmp_path, **kwargs)
+
+    assert result.returncode == expected_exit
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["passed"] is False
+    assert evidence["error"] == expected_stage
 
 
 def test_recovery_rto_includes_final_restore_validation(tmp_path: Path) -> None:

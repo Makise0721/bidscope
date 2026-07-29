@@ -12,6 +12,7 @@ TEMP_ROOT=""
 BACKUP_DIR=""
 SOURCE_OBJECT_DIR=""
 TARGET_OBJECT_DIR=""
+TEMP_BASE=""
 COMPOSE_FILE=""
 RECOVERY_COMPOSE_FILE=""
 started_at=""
@@ -95,6 +96,28 @@ if [[ "${#PYTHON_COMMAND[@]}" -eq 0 ]]; then
   PYTHON_COMMAND=(python3)
 fi
 
+# Docker Compose for Windows does not interpret Git Bash's /tmp the same way
+# Bash does. Convert this base once and reuse the exact path for both bind
+# mounts and host-side manifest checks. BIDSCOPE_RECOVERY_TEMP_ROOT is an
+# optional base directory; cleanup removes only its unique TEMP_ROOT child.
+resolve_recovery_temp_base() {
+  local requested_base="${BIDSCOPE_RECOVERY_TEMP_ROOT:-${TMPDIR:-/tmp}}"
+  local platform
+  platform="$(uname -s 2>/dev/null || true)"
+  case "${platform}" in
+    MINGW*|MSYS*|CYGWIN*)
+      if ! command -v cygpath >/dev/null 2>&1; then
+        echo "cygpath is required to create Docker-resolvable recovery paths" >&2
+        return 1
+      fi
+      cygpath -m "${requested_base}"
+      ;;
+    *)
+      printf '%s\n' "${requested_base}"
+      ;;
+  esac
+}
+
 current_step="resolve-script-directory"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -107,7 +130,8 @@ started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 RUN_ID="$(date -u +%Y%m%dt%H%M%Sz)-$$-${RANDOM}"
 PROJECT_NAME="bidscope-recovery-${RUN_ID}"
 current_step="temporary-workspace"
-TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/bidscope-recovery.XXXXXX")"
+TEMP_BASE="$(resolve_recovery_temp_base)"
+TEMP_ROOT="$(mktemp -d "${TEMP_BASE%/}/bidscope-recovery.XXXXXX")"
 BACKUP_DIR="${TEMP_ROOT}/backups"
 SOURCE_OBJECT_DIR="${TEMP_ROOT}/source-objects"
 TARGET_OBJECT_DIR="${TEMP_ROOT}/target-objects"
@@ -235,16 +259,19 @@ source_tick="$(curl -fsS -X POST "${base_url}/api/test-controls/run-scheduler-ti
 [[ "$(json_field "${source_tick}" ran)" -ge 1 ]]
 [[ "$(json_field "${source_tick}" failed)" -eq 0 ]]
 
-current_step="backup-create"
+current_step="backup-cli"
 backup_json="$(compose_capture run --rm --no-deps api bidscope ops backup create --retention-class daily --json | tail -n 1)"
 backup_id="$(json_field "${backup_json}" backup_id)"
+current_step="backup-manifest-read"
 backup_created_at="$("${PYTHON_COMMAND[@]}" - "${BACKUP_DIR}/${backup_id}/manifest.json" <<'PY'
 import json
 import sys
 print(json.load(open(sys.argv[1], encoding="utf-8"))["created_at"])
 PY
 )"
+current_step="backup-manifest-hash"
 manifest_hash="$(sha256sum "${BACKUP_DIR}/${backup_id}/manifest.json" | awk '{print $1}')"
+current_step="backup-rpo-calculation"
 rpo_hours="$("${PYTHON_COMMAND[@]}" - "${backup_created_at}" <<'PY'
 from datetime import datetime, timezone
 import sys
