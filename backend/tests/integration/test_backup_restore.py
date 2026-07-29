@@ -25,6 +25,7 @@ def _run_drill(
     *,
     tick_responses: list[dict[str, int | str]] | None = None,
     fail_config: bool = False,
+    fail_date: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     """Run the shell drill against local command doubles, never Docker/network."""
     # Keep source inspection encoding-explicit on Windows; execution below is
@@ -89,11 +90,23 @@ if "/api/test-controls/run-scheduler-tick" in joined:
     count = int(count_path.read_text() if count_path.exists() else "0")
     count_path.write_text(str(count + 1))
     payload = json.loads((state / "ticks.json").read_text())[count]
-    if count == 1:
+    if count == 0:
+        (state / "persisted-subscription-advanced").write_text("yes")
+    elif not (state / "restored-subscription-created").exists():
+        payload = {"run_scheduler_tick": "ok", "ran": 0, "failed": 0}
+    else:
         (state / "final-validation-reached").write_text("yes")
     print(json.dumps(payload))
     raise SystemExit(0)
-if "/api/subscriptions" in joined or "/confirm" in joined:
+if "/api/subscriptions" in joined:
+    count_path = state / "subscription-count"
+    count = int(count_path.read_text() if count_path.exists() else "0")
+    count_path.write_text(str(count + 1))
+    if count == 1:
+        (state / "restored-subscription-created").write_text("yes")
+    print("{}")
+    raise SystemExit(0)
+if "/confirm" in joined:
     print("{}")
     raise SystemExit(0)
 if "/api/runs" in joined and "-X POST" in joined:
@@ -109,7 +122,10 @@ if "/api/runs/old" in joined:
     print(json.dumps({"status": "awaiting_confirmation" if count == 0 else "completed"}))
     raise SystemExit(0)
 if "/api/runs/new" in joined:
-    print(json.dumps({"status": "completed"}))
+    count_path = state / "new-poll-count"
+    count = int(count_path.read_text() if count_path.exists() else "0")
+    count_path.write_text(str(count + 1))
+    print(json.dumps({"status": "awaiting_confirmation" if count == 0 else "completed"}))
     raise SystemExit(0)
 raise SystemExit(f"unexpected curl invocation: {joined}")
 """,
@@ -118,6 +134,9 @@ raise SystemExit(f"unexpected curl invocation: {joined}")
         fake_bin / "date",
         """#!/usr/bin/env bash
 set -eu
+if [[ "${FAKE_FAIL_DATE:-0}" == "1" && "$*" == *"+%Y"* ]]; then
+  exit 73
+fi
 if [[ "$*" == *"+%s"* ]]; then
   count_file="${FAKE_STATE_DIR}/date-count"
   count=0
@@ -144,6 +163,7 @@ fi
             "TMPDIR": str(tmp_path),
             "FAKE_STATE_DIR": str(state_dir),
             "FAKE_FAIL_CONFIG": "1" if fail_config else "0",
+            "FAKE_FAIL_DATE": "1" if fail_date else "0",
             "BIDSCOPE_RECOVERY_EVIDENCE_PATH": str(evidence_path),
         }
     )
@@ -205,6 +225,17 @@ def test_recovery_drill_emits_failure_evidence_for_early_compose_error(tmp_path:
     evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
     assert evidence["passed"] is False
     assert evidence["error"] == "compose-config"
+    assert evidence["started_at"]
+
+
+def test_recovery_drill_emits_failure_evidence_before_temporary_setup(tmp_path: Path) -> None:
+    """A clock failure before ``mktemp`` still yields safe false evidence."""
+    result, evidence_path = _run_drill(tmp_path, fail_date=True)
+
+    assert result.returncode == 73
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["passed"] is False
+    assert evidence["error"] == "initialize-timestamps"
     assert evidence["started_at"]
 
 

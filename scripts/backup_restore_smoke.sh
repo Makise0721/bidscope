@@ -3,29 +3,107 @@
 # model; no public websites, model provider, or external backup credentials.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-cd "${PROJECT_ROOT}"
-
-RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}"
-PROJECT_NAME="bidscope-recovery-${RUN_ID}"
-TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/bidscope-recovery.XXXXXX")"
-BACKUP_DIR="${TEMP_ROOT}/backups"
-SOURCE_OBJECT_DIR="${TEMP_ROOT}/source-objects"
-TARGET_OBJECT_DIR="${TEMP_ROOT}/target-objects"
-COMPOSE_FILE="${PROJECT_ROOT}/compose.yaml"
-RECOVERY_COMPOSE_FILE="${SCRIPT_DIR}/recovery-compose.override.yaml"
-EVIDENCE_PATH="${BIDSCOPE_RECOVERY_EVIDENCE_PATH:-}"
-
-started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+EVIDENCE_PATH="${BIDSCOPE_RECOVERY_EVIDENCE_PATH:-recovery-evidence.json}"
+SCRIPT_DIR=""
+PROJECT_ROOT=""
+RUN_ID=""
+PROJECT_NAME=""
+TEMP_ROOT=""
+BACKUP_DIR=""
+SOURCE_OBJECT_DIR=""
+TARGET_OBJECT_DIR=""
+COMPOSE_FILE=""
+RECOVERY_COMPOSE_FILE=""
+started_at=""
 backup_created_at=""
 manifest_hash=""
 backup_id=""
 rpo_hours=""
 rto_seconds=""
 old_evidence_version=""
-current_step="initializing"
+current_step="bootstrap"
 evidence_emitted=false
+
+compose() {
+  docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${RECOVERY_COMPOSE_FILE}" "$@" >&2
+}
+
+compose_capture() {
+  docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${RECOVERY_COMPOSE_FILE}" "$@"
+}
+
+emit_evidence() {
+  local passed="$1"
+  local error_context="${2:-}"
+  local exit_code="${3:-0}"
+  local payload
+  payload="$(python3 - "${backup_id}" "${manifest_hash}" "${started_at}" "${backup_created_at}" "${old_evidence_version}" "${rpo_hours:-null}" "${rto_seconds:-null}" "${passed}" "${error_context}" "${exit_code}" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+
+backup_id, manifest_hash, started_at, backup_created_at, evidence_version, rpo, rto, passed, error, exit_code = sys.argv[1:]
+payload = {
+    "backup_id": backup_id or None,
+    "manifest_hash": manifest_hash or None,
+    "started_at": started_at or datetime.now(timezone.utc).isoformat(),
+    "backup_created_at": backup_created_at or None,
+    "old_report_evidence_version": evidence_version or None,
+    "rpo_hours": None if rpo == "null" else float(rpo),
+    "rto_seconds": None if rto == "null" else float(rto),
+    "backup_age_seconds": None if rpo == "null" else float(rpo) * 3600,
+    "restore_duration_seconds": None if rto == "null" else float(rto),
+    "passed": passed == "true",
+    "error": error or None,
+    "exit_code": int(exit_code),
+}
+print(json.dumps(payload, sort_keys=True))
+PY
+)"
+  printf '%s\n' "${payload}"
+  if [[ -n "${EVIDENCE_PATH}" ]]; then
+    printf '%s\n' "${payload}" > "${EVIDENCE_PATH}"
+  fi
+  evidence_emitted=true
+}
+
+cleanup() {
+  if [[ -n "${PROJECT_NAME}" && -n "${COMPOSE_FILE}" && -n "${RECOVERY_COMPOSE_FILE}" ]]; then
+    docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${RECOVERY_COMPOSE_FILE}" \
+      down -v --remove-orphans >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${TEMP_ROOT}" && -d "${TEMP_ROOT}" ]]; then
+    rm -rf -- "${TEMP_ROOT}"
+  fi
+}
+
+on_exit() {
+  local exit_code="$1"
+  trap - EXIT
+  if [[ "${exit_code}" -ne 0 && "${evidence_emitted}" != true ]]; then
+    emit_evidence false "${current_step}" "${exit_code}" || true
+  fi
+  cleanup
+  exit "${exit_code}"
+}
+trap 'on_exit $?' EXIT
+
+current_step="resolve-script-directory"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+COMPOSE_FILE="${PROJECT_ROOT}/compose.yaml"
+RECOVERY_COMPOSE_FILE="${SCRIPT_DIR}/recovery-compose.override.yaml"
+cd "${PROJECT_ROOT}"
+
+current_step="initialize-timestamps"
+started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}"
+PROJECT_NAME="bidscope-recovery-${RUN_ID}"
+current_step="temporary-workspace"
+TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/bidscope-recovery.XXXXXX")"
+BACKUP_DIR="${TEMP_ROOT}/backups"
+SOURCE_OBJECT_DIR="${TEMP_ROOT}/source-objects"
+TARGET_OBJECT_DIR="${TEMP_ROOT}/target-objects"
 
 export BIDSCOPE_POSTGRES_DB="bidscope"
 export BIDSCOPE_POSTGRES_USER="bidscope"
@@ -50,65 +128,6 @@ export BIDSCOPE_RECOVERY_OBJECT_DIR="${SOURCE_OBJECT_DIR}"
 export BIDSCOPE_RECOVERY_PORT="${BIDSCOPE_RECOVERY_PORT:-$((18000 + RANDOM % 1000))}"
 
 base_url="http://127.0.0.1:${BIDSCOPE_RECOVERY_PORT}"
-
-compose() {
-  docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${RECOVERY_COMPOSE_FILE}" "$@" >&2
-}
-
-compose_capture() {
-  docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" -f "${RECOVERY_COMPOSE_FILE}" "$@"
-}
-
-emit_evidence() {
-  local passed="$1"
-  local error_context="${2:-}"
-  local exit_code="${3:-0}"
-  local payload
-  payload="$(python3 - "${backup_id}" "${manifest_hash}" "${started_at}" "${backup_created_at}" "${old_evidence_version}" "${rpo_hours:-null}" "${rto_seconds:-null}" "${passed}" "${error_context}" "${exit_code}" <<'PY'
-import json
-import sys
-
-backup_id, manifest_hash, started_at, backup_created_at, evidence_version, rpo, rto, passed, error, exit_code = sys.argv[1:]
-payload = {
-    "backup_id": backup_id or None,
-    "manifest_hash": manifest_hash or None,
-    "started_at": started_at,
-    "backup_created_at": backup_created_at or None,
-    "old_report_evidence_version": evidence_version or None,
-    "rpo_hours": None if rpo == "null" else float(rpo),
-    "rto_seconds": None if rto == "null" else float(rto),
-    "backup_age_seconds": None if rpo == "null" else float(rpo) * 3600,
-    "restore_duration_seconds": None if rto == "null" else float(rto),
-    "passed": passed == "true",
-    "error": error or None,
-    "exit_code": int(exit_code),
-}
-print(json.dumps(payload, sort_keys=True))
-PY
-)"
-  printf '%s\n' "${payload}"
-  if [[ -n "${EVIDENCE_PATH}" ]]; then
-    printf '%s\n' "${payload}" > "${EVIDENCE_PATH}"
-  fi
-  evidence_emitted=true
-}
-
-cleanup() {
-  compose down -v --remove-orphans >/dev/null 2>&1 || true
-  rm -rf "${TEMP_ROOT}"
-}
-
-on_exit() {
-  local exit_code="$1"
-  trap - EXIT
-  if [[ "${exit_code}" -ne 0 && "${evidence_emitted}" != true ]]; then
-    emit_evidence false "${current_step}" "${exit_code}" || true
-  fi
-  cleanup
-  exit "${exit_code}"
-}
-trap 'on_exit $?' EXIT
-
 mkdir -p "${BACKUP_DIR}" "${SOURCE_OBJECT_DIR}" "${TARGET_OBJECT_DIR}"
 
 json_field() {
@@ -172,15 +191,6 @@ create_and_complete_scheduled_run() {
   run_id="$(json_field "${created}" id)"
   wait_for_status "${run_id}" "awaiting_confirmation"
   curl -fsS -X POST "${base_url}/api/runs/${run_id}/confirm" -H 'Content-Type: application/json' --data '{"action":"approve"}' >/dev/null
-  wait_for_status "${run_id}" "completed"
-  printf '%s\n' "${run_id}"
-}
-
-create_and_complete_unscheduled_run() {
-  local request='四川服务器招标信息'
-  local created run_id
-  created="$(curl -fsS -X POST "${base_url}/api/runs" -H 'Content-Type: application/json' --data "$(python3 -c 'import json,sys; print(json.dumps({"user_request": sys.argv[1]}))' "${request}")")"
-  run_id="$(json_field "${created}" id)"
   wait_for_status "${run_id}" "completed"
   printf '%s\n' "${run_id}"
 }
@@ -262,7 +272,9 @@ restored_evidence_version="$(json_nested_field "${restored_report}" 'items.0.pro
 [[ "${restored_evidence_version}" == "${old_evidence_version}" ]]
 assert_docx "${old_run_id}"
 current_step="restored-new-run-validation"
-new_run_id="$(create_and_complete_unscheduled_run)"
+new_run_id="$(create_and_complete_scheduled_run)"
+current_step="restored-subscription-create"
+curl -fsS -X POST "${base_url}/api/subscriptions" -H 'Content-Type: application/json' --data "$(python3 -c 'import json,sys; print(json.dumps({"run_id": sys.argv[1]}))' "${new_run_id}")" >/dev/null
 current_step="restored-scheduler-tick"
 restored_tick="$(curl -fsS -X POST "${base_url}/api/test-controls/run-scheduler-tick" -H "X-Test-Control-Token: ${BIDSCOPE_TEST_CONTROL_TOKEN}")"
 [[ "$(json_field "${restored_tick}" run_scheduler_tick)" == "ok" ]]
