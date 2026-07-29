@@ -196,6 +196,21 @@ npm --prefix web run test:unit
 uv run --offline bidscope eval run --mode deterministic --output eval/results/deterministic.json
 ```
 
+Restricted real-data staging uses a separate metadata-only acceptance command;
+it validates an access-controlled dataset manifest and result artifact without
+running a model or changing the deterministic `target_pass` gate:
+
+```bash
+uv run bidscope eval validate-real \
+  --manifest /controlled/staging/evaluation/dataset-manifest.json \
+  --result /controlled/staging/evaluation/result.json \
+  --json
+```
+
+Real data, prompts, credentials and evaluation payloads are not committed to
+the repository. See the productization governance and evaluation specifications
+under `docs/superpowers/specs/` before creating a staging batch.
+
 ### Test Structure
 
 | Suite | Path | Requirements |

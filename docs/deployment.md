@@ -147,3 +147,45 @@ bidscope snapshots import /path/to/bundle
 ```
 
 Integration and E2E test databases must use their dedicated guarded `*_test` or `*_e2e` targets. Do not point their environment URLs at a production Compose database.
+
+## Productization Staging Acceptance
+
+The first productization pilot remains a single-tenant, snapshot-only CCGP
+workflow. Before importing an authorized weekly batch into staging, confirm
+that the external governance record exists and that the bundle uses schema
+version 2 with an approved `data_contract` and explicit `batch_id`:
+
+```bash
+bidscope snapshots inspect /controlled/staging/ccgp-batch-20260729 --json
+bidscope snapshots import /controlled/staging/ccgp-batch-20260729 --json
+```
+
+The inspect response must contain `"disposition": "accepted"`. A
+`"disposition": "quarantined"` result is a hard admission failure; do not
+move the bundle into the object store or retry by changing the source URL.
+The import response records `bundle_hash`, `notice_count`, payload-file count,
+warnings and the idempotent reprocessing mode. Reusing the same bundle must
+return the same import ID and must not create another notice version.
+
+Restricted real-data evaluation is a separate staging artifact flow and never
+changes the deterministic CI gate:
+
+```bash
+bidscope eval validate-real \
+  --manifest /controlled/staging/evaluation/dataset-manifest.json \
+  --result /controlled/staging/evaluation/result.json \
+  --json
+```
+
+The validator checks dataset/version linkage, snapshot IDs, exact manifest
+SHA-256, bounded model metadata, sample count and citation/provenance hard-gate
+outcomes. A valid completed result reports `status=validated` and
+`release_decision=review_required`; it does not emit or reuse
+`deterministic_target_pass`. A failed or hard-gate-invalid result is blocked.
+The command performs no network access and does not run a model.
+
+Do not publish product-quality or availability claims until the staging record
+also includes: approved governance metadata, reproducible evaluation evidence,
+human-usefulness review, bounded live-model cost/latency evidence if enabled,
+an external-backup verification, and a clean-host recovery result within the
+documented RPO/RTO thresholds. CI and E2E fixtures remain synthetic.
