@@ -253,6 +253,32 @@ jobs:
           docker rm -f bidscope-smoke >/dev/null
           exit 1
 
+  # --- Clean-host recovery gate -------------------------------------------
+  recovery:
+    name: Backup clean-host recovery drill
+    runs-on: ubuntu-latest
+    needs: [docker, e2e]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run clean-host recovery drill
+        env:
+          # The script uses deterministic synthetic snapshots and the fake
+          # model.  External backup replication stays disabled unless an
+          # operator explicitly supplies its separate credentials.
+          BIDSCOPE_BACKUP_S3_ENABLED: "false"
+          BIDSCOPE_RECOVERY_EVIDENCE_PATH: recovery-evidence.json
+        run: bash scripts/backup_restore_smoke.sh
+
+      - name: Upload recovery evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-recovery-evidence
+          path: recovery-evidence.json
+          if-no-files-found: warn
+          retention-days: 30
+
   # --- Web frontend tests + build ----------------------------------------
   web:
     name: Web frontend tests & build

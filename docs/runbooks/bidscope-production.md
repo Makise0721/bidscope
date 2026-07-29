@@ -99,14 +99,15 @@ considered reversible merely because Alembic has a downgrade function.
 
 ## 5. Upgrade and Rollback
 
-Use this order for an upgrade:
+The mandatory pre-release order is **backup → compatibility check → migration
+→ smoke → publish**. The compatibility check includes pulling/building the
+immutable target image and confirming it can read the current schema.
 
 1. Create and verify a fresh backup.
-2. Check application and migration compatibility.
-3. Pull/build the immutable target image.
-4. Run `alembic upgrade head` as an explicit step.
-5. Start the target `api` and the single `scheduler` role.
-6. Check `/readyz`, logs, and one representative application operation.
+2. Check application and migration compatibility, including the target image.
+3. Run `alembic upgrade head` as an explicit step.
+4. Run readiness and a representative smoke operation.
+5. Publish/start the target `api` and the single `scheduler` role.
 
 Example:
 
@@ -120,9 +121,9 @@ docker compose logs --tail=200 api scheduler
 ```
 
 For an application regression, first stop the application roles and redeploy the
-previous immutable image tag. A rollback is permitted only after checking that
-the already-applied schema is readable by that image. Database downgrade is
-never automatic: **不自动 downgrade**. If the old image is incompatible with
+previous immutable image tag. Image rollback is permitted only after a
+compatibility check confirms the already-applied schema is readable by that
+image. Database downgrade is never automatic: **不自动 downgrade**. If the old image is incompatible with
 the current schema, restore a verified backup into fresh target databases and a
 fresh object root, then point a separately reviewed deployment at those targets.
 Never use `--clean` or `--if-exists` against a production target as an ad hoc
@@ -181,6 +182,26 @@ The backup destination settings are separate from the application object-store
 settings. Verify the local manifest before treating a replicated copy as
 usable.
 
+### Clean-host recovery evidence
+
+Run the release recovery drill in an isolated Docker host/project context:
+
+```bash
+bash scripts/backup_restore_smoke.sh
+```
+
+It creates a temporary Compose project, archives deterministic test data,
+removes only that project's named data volumes, restores into fresh targets,
+then verifies `/readyz`, the pre-existing report/DOCX and its evidence version,
+a new completed run, and one scheduler tick. Its final JSON line (also uploaded
+by CI as `backup-recovery-evidence`) contains `backup_id`, `manifest_hash`,
+`backup_created_at`, `backup_age_seconds`, `restore_duration_seconds`,
+`rpo_hours`, `rto_seconds`, and `passed`. Treat
+`passed=false`, `rpo_hours > 24`, or `rto_seconds > 14400` as a release block;
+investigate the saved manifest and Compose logs before retrying. This drill uses
+the local fake model and committed synthetic snapshots only; it does not need a
+public website, a live model provider, or external backup credentials.
+
 ## 7. Secret and Key Rotation (密钥轮换)
 
 Rotate one credential class at a time and keep the replacement available until
@@ -223,9 +244,9 @@ Before publishing:
 
 - `docker compose config -q` succeeds with the protected production env.
 - A fresh backup was created and `backup verify` succeeded.
-- The target image and migrations were checked for forward compatibility.
-- `alembic upgrade head` completed before application traffic was enabled.
-- API readiness, scheduler process/tick evidence, and a smoke operation passed.
-- Rollback means application image rollback only when schema compatibility is
-  confirmed; migration downgrade is a deliberate recovery operation and is not
-  automated.
+- The target image and migration are compatibility-checked before applying it.
+- `alembic upgrade head` completed before smoke testing and publication.
+- API readiness, scheduler process/tick evidence, a smoke operation, and the
+  clean-host recovery JSON artifact passed their RPO/RTO thresholds.
+- Rollback means image rollback only after a schema compatibility check;
+  database downgrade is never automatic.

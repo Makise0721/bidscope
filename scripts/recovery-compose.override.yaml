@@ -1,0 +1,16 @@
+# Test-only Compose overrides used by backup_restore_smoke.sh.  The recovery
+# drill switches between two temporary host directories for local object data:
+# the source is archived, while the target starts empty for restore validation.
+services:
+  api:
+    environment:
+      BIDSCOPE_APP_MODE: test
+      BIDSCOPE_OBJECT_STORE_TYPE: local
+      BIDSCOPE_OBJECT_STORE_ROOT: /app/data/objects
+      BIDSCOPE_BACKUP_ROOT: /app/data/backups
+      BIDSCOPE_TEST_CONTROL_TOKEN: ${BIDSCOPE_TEST_CONTROL_TOKEN:?set BIDSCOPE_TEST_CONTROL_TOKEN}
+    ports:
+      - "127.0.0.1:${BIDSCOPE_RECOVERY_PORT:?set BIDSCOPE_RECOVERY_PORT}:8000"
+    volumes:
+      - ${BIDSCOPE_RECOVERY_BACKUP_DIR:?set BIDSCOPE_RECOVERY_BACKUP_DIR}:/app/data/backups
+      - ${BIDSCOPE_RECOVERY_OBJECT_DIR:?set BIDSCOPE_RECOVERY_OBJECT_DIR}:/app/data/objects

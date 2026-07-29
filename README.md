@@ -4,7 +4,7 @@
 
 BidScope parses public tender notices from Chinese government procurement sources, deduplicates them, verifies evidence, and generates cited reports. It is designed so that every factual claim in every report resolves to an immutable evidence span and source version.
 
-**Status:** P1 security, observability, readiness, bounded runtime, and backup/restore foundations are implemented. A full production recovery drill and external backup replication gate remain operational follow-up work. BidScope remains snapshot-only with deterministic offline evaluation.
+**Status:** P1 security, observability, readiness, bounded runtime, backup/restore, and a clean-host recovery drill are implemented. External backup replication remains disabled unless its explicit, separate credentials are supplied. BidScope remains snapshot-only with deterministic offline evaluation.
 
 ---
 
@@ -49,7 +49,7 @@ To rotate the credential, generate a new random token, update `BIDSCOPE_ADMIN_TO
 
 The application writes bounded audit events for critical run, subscription, snapshot-import, report, and DOCX operations. Critical mutation audit rows use the same database transaction as the business change; observation audit failures do not block ordinary reads. Audit details contain IDs, status, and bounded metadata only. Admin Tokens, Authorization headers, model keys, Cookies/session data, raw request headers, request bodies, and full report bodies are excluded.
 
-`/readyz` checks configuration, PostgreSQL, checkpoint, and object storage dependencies within bounded time and returns `200` only when all checks pass. `/healthz` remains a public process liveness probe. `GET /metrics` is Admin Token protected and returns bounded Prometheus text; request IDs are accepted from `X-Request-ID` or generated and echoed in responses. Capacity exhaustion returns `429` with `Retry-After: 5`; scheduler tick timeout and SSE lifecycle are logged/metricized without user text labels. Backup creation, verification, pruning, and non-destructive restore are explicit CLI operations; a complete clean-host recovery drill remains a release gate.
+`/readyz` checks configuration, PostgreSQL, checkpoint, and object storage dependencies within bounded time and returns `200` only when all checks pass. `/healthz` remains a public process liveness probe. `GET /metrics` is Admin Token protected and returns bounded Prometheus text; request IDs are accepted from `X-Request-ID` or generated and echoed in responses. Capacity exhaustion returns `429` with `Retry-After: 5`; scheduler tick timeout and SSE lifecycle are logged/metricized without user text labels. Backup creation, verification, pruning, and non-destructive restore are explicit CLI operations. The clean-host recovery gate is `bash scripts/backup_restore_smoke.sh`: it uses only synthetic data and the fake model, then prints a JSON artifact with the backup ID, manifest hash, explicit backup age/RPO and restore-duration/RTO measurements, restored report evidence version, and `passed`. A gate passes only when `rpo_hours <= 24` and `rto_seconds <= 14400`; the CI artifact is retained as recovery evidence.
 
 ---
 

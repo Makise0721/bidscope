@@ -985,7 +985,9 @@ def test_one_character_secret_validation_errors_keep_structured_metadata(
 
 
 def test_secret_unwrapping_does_not_use_private_secret_internals() -> None:
-    config_source = Path(__file__).parents[2].joinpath("src/bidscope/config.py").read_text()
+    config_source = Path(__file__).parents[2].joinpath("src/bidscope/config.py").read_text(
+        encoding="utf-8"
+    )
 
     assert not re.search(r"\.(?:_secret_value|__dict__)\b", config_source)
 
