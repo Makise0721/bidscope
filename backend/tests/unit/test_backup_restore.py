@@ -102,7 +102,11 @@ if "/docx" in joined:
     Path(output).write_bytes(b"PK\\x03\\x04")
     raise SystemExit(0)
 if "/api/reports/" in joined:
-    print(json.dumps({"items": [{"provenance": {"source_version_id": "version-1"}}]}))
+    source_query = (state / "source-query").read_text(encoding="utf-8")
+    if "近 7 天" in source_query:
+        print(json.dumps({"items": []}))
+    else:
+        print(json.dumps({"items": [{"provenance": {"source_version_id": "version-1"}}]}))
     raise SystemExit(0)
 if "/api/test-controls/run-scheduler-tick" in joined:
     count_path = state / "tick-count"
@@ -132,6 +136,9 @@ if "/api/runs" in joined and "-X POST" in joined:
     count_path = state / "created-count"
     count = int(count_path.read_text() if count_path.exists() else "0")
     count_path.write_text(str(count + 1))
+    request_body = json.loads(args[args.index("--data") + 1])
+    if count == 0:
+        (state / "source-query").write_text(request_body["user_request"], encoding="utf-8")
     print(json.dumps({"id": "old" if count == 0 else "new"}))
     raise SystemExit(0)
 if "/api/runs/old" in joined:
@@ -290,6 +297,15 @@ def test_recovery_drill_supports_a_multi_token_python_launcher(tmp_path: Path) -
     evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
     assert evidence["passed"] is False
     assert evidence["error"] == "compose-config"
+
+
+def test_recovery_drill_uses_a_batch_matchable_scheduled_query(tmp_path: Path) -> None:
+    """A moving seven-day filter must not empty the committed batch-1 report."""
+    result, evidence_path = _run_drill(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["old_report_evidence_version"] == "version-1"
 
 
 def test_recovery_rto_includes_final_restore_validation(tmp_path: Path) -> None:

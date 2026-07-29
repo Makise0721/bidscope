@@ -192,7 +192,7 @@ PY
 }
 
 create_and_complete_scheduled_run() {
-  local scheduled_request='每周一上午 9 点，汇总近 7 天四川和重庆与智算中心服务器有关的预算 500 万以上的招标信息。'
+  local scheduled_request='四川重庆智算中心服务器招标 每周一9点'
   local created run_id
   created="$(curl -fsS -X POST "${base_url}/api/runs" -H 'Content-Type: application/json' --data "$("${PYTHON_COMMAND[@]}" -c 'import json,sys; print(json.dumps({"user_request": sys.argv[1]}))' "${scheduled_request}")")"
   run_id="$(json_field "${created}" id)"
