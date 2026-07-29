@@ -1,6 +1,6 @@
 # Authorized CCGP Snapshot Contract
 
-**Status:** Accepted for the first productization slice
+**Status:** Proposed — pending source authorization and pilot-owner approval
 
 **Date:** 2026-07-29
 

@@ -1,6 +1,6 @@
 # BidScope Real-Data Evaluation Specification
 
-**Status:** Accepted as a staging-only contract
+**Status:** Proposed — pending pilot-owner approval
 
 **Date:** 2026-07-29
 

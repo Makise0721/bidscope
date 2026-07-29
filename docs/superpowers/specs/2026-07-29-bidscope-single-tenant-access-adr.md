@@ -1,6 +1,6 @@
 # BidScope Single-Tenant Access ADR
 
-**Status:** Accepted for the first productization pilot
+**Status:** Proposed — pending pilot-owner approval
 
 **Date:** 2026-07-29
 
