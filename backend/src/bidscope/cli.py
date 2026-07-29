@@ -31,6 +31,10 @@ from bidscope.clock import SystemClock
 from bidscope.config import get_settings
 from bidscope.db import create_engine_and_session
 from bidscope.evaluation.datasets import DatasetError
+from bidscope.evaluation.real_contracts import (
+    RealEvaluationContractError,
+    validate_real_evaluation_files,
+)
 from bidscope.evaluation.runner import EvaluationExecutionError, run_deterministic
 from bidscope.graph.executor import run_setup_checkpoints
 from bidscope.persistence.repositories import SnapshotRepository
@@ -128,7 +132,7 @@ def snapshots_inspect(
     try:
         inspection = importer.import_inspect(bundle)
     except SnapshotImportError as error:
-        payload = {
+        payload: dict[str, Any] = {
             "valid": False,
             "bundle_id": None,
             "status": "invalid",
@@ -356,6 +360,58 @@ def evaluation_run(
         typer.echo(f"evaluation failed: {error}", err=True)
         raise typer.Exit(code=1) from None
     typer.echo(_json_payload(result))
+
+
+@eval_app.command("validate-real")
+def evaluation_validate_real(
+    manifest: Annotated[
+        Path, typer.Option("--manifest", exists=True, file_okay=True, dir_okay=False)
+    ],
+    result: Annotated[
+        Path, typer.Option("--result", exists=True, file_okay=True, dir_okay=False)
+    ],
+    json_output: Annotated[bool, typer.Option("--json", help="Print JSON output.")] = False,
+) -> None:
+    """Validate restricted real-evaluation artifacts without running a model."""
+    try:
+        validated = validate_real_evaluation_files(manifest, result)
+    except (RealEvaluationContractError, ValidationError, OSError) as error:
+        error_payload: dict[str, Any] = {
+            "status": "invalid",
+            "release_decision": "blocked",
+            "deterministic_target_pass": None,
+            "errors": [str(error)],
+        }
+        if json_output:
+            typer.echo(_json_payload(error_payload))
+        else:
+            typer.echo(f"real evaluation invalid: {error}", err=True)
+        raise typer.Exit(code=1) from None
+
+    hard_gate_passed = (
+        validated.result.status == "completed"
+        and validated.result.citation_provenance_hard_gate
+    )
+    payload: dict[str, Any] = {
+        "status": "validated" if hard_gate_passed else "blocked",
+        "release_decision": "review_required" if hard_gate_passed else "blocked",
+        "deterministic_target_pass": None,
+        "dataset_id": validated.manifest.dataset_id,
+        "dataset_version": validated.manifest.dataset_version,
+        "run_id": validated.result.run_id,
+        "manifest_sha256": validated.manifest_sha256,
+        "mode": validated.result.mode,
+        "metrics": validated.result.metrics.model_dump(mode="json"),
+        "hard_gate_failures": validated.result.hard_gate_failures,
+        "failure_codes": validated.result.failure_codes,
+    }
+    if json_output:
+        typer.echo(_json_payload(payload))
+    else:
+        typer.echo(
+            f"real evaluation {payload['status']}: "
+            f"{validated.result.run_id} ({payload['release_decision']})"
+        )
 
 
 # --- api ---------------------------------------------------------------------

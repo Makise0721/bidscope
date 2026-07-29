@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -59,3 +60,77 @@ def test_snapshot_import_json_exposes_auditable_metrics(
     assert payload["bundle_hash"] == "a" * 64
     assert payload["metrics"] == {"manifest_sha256": "a" * 64, "notice_count": 1}
     assert payload["warnings"] == {"parser": []}
+
+
+def test_validate_real_evaluation_cli_is_separate_from_deterministic_gate(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    result_path = tmp_path / "result.json"
+    manifest = {
+        "schema_version": "real-evaluation-dataset-v1",
+        "dataset_id": "ccgp-pilot-eval",
+        "dataset_version": "2026-07-29-v1",
+        "source": "ccgp",
+        "capture_kind": "curated_public_excerpt",
+        "snapshot_bundle_ids": ["ccgp-batch-20260729"],
+        "snapshot_hashes": {"ccgp-batch-20260729": "a" * 64},
+        "annotation_guide_version": "guide-v1",
+        "annotation_set_version": "labels-v1",
+        "access_class": "restricted_staging",
+        "record_count": 1,
+        "created_at": "2026-07-29T09:00:00+00:00",
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    result = {
+        "schema_version": "real-evaluation-result-v1",
+        "run_id": "real-eval-run-20260729-01",
+        "dataset_id": "ccgp-pilot-eval",
+        "dataset_version": "2026-07-29-v1",
+        "dataset_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        "snapshot_bundle_ids": ["ccgp-batch-20260729"],
+        "mode": "offline_baseline",
+        "provider": "offline",
+        "model": "fake-deterministic",
+        "model_version": "fake-deterministic-v1",
+        "prompt_version": "prompt-v1",
+        "pricing_snapshot_date": "2026-07-29",
+        "environment": "staging",
+        "sample_count": 1,
+        "failure_policy": "record_and_continue",
+        "status": "completed",
+        "metrics": {
+            "retrieval_recall_at_10": 1,
+            "retrieval_ndcg_at_10": 1,
+            "dedup_f1": 1,
+            "citation_coverage": 1,
+            "citation_support_accuracy": 1,
+            "latency_p50_ms": 1,
+            "latency_p95_ms": 1,
+            "cost_cny": 0,
+            "human_usefulness": 1,
+        },
+        "citation_provenance_hard_gate": True,
+        "hard_gate_failures": [],
+        "failure_codes": [],
+    }
+    result_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "eval",
+            "validate-real",
+            "--manifest",
+            str(manifest_path),
+            "--result",
+            str(result_path),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "validated"
+    assert payload["release_decision"] == "review_required"
+    assert payload["deterministic_target_pass"] is None
