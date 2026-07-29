@@ -153,27 +153,40 @@ host path is `./data/backups`; the image creates the path writable by UID 1000.
 
 Restore is non-destructive and targets empty destinations. Stop application
 roles first, verify the source backup, and supply an explicit confirmation and
-fresh database/object destinations:
+fresh database/object destinations. Provision distinct recovery databases first
+and set their explicit DSNs; they must never equal the live deployment DSNs.
+Use a newly created object root rather than the live object path:
 
 ```bash
+# These point at separately provisioned, empty recovery databases.
+export BIDSCOPE_RESTORE_DATABASE_URL='postgresql+asyncpg://<user>:<password>@<host>:5432/<fresh-recovery-db>'
+export BIDSCOPE_RESTORE_CHECKPOINT_DATABASE_URL='postgresql+psycopg://<user>:<password>@<host>:5432/<fresh-recovery-checkpoint-db>'
+export BIDSCOPE_RESTORE_OBJECT_ROOT="$(mktemp -d "$PWD/data/recovery-objects.XXXXXX")"
+
+: "${BIDSCOPE_RESTORE_DATABASE_URL:?set a fresh recovery application DSN}"
+: "${BIDSCOPE_RESTORE_CHECKPOINT_DATABASE_URL:?set a fresh recovery checkpoint DSN}"
+test "$BIDSCOPE_RESTORE_DATABASE_URL" != "$BIDSCOPE_DATABASE_URL"
+test "$BIDSCOPE_RESTORE_CHECKPOINT_DATABASE_URL" != "$BIDSCOPE_CHECKPOINT_DATABASE_URL"
+
 docker compose stop api scheduler
 docker compose --profile ops run --rm backup bidscope ops backup verify /app/data/backups/<backup-id>
 docker compose --profile ops run --rm \
-  -v "$PWD/data/restore-objects:/app/data/restore-objects" \
+  -v "$BIDSCOPE_RESTORE_OBJECT_ROOT:/app/data/restore-objects" \
   backup bidscope ops backup restore \
   /app/data/backups/<backup-id> \
-  --target-database-url "$BIDSCOPE_DATABASE_URL" \
-  --target-checkpoint-database-url "$BIDSCOPE_CHECKPOINT_DATABASE_URL" \
+  --target-database-url "$BIDSCOPE_RESTORE_DATABASE_URL" \
+  --target-checkpoint-database-url "$BIDSCOPE_RESTORE_CHECKPOINT_DATABASE_URL" \
   --target-object-root /app/data/restore-objects \
   --confirm
 ```
 
 The restore target must be a fresh empty database (or databases) and an empty
-object root. Perform a post-restore migration/current-revision check and an
-application smoke check before directing traffic to it. The restore command
-must not overwrite an existing target, and production credentials must be
-provided through the operator's protected environment rather than copied into
-command output or logs.
+object root. The restore preflight validates those database targets and the
+object root are empty before `--confirm` can proceed; it does not overwrite a
+live or non-empty target. Perform a post-restore migration/current-revision
+check and an application smoke check before directing traffic to it. Production
+credentials must be provided through the operator's protected environment
+rather than copied into command output or logs.
 
 External backup S3 replication is disabled unless
 `BIDSCOPE_BACKUP_S3_ENABLED=true` **and** all of
