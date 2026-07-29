@@ -149,6 +149,7 @@ def inspect_bundle(bundle_path: Path) -> InspectionResult:
             errors=[
                 InspectionError("invalid_manifest", f"manifest.json is not valid JSON: {error}")
             ],
+            manifest_sha256=manifest_sha256,
         )
     except OSError as error:
         return InspectionResult(
@@ -164,13 +165,20 @@ def inspect_bundle(bundle_path: Path) -> InspectionResult:
         return InspectionResult(
             valid=False,
             errors=[InspectionError("invalid_manifest", "manifest.json must be a JSON object")],
+            manifest_sha256=manifest_sha256,
         )
 
     # Single entry point: every structural constraint is validated by the typed
     # SnapshotManifest contract. Failures become typed InspectionErrors.
     errors = _convert_manifest_errors(raw)
     if errors:
-        return InspectionResult(valid=False, errors=errors)
+        raw_bundle_id = raw.get("bundle_id")
+        return InspectionResult(
+            valid=False,
+            bundle_id=raw_bundle_id if isinstance(raw_bundle_id, str) else None,
+            errors=errors,
+            manifest_sha256=manifest_sha256,
+        )
 
     manifest = SnapshotManifest.model_validate(raw)
 

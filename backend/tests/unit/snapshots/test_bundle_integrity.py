@@ -72,6 +72,9 @@ def test_schema_v2_requires_authorized_data_contract(tmp_path: Path) -> None:
 
     assert inspection.valid is False
     assert inspection.disposition == "quarantined"
+    assert inspection.manifest_sha256 == hashlib.sha256(
+        (bundle / "manifest.json").read_bytes()
+    ).hexdigest()
     assert any(error.code == "missing_data_contract" for error in inspection.errors)
 
 
