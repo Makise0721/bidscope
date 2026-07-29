@@ -412,6 +412,8 @@ def evaluation_validate_real(
             f"real evaluation {payload['status']}: "
             f"{validated.result.run_id} ({payload['release_decision']})"
         )
+    if not hard_gate_passed:
+        raise typer.Exit(code=1)
 
 
 # --- api ---------------------------------------------------------------------

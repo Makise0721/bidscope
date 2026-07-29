@@ -134,3 +134,53 @@ def test_validate_real_evaluation_cli_is_separate_from_deterministic_gate(
     assert payload["status"] == "validated"
     assert payload["release_decision"] == "review_required"
     assert payload["deterministic_target_pass"] is None
+
+
+def test_validate_real_evaluation_cli_blocks_failed_result(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    result_path = tmp_path / "result.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    result_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        cli,
+        "validate_real_evaluation_files",
+        lambda _manifest_path, _result_path: SimpleNamespace(
+            manifest=SimpleNamespace(
+                dataset_id="ccgp-pilot-eval",
+                dataset_version="2026-07-29-v1",
+            ),
+            result=SimpleNamespace(
+                run_id="real-eval-run-20260729-02",
+                mode="staging_live_model",
+                status="failed",
+                citation_provenance_hard_gate=True,
+                metrics=SimpleNamespace(model_dump=lambda mode: {}),
+                hard_gate_failures=[],
+                failure_codes=["provider_unavailable"],
+            ),
+            manifest_sha256="a" * 64,
+        ),
+    )
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "eval",
+            "validate-real",
+            "--manifest",
+            str(manifest_path),
+            "--result",
+            str(result_path),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "blocked"
+    assert payload["release_decision"] == "blocked"
+    assert payload["failure_codes"] == ["provider_unavailable"]
+    assert payload["deterministic_target_pass"] is None
