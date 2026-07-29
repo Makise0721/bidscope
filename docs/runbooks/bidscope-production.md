@@ -113,7 +113,7 @@ Example:
 
 ```bash
 docker compose --profile ops run --rm backup
-docker compose run --rm api bidscope ops backup verify /app/data/backups/<backup-id>
+docker compose --profile ops run --rm backup bidscope ops backup verify /app/data/backups/<backup-id>
 docker compose run --rm api alembic upgrade head
 docker compose up -d api scheduler
 docker compose ps
@@ -139,10 +139,10 @@ Compose services and it never runs as a scheduler or daemon:
 docker compose --profile ops run --rm backup
 
 # Verify a selected manifest and every referenced local artifact.
-docker compose run --rm api bidscope ops backup verify /app/data/backups/<backup-id>
+docker compose --profile ops run --rm backup bidscope ops backup verify /app/data/backups/<backup-id>
 
 # Prune according to configured daily/weekly retention after verification.
-docker compose run --rm api bidscope ops backup prune
+docker compose --profile ops run --rm backup bidscope ops backup prune
 ```
 
 Verify the newest backup before pruning. Do not prune when manifest verification
@@ -157,8 +157,10 @@ fresh database/object destinations:
 
 ```bash
 docker compose stop api scheduler
-docker compose run --rm api bidscope ops backup verify /app/data/backups/<backup-id>
-docker compose run --rm api bidscope ops backup restore \
+docker compose --profile ops run --rm backup bidscope ops backup verify /app/data/backups/<backup-id>
+docker compose --profile ops run --rm \
+  -v "$PWD/data/restore-objects:/app/data/restore-objects" \
+  backup bidscope ops backup restore \
   /app/data/backups/<backup-id> \
   --target-database-url "$BIDSCOPE_DATABASE_URL" \
   --target-checkpoint-database-url "$BIDSCOPE_CHECKPOINT_DATABASE_URL" \
@@ -184,7 +186,7 @@ usable.
 
 ### Clean-host recovery evidence
 
-Run the release recovery drill in an isolated Docker host/project context:
+Run the release recovery drill in an isolated Compose project context:
 
 ```bash
 bash scripts/backup_restore_smoke.sh

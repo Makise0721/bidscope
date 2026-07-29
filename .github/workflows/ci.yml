@@ -276,7 +276,7 @@ jobs:
         with:
           name: backup-recovery-evidence
           path: recovery-evidence.json
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30
 
   # --- Web frontend tests + build ----------------------------------------

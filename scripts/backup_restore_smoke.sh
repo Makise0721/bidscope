@@ -24,8 +24,8 @@ backup_id=""
 rpo_hours=""
 rto_seconds=""
 old_evidence_version=""
-
-mkdir -p "${BACKUP_DIR}" "${SOURCE_OBJECT_DIR}" "${TARGET_OBJECT_DIR}"
+current_step="initializing"
+evidence_emitted=false
 
 export BIDSCOPE_POSTGRES_DB="bidscope"
 export BIDSCOPE_POSTGRES_USER="bidscope"
@@ -61,12 +61,14 @@ compose_capture() {
 
 emit_evidence() {
   local passed="$1"
+  local error_context="${2:-}"
+  local exit_code="${3:-0}"
   local payload
-  payload="$(python3 - "${backup_id}" "${manifest_hash}" "${started_at}" "${backup_created_at}" "${old_evidence_version}" "${rpo_hours:-null}" "${rto_seconds:-null}" "${passed}" <<'PY'
+  payload="$(python3 - "${backup_id}" "${manifest_hash}" "${started_at}" "${backup_created_at}" "${old_evidence_version}" "${rpo_hours:-null}" "${rto_seconds:-null}" "${passed}" "${error_context}" "${exit_code}" <<'PY'
 import json
 import sys
 
-backup_id, manifest_hash, started_at, backup_created_at, evidence_version, rpo, rto, passed = sys.argv[1:]
+backup_id, manifest_hash, started_at, backup_created_at, evidence_version, rpo, rto, passed, error, exit_code = sys.argv[1:]
 payload = {
     "backup_id": backup_id or None,
     "manifest_hash": manifest_hash or None,
@@ -78,6 +80,8 @@ payload = {
     "backup_age_seconds": None if rpo == "null" else float(rpo) * 3600,
     "restore_duration_seconds": None if rto == "null" else float(rto),
     "passed": passed == "true",
+    "error": error or None,
+    "exit_code": int(exit_code),
 }
 print(json.dumps(payload, sort_keys=True))
 PY
@@ -86,13 +90,26 @@ PY
   if [[ -n "${EVIDENCE_PATH}" ]]; then
     printf '%s\n' "${payload}" > "${EVIDENCE_PATH}"
   fi
+  evidence_emitted=true
 }
 
 cleanup() {
   compose down -v --remove-orphans >/dev/null 2>&1 || true
   rm -rf "${TEMP_ROOT}"
 }
-trap cleanup EXIT
+
+on_exit() {
+  local exit_code="$1"
+  trap - EXIT
+  if [[ "${exit_code}" -ne 0 && "${evidence_emitted}" != true ]]; then
+    emit_evidence false "${current_step}" "${exit_code}" || true
+  fi
+  cleanup
+  exit "${exit_code}"
+}
+trap 'on_exit $?' EXIT
+
+mkdir -p "${BACKUP_DIR}" "${SOURCE_OBJECT_DIR}" "${TARGET_OBJECT_DIR}"
 
 json_field() {
   local json="$1"
@@ -168,26 +185,38 @@ create_and_complete_unscheduled_run() {
   printf '%s\n' "${run_id}"
 }
 
+current_step="compose-config"
 compose config -q
 
 # Source environment: initialize deterministic data, exercise the E2E flow,
 # then archive the populated databases and local object root.
+current_step="source-infrastructure"
 compose up -d postgres minio minio-init
+current_step="source-migrations"
 compose run --rm --no-deps api alembic upgrade head
+current_step="source-checkpoint-setup"
 compose run --rm --no-deps api bidscope checkpoints setup
+current_step="source-snapshot-import"
 compose run --rm --no-deps api bidscope snapshots import data/demo/batch-1
+current_step="source-api-start"
 compose up -d api
+current_step="source-readiness"
 wait_ready
 
+current_step="source-report-flow"
 old_run_id="$(create_and_complete_scheduled_run)"
 old_report="$(curl -fsS "${base_url}/api/reports/${old_run_id}")"
 old_evidence_version="$(json_nested_field "${old_report}" 'items.0.provenance.source_version_id')"
 assert_docx "${old_run_id}"
+current_step="source-subscription-create"
 curl -fsS -X POST "${base_url}/api/subscriptions" -H 'Content-Type: application/json' --data "$(python3 -c 'import json,sys; print(json.dumps({"run_id": sys.argv[1]}))' "${old_run_id}")" >/dev/null
+current_step="source-scheduler-tick"
 source_tick="$(curl -fsS -X POST "${base_url}/api/test-controls/run-scheduler-tick" -H "X-Test-Control-Token: ${BIDSCOPE_TEST_CONTROL_TOKEN}")"
 [[ "$(json_field "${source_tick}" run_scheduler_tick)" == "ok" ]]
 [[ "$(json_field "${source_tick}" ran)" -ge 1 ]]
+[[ "$(json_field "${source_tick}" failed)" -eq 0 ]]
 
+current_step="backup-create"
 backup_json="$(compose_capture run --rm --no-deps api bidscope ops backup create --retention-class daily --json | tail -n 1)"
 backup_id="$(json_field "${backup_json}" backup_id)"
 backup_created_at="$(python3 - "${BACKUP_DIR}/${backup_id}/manifest.json" <<'PY'
@@ -208,29 +237,40 @@ PY
 
 # Destroy this drill's named volumes only.  The archived backup and separate,
 # empty target object root are bind mounts outside the Compose volume set.
+restore_started="$(date +%s)"
+current_step="recovery-volume-destruction"
 compose down -v --remove-orphans
 export BIDSCOPE_RECOVERY_OBJECT_DIR="${TARGET_OBJECT_DIR}"
+current_step="target-infrastructure"
 compose up -d postgres minio minio-init
 
-restore_started="$(date +%s)"
+current_step="backup-restore"
 compose_capture run --rm --no-deps api bidscope ops backup restore \
   "/app/data/backups/${backup_id}" \
   --target-database-url "${BIDSCOPE_DATABASE_URL}" \
   --target-checkpoint-database-url "${BIDSCOPE_CHECKPOINT_DATABASE_URL}" \
   --target-object-root /app/data/objects \
   --confirm --json >/dev/null
-rto_seconds="$(( $(date +%s) - restore_started ))"
 
+current_step="target-api-start"
 compose up -d api
+current_step="target-readiness"
 wait_ready
+current_step="restored-report-validation"
 restored_report="$(curl -fsS "${base_url}/api/reports/${old_run_id}")"
 restored_evidence_version="$(json_nested_field "${restored_report}" 'items.0.provenance.source_version_id')"
 [[ "${restored_evidence_version}" == "${old_evidence_version}" ]]
 assert_docx "${old_run_id}"
+current_step="restored-new-run-validation"
 new_run_id="$(create_and_complete_unscheduled_run)"
+current_step="restored-scheduler-tick"
 restored_tick="$(curl -fsS -X POST "${base_url}/api/test-controls/run-scheduler-tick" -H "X-Test-Control-Token: ${BIDSCOPE_TEST_CONTROL_TOKEN}")"
 [[ "$(json_field "${restored_tick}" run_scheduler_tick)" == "ok" ]]
+[[ "$(json_field "${restored_tick}" ran)" -ge 1 ]]
+[[ "$(json_field "${restored_tick}" failed)" -eq 0 ]]
+rto_seconds="$(( $(date +%s) - restore_started ))"
 
+current_step="rpo-rto-threshold-gate"
 if python3 - "${rpo_hours}" "${rto_seconds}" <<'PY'
 import sys
 rpo, rto = map(float, sys.argv[1:])
@@ -239,7 +279,7 @@ PY
 then
   emit_evidence true
 else
-  emit_evidence false
+  emit_evidence false "rpo-or-rto-threshold" 1
   echo "Recovery gate breached: rpo_hours > 24 or rto_seconds > 14400" >&2
   exit 1
 fi
