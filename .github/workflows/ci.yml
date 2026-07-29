@@ -137,6 +137,7 @@ jobs:
           backend/tests/unit/test_observability.py
           backend/tests/unit/test_readiness.py
           backend/tests/unit/test_backup.py
+          backend/tests/unit/test_backup_restore.py
           backend/tests/unit/api/test_run_cancellation.py
           backend/tests/unit/subscriptions/test_scheduler.py
           backend/tests/unit/deployment/test_deployment_contract.py -q

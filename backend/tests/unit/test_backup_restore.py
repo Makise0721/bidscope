@@ -32,6 +32,8 @@ def _run_drill(
     # Keep source inspection encoding-explicit on Windows; execution below is
     # the actual contract, not a string-matching substitute.
     assert SCRIPT_PATH.read_text(encoding="utf-8").startswith("#!/usr/bin/env bash")
+    if os.name == "nt":
+        pytest.skip("the recovery shell contract executes on POSIX CI")
     bash = shutil.which("bash")
     if bash is None:
         pytest.skip("bash is required for the recovery-drill contract")
