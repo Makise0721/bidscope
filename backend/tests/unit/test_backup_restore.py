@@ -27,6 +27,7 @@ def _run_drill(
     fail_date: bool = False,
     fail_cleanup: bool = False,
     python_command: str | None = None,
+    large_report: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     """Run the shell drill against local command doubles, never Docker/network."""
     # Keep source inspection encoding-explicit on Windows; execution below is
@@ -53,6 +54,9 @@ def _run_drill(
             fake_bin / "py",
             """#!/usr/bin/env bash
 [[ "${1:-}" == "-3" ]] && shift
+for argument in "$@"; do
+  [[ "${#argument}" -le 4096 ]] || exit 74
+done
 exec python3 "$@"
 """,
         )
@@ -106,7 +110,10 @@ if "/api/reports/" in joined:
     if "近 7 天" in source_query:
         print(json.dumps({"items": []}))
     else:
-        print(json.dumps({"items": [{"provenance": {"source_version_id": "version-1"}}]}))
+        report = {"items": [{"provenance": {"source_version_id": "version-1"}}]}
+        if os.environ["FAKE_LARGE_REPORT"] == "1":
+            report["items"][0]["padding"] = "x" * 20000
+        print(json.dumps(report))
     raise SystemExit(0)
 if "/api/test-controls/run-scheduler-tick" in joined:
     count_path = state / "tick-count"
@@ -199,6 +206,7 @@ exit 91
             "FAKE_FAIL_DATE": "1" if fail_date else "0",
             "BIDSCOPE_RECOVERY_EVIDENCE_PATH": str(evidence_path),
             "BIDSCOPE_PYTHON_COMMAND": python_command or "python3",
+            "FAKE_LARGE_REPORT": "1" if large_report else "0",
         }
     )
     result = subprocess.run(
@@ -302,6 +310,17 @@ def test_recovery_drill_supports_a_multi_token_python_launcher(tmp_path: Path) -
 def test_recovery_drill_uses_a_batch_matchable_scheduled_query(tmp_path: Path) -> None:
     """A moving seven-day filter must not empty the committed batch-1 report."""
     result, evidence_path = _run_drill(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["old_report_evidence_version"] == "version-1"
+
+
+def test_recovery_drill_parses_large_reports_via_python_stdin(tmp_path: Path) -> None:
+    """The multi-token launcher rejects a report passed as one huge argument."""
+    result, evidence_path = _run_drill(
+        tmp_path, python_command="py -3", large_report=True
+    )
 
     assert result.returncode == 0, result.stderr
     evidence = json.loads(evidence_path.read_text(encoding="utf-8"))

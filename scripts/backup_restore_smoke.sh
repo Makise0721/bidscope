@@ -140,13 +140,15 @@ mkdir -p "${BACKUP_DIR}" "${SOURCE_OBJECT_DIR}" "${TARGET_OBJECT_DIR}"
 json_field() {
   local json="$1"
   local field="$2"
-  "${PYTHON_COMMAND[@]}" -c 'import json, sys; print(json.loads(sys.argv[1])[sys.argv[2]])' "${json}" "${field}"
+  printf '%s' "${json}" | "${PYTHON_COMMAND[@]}" -c \
+    'import json, sys; print(json.load(sys.stdin)[sys.argv[1]])' "${field}"
 }
 
 json_nested_field() {
   local json="$1"
   local path="$2"
-  "${PYTHON_COMMAND[@]}" -c 'from functools import reduce; import json, sys; print(reduce(lambda value, key: value[key], sys.argv[2].split("."), json.loads(sys.argv[1])))' "${json}" "${path}"
+  printf '%s' "${json}" | "${PYTHON_COMMAND[@]}" -c \
+    'from functools import reduce; import json, sys; print(reduce(lambda value, key: value[key], sys.argv[1].split("."), json.load(sys.stdin)))' "${path}"
 }
 
 wait_ready() {
