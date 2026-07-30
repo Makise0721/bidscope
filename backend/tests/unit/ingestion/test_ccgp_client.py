@@ -17,6 +17,7 @@ from bidscope.ingestion.ccgp import (
     SourcePayloadError,
     SourceRateLimitedError,
     SourceResponseTooLargeError,
+    SourceSigningError,
     SourceTimeoutError,
 )
 from bidscope.ingestion.ports import AuthorizedEndpoint, SignableRequest
@@ -34,6 +35,11 @@ class RecordingSigner:
             "X-Authorization-Signature": "synthetic-signature",
             "X-Authorization-Timestamp": request.timestamp.isoformat(),
         }
+
+
+class FailingSigner:
+    def sign(self, _request: SignableRequest) -> dict[str, str]:
+        raise RuntimeError("private-key-material")
 
 
 def _endpoint() -> AuthorizedEndpoint:
@@ -179,6 +185,20 @@ async def test_fetch_page_converts_timeout_to_bounded_source_error() -> None:
         await http_client.aclose()
 
     assert error.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_fetch_page_redacts_signer_failures_as_non_retryable_source_errors() -> None:
+    client, _signer, http_client = _client(lambda _request: httpx.Response(200), FailingSigner())
+    try:
+        with pytest.raises(SourceSigningError) as error:
+            await client.fetch_page(None)
+    finally:
+        await http_client.aclose()
+
+    assert error.value.code == "signature_failed"
+    assert error.value.retryable is False
+    assert "private-key-material" not in str(error.value)
 
 
 @pytest.mark.asyncio

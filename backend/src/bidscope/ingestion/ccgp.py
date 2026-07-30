@@ -89,6 +89,15 @@ class SourceTimeoutError(SourceClientError):
         )
 
 
+class SourceSigningError(SourceClientError):
+    def __init__(self) -> None:
+        super().__init__(
+            "authorized source request signing failed",
+            code="signature_failed",
+            retryable=False,
+        )
+
+
 class SourcePayloadError(SourceClientError):
     def __init__(self, detail: str) -> None:
         super().__init__(
@@ -160,15 +169,20 @@ class AuthorizedSourceClient:
         """Fetch and validate exactly one page without applying retry policy."""
         request_url, body = self._build_request(cursor)
         timestamp = self.clock.now()
-        signed = self.signer.sign(
-            SignableRequest(
-                method=self.endpoint.method,
-                url=request_url,
-                body=body,
-                timestamp=timestamp,
-                client_id=self.client_id,
+        try:
+            signed = self.signer.sign(
+                SignableRequest(
+                    method=self.endpoint.method,
+                    url=request_url,
+                    body=body,
+                    timestamp=timestamp,
+                    client_id=self.client_id,
+                )
             )
-        )
+        except SourceClientError:
+            raise
+        except Exception as error:
+            raise SourceSigningError() from error
         headers = {"Accept": "application/json", **signed}
         if self.endpoint.method == "POST":
             headers["Content-Type"] = "application/json"
