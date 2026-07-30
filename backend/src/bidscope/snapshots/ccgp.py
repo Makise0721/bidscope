@@ -13,10 +13,13 @@ rather than silently producing wrong fields.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 from bidscope.domain.enums import SourceName
 from bidscope.domain.notices import NormalizedNotice
+from bidscope.domain.snapshots import SnapshotManifest
 from bidscope.snapshots import _parse
 from bidscope.snapshots.adapters import InspectionResult, inspect_bundle
 from selectolax.parser import HTMLParser
@@ -42,6 +45,9 @@ class CcgpSnapshotAdapter:
         # of re-reading manifest.json a second time.
         manifest = inspection.manifest
         assert manifest is not None  # valid inspection guarantees a parsed manifest
+
+        if manifest.capture_kind.value == "raw_response":
+            return self._parse_raw_response(bundle, manifest)
 
         html = (bundle / "detail.html").read_text(encoding="utf-8")
         tree = HTMLParser(html)
@@ -76,6 +82,70 @@ class CcgpSnapshotAdapter:
             fields=fields,
         )
         return [notice]
+
+    def _parse_raw_response(
+        self, bundle: Path, manifest: SnapshotManifest
+    ) -> list[NormalizedNotice]:
+        """Parse the approved JSON response contract used by live ingestion."""
+        try:
+            payload = json.loads((bundle / "response.json").read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise _parse.ParseDrift(
+                "CCGP authorized response is not valid JSON",
+                path="response.json",
+                detail="invalid_json",
+            ) from error
+        if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+            raise _parse.ParseDrift(
+                "CCGP authorized response is missing the items list",
+                path="response.json:items",
+                detail="items must be a list",
+            )
+
+        notices: list[NormalizedNotice] = []
+        for index, item in enumerate(payload["items"]):
+            if not isinstance(item, dict):
+                raise _parse.ParseDrift(
+                    "CCGP authorized response item is not an object",
+                    path=f"response.json:items[{index}]",
+                    detail="item must be an object",
+                )
+            external_id = self._first_text(item, "external_id", "notice_id", "id")
+            if not external_id:
+                raise _parse.ParseDrift(
+                    "CCGP authorized response item has no identifier",
+                    path=f"response.json:items[{index}].external_id",
+                    detail="identifier is required",
+                )
+            fields = {
+                "external_id": external_id,
+                "title": self._first_text(item, "title", "name"),
+                "purchaser": self._first_text(item, "purchaser", "buyer"),
+                "region": self._first_text(item, "region", "region_name"),
+                "publish_time": self._first_text(item, "publish_time", "published_at"),
+                "deadline": self._first_text(item, "deadline", "deadline_at"),
+                "budget": self._first_text(item, "budget", "budget_text"),
+            }
+            notices.append(
+                _parse.build_notice(
+                    source=self.source,
+                    capture_kind=manifest.capture_kind,
+                    parser_version=manifest.parser_version,
+                    source_url=manifest.source_urls[0],
+                    fields=fields,
+                )
+            )
+        return notices
+
+    @staticmethod
+    def _first_text(item: dict[str, Any], *keys: str) -> str | None:
+        for key in keys:
+            value = item.get(key)
+            if isinstance(value, str):
+                return _parse.normalize_whitespace(value)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return str(value)
+        return None
 
     def load_expected(self, bundle: Path) -> list[dict[str, object]]:
         return _parse.load_expected(bundle)

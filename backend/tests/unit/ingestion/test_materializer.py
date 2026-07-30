@@ -15,6 +15,8 @@ from bidscope.ingestion.materializer import (
     MaterializedBundle,
 )
 from bidscope.ingestion.ports import AuthorizedSourcePage
+from bidscope.snapshots.adapters import inspect_bundle
+from bidscope.snapshots.ccgp import CcgpSnapshotAdapter
 
 FIXED_NOW = datetime(2026, 7, 30, 8, 0, tzinfo=UTC)
 RESPONSE = b'{"items":[{"notice_id":"n-1"}],"next_cursor":null}'
@@ -74,6 +76,13 @@ def test_identical_response_and_metadata_are_byte_identical(tmp_path: Path) -> N
     assert (first.path / "response.json").read_bytes() == (
         second.path / "response.json"
     ).read_bytes()
+    inspection = inspect_bundle(first.path)
+    assert inspection.valid is True
+    assert inspection.manifest is not None
+    assert inspection.manifest.capture_kind.value == "raw_response"
+    assert inspection.manifest.acquisition_metadata is not None
+    notices = CcgpSnapshotAdapter().parse(first.path)
+    assert [notice.external_id for notice in notices] == ["n-1"]
 
 
 def test_changed_response_creates_a_new_bundle_id(tmp_path: Path) -> None:
@@ -82,6 +91,40 @@ def test_changed_response_creates_a_new_bundle_id(tmp_path: Path) -> None:
 
     assert first.bundle_id != changed.bundle_id
     assert first.response_sha256 != changed.response_sha256
+
+
+def test_changed_safe_metadata_creates_a_new_bundle_id(tmp_path: Path) -> None:
+    first = _materialize(tmp_path / "first", extra_metadata={"operator_note": "one"})
+    changed = _materialize(tmp_path / "second", extra_metadata={"operator_note": "two"})
+
+    assert first.bundle_id != changed.bundle_id
+    assert first.manifest.acquisition_metadata is not None
+    assert changed.manifest.acquisition_metadata is not None
+    assert first.manifest.acquisition_metadata.extra != changed.manifest.acquisition_metadata.extra
+
+
+def test_hash_case_is_normalized_for_deterministic_replay(tmp_path: Path) -> None:
+    first = _materialize(tmp_path / "first")
+    uppercase_page = replace(_page(), response_sha256=first.response_sha256.upper())
+    uppercase = AuthorizedBundleMaterializer(tmp_path / "second").materialize(
+        uppercase_page, batch_id="ccgp-batch-20260730", data_contract=_contract()
+    )
+
+    assert first.bundle_id == uppercase.bundle_id
+    assert (first.path / "manifest.json").read_bytes() == (
+        uppercase.path / "manifest.json"
+    ).read_bytes()
+
+
+def test_whole_materialized_bundle_is_bounded(tmp_path: Path) -> None:
+    materializer = AuthorizedBundleMaterializer(tmp_path, max_bundle_bytes=len(RESPONSE) + 1)
+
+    with pytest.raises(BundleQuarantineError) as error:
+        materializer.materialize(
+            _page(), batch_id="ccgp-batch-20260730", data_contract=_contract()
+        )
+
+    assert error.value.code == "bundle_too_large"
 
 
 @pytest.mark.parametrize(
@@ -94,8 +137,20 @@ def test_changed_response_creates_a_new_bundle_id(tmp_path: Path) -> None:
             {},
             "invalid_source_url",
         ),
+        (
+            replace(_page(), source_url="https://www.ccgp.gov.cn/authorized?token=secret"),
+            _contract(),
+            {},
+            "invalid_source_url",
+        ),
         (replace(_page(), response_sha256=""), _contract(), {}, "missing_response_hash"),
         (_page(), _contract(), {"client_secret": "never-persist"}, "credential_metadata"),
+        (
+            _page(),
+            _contract(),
+            {"request": {"headers": {"Authorization": "Bearer never-persist"}}},
+            "credential_metadata",
+        ),
     ],
 )
 def test_unsafe_authorized_batch_is_quarantined(

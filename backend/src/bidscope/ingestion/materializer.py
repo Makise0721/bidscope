@@ -15,7 +15,11 @@ from pydantic import ValidationError
 
 from bidscope.domain.enums import CaptureKind, SourceName
 from bidscope.domain.provenance import OFFICIAL_HOSTS_BY_SOURCE
-from bidscope.domain.snapshots import AuthorizedSourceContract, SnapshotManifest
+from bidscope.domain.snapshots import (
+    AuthorizedAcquisitionMetadata,
+    AuthorizedSourceContract,
+    SnapshotManifest,
+)
 from bidscope.ingestion.ports import AuthorizedSourcePage
 from bidscope.snapshots.adapters import InspectionResult, inspect_bundle
 
@@ -60,7 +64,6 @@ class AuthorizedBundleMaterializer:
         parser_version: str = "ccgp-authorized-v1",
         extra_metadata: Mapping[str, object] | None = None,
     ) -> MaterializedBundle:
-        self._validate_metadata(extra_metadata or {})
         if data_contract is None:
             raise BundleQuarantineError(
                 "missing_data_contract", "authorized data contract is missing"
@@ -81,8 +84,18 @@ class AuthorizedBundleMaterializer:
             raise BundleQuarantineError(
                 "response_too_large", "source response exceeds bundle limit"
             )
+        safe_extra = self._safe_extra_metadata(extra_metadata or {})
+        acquisition_metadata = AuthorizedAcquisitionMetadata(
+            response_sha256=actual_hash,
+            status_code=page.status_code,
+            cursor_before=page.cursor_before,
+            cursor_after=page.next_cursor,
+            record_count=len(page.items),
+            extra=safe_extra,
+        )
 
         identity = {
+            "acquisition_metadata": acquisition_metadata.model_dump(mode="json"),
             "batch_id": batch_id,
             "data_contract": data_contract.model_dump(mode="json"),
             "cursor_before": page.cursor_before,
@@ -102,6 +115,7 @@ class AuthorizedBundleMaterializer:
             batch_id=batch_id,
             bundle_id=bundle_id,
             data_contract=data_contract,
+            acquisition_metadata=acquisition_metadata,
             parser_version=parser_version,
             retrieval_outcome=retrieval_outcome,
         )
@@ -117,21 +131,31 @@ class AuthorizedBundleMaterializer:
             return self._reuse_existing(target, manifest, manifest_bytes, page.response_bytes)
 
         temporary = Path(tempfile.mkdtemp(prefix=f".{bundle_id}.", dir=self.staging_root))
+        committed = False
         try:
             (temporary / "response.json").write_bytes(page.response_bytes)
             (temporary / "manifest.json").write_bytes(manifest_bytes)
+            total_bytes = sum(
+                path.stat().st_size for path in temporary.rglob("*") if path.is_file()
+            )
+            if total_bytes > self.max_bundle_bytes:
+                raise BundleQuarantineError(
+                    "bundle_too_large", "materialized source bundle exceeds the configured limit"
+                )
             inspection = inspect_bundle(temporary)
             if not inspection.valid or inspection.manifest is None:
                 self._raise_quarantine(inspection)
             temporary.replace(target)
+            committed = True
         except BundleQuarantineError:
-            shutil.rmtree(temporary, ignore_errors=True)
             raise
         except OSError as error:
-            shutil.rmtree(temporary, ignore_errors=True)
             raise BundleQuarantineError(
                 "materialization_failed", "could not materialize source bundle"
             ) from error
+        finally:
+            if not committed:
+                shutil.rmtree(temporary, ignore_errors=True)
         return MaterializedBundle(target, manifest, bundle_id, actual_hash)
 
     @staticmethod
@@ -141,6 +165,7 @@ class AuthorizedBundleMaterializer:
         batch_id: str,
         bundle_id: str,
         data_contract: AuthorizedSourceContract,
+        acquisition_metadata: AuthorizedAcquisitionMetadata,
         parser_version: str,
         retrieval_outcome: str,
     ) -> SnapshotManifest:
@@ -155,9 +180,10 @@ class AuthorizedBundleMaterializer:
                     "retrieved_at": page.retrieved_at,
                     "retrieval_outcome": retrieval_outcome,
                     "parser_version": parser_version,
-                    "files": {"response.json": page.response_sha256},
+                    "files": {"response.json": acquisition_metadata.response_sha256},
                     "batch_id": batch_id,
                     "data_contract": data_contract,
+                    "acquisition_metadata": acquisition_metadata,
                 }
             )
         except ValidationError as error:
@@ -166,15 +192,46 @@ class AuthorizedBundleMaterializer:
             ) from error
 
     @staticmethod
-    def _validate_metadata(extra_metadata: Mapping[str, object]) -> None:
-        for key in extra_metadata:
-            normalized = key.casefold().replace("-", "_")
-            if normalized in _SENSITIVE_METADATA_KEYS or any(
-                part in normalized for part in _SENSITIVE_METADATA_PARTS
-            ):
+    def _safe_extra_metadata(extra_metadata: Mapping[str, object]) -> dict[str, str]:
+        def walk(value: object) -> None:
+            if isinstance(value, Mapping):
+                for raw_key, item in value.items():
+                    if not isinstance(raw_key, str):
+                        raise BundleQuarantineError(
+                            "invalid_metadata", "acquisition metadata keys must be strings"
+                        )
+                    normalized = raw_key.casefold().replace("-", "_")
+                    if normalized in _SENSITIVE_METADATA_KEYS or any(
+                        part in normalized for part in _SENSITIVE_METADATA_PARTS
+                    ):
+                        raise BundleQuarantineError(
+                            "credential_metadata", "credential-bearing metadata is not admitted"
+                        )
+                    walk(item)
+            elif isinstance(value, (list, tuple, set, frozenset)):
+                for item in value:
+                    walk(item)
+            elif isinstance(value, str):
+                lowered = value.casefold()
+                if any(marker in lowered for marker in ("bearer ", "password=", "secret=")):
+                    raise BundleQuarantineError(
+                        "credential_metadata", "credential-bearing metadata is not admitted"
+                    )
+            elif value is not None and not isinstance(value, (bool, int, float)):
                 raise BundleQuarantineError(
-                    "credential_metadata", "credential-bearing metadata is not admitted"
+                    "invalid_metadata", "acquisition metadata values are not supported"
                 )
+
+        walk(extra_metadata)
+        safe: dict[str, str] = {}
+        for key, value in extra_metadata.items():
+            if isinstance(value, (str, bool, int, float)):
+                safe[key] = str(value)
+            else:
+                raise BundleQuarantineError(
+                    "invalid_metadata", "acquisition metadata values must be scalar"
+                )
+        return safe
 
     @staticmethod
     def _validate_source_url(source_url: str) -> None:
@@ -187,6 +244,8 @@ class AuthorizedBundleMaterializer:
             or parsed.port not in (None, 443)
             or parsed.username is not None
             or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
         ):
             raise BundleQuarantineError(
                 "invalid_source_url", "authorized source URL is not approved"
@@ -207,6 +266,16 @@ class AuthorizedBundleMaterializer:
         manifest_bytes: bytes,
         response_bytes: bytes,
     ) -> MaterializedBundle:
+        if target.is_symlink() or not target.is_dir():
+            raise BundleQuarantineError(
+                "bundle_collision", "existing source bundle is not a directory"
+            )
+        root = target.parent.resolve()
+        resolved = target.resolve()
+        if resolved != root and root not in resolved.parents:
+            raise BundleQuarantineError(
+                "bundle_collision", "existing source bundle escapes staging"
+            )
         inspection = inspect_bundle(target)
         if (
             not inspection.valid

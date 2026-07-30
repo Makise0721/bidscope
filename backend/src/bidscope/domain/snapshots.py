@@ -65,6 +65,45 @@ class AuthorizedSourceContract(BaseModel):
         return self
 
 
+class AuthorizedAcquisitionMetadata(BaseModel):
+    """Bounded, non-secret transport metadata for one raw-response bundle."""
+
+    response_sha256: Annotated[str, Field(min_length=64, max_length=64)]
+    status_code: Annotated[int, Field(ge=100, le=599)]
+    cursor_before: Annotated[str | None, Field(max_length=512)] = None
+    cursor_after: Annotated[str | None, Field(max_length=512)] = None
+    request_count: Annotated[int, Field(ge=1, le=100)] = 1
+    record_count: Annotated[int, Field(ge=0, le=1_000_000)] = 0
+    extra: dict[str, str] = Field(default_factory=dict, max_length=32)
+
+    @field_validator("response_sha256")
+    @classmethod
+    def _validate_response_sha256(cls, value: str) -> str:
+        if not _SHA256_RE.fullmatch(value):
+            raise ValueError("response_sha256 must be a 64-character hex SHA-256")
+        return value
+
+    @field_validator("extra")
+    @classmethod
+    def _validate_extra(cls, value: dict[str, str]) -> dict[str, str]:
+        for key, item in value.items():
+            normalized = key.casefold().replace("-", "_")
+            if any(part in normalized for part in ("secret", "password", "credential", "signing")):
+                raise ValueError("acquisition metadata contains credential-bearing fields")
+            if normalized in {
+                "api_key",
+                "access_token",
+                "authorization_header",
+                "client_id",
+                "headers",
+                "token",
+            }:
+                raise ValueError("acquisition metadata contains credential-bearing fields")
+            if any(marker in item.casefold() for marker in ("bearer ", "password=", "secret=")):
+                raise ValueError("acquisition metadata contains credential-bearing values")
+        return value
+
+
 class SnapshotManifest(BaseModel):
     """Validated snapshot bundle provenance manifest.
 
@@ -86,6 +125,7 @@ class SnapshotManifest(BaseModel):
     files: Annotated[dict[str, str], Field(min_length=1)]
     batch_id: Annotated[str, Field(min_length=1, max_length=128)] | None = None
     data_contract: AuthorizedSourceContract | None = None
+    acquisition_metadata: AuthorizedAcquisitionMetadata | None = None
 
     @field_validator("source_urls", mode="before")
     @classmethod
@@ -177,4 +217,9 @@ class SnapshotManifest(BaseModel):
             raise ValueError("authorized data contract review_status must be approved")
         if self.capture_kind == CaptureKind.RAW_RESPONSE and "response.json" not in self.files:
             raise ValueError("schema_version 2 raw_response requires response.json")
+        if self.capture_kind == CaptureKind.RAW_RESPONSE:
+            if self.acquisition_metadata is None:
+                raise ValueError("schema_version 2 raw_response requires acquisition_metadata")
+            if self.acquisition_metadata.response_sha256 != self.files["response.json"]:
+                raise ValueError("raw_response acquisition metadata hash mismatched")
         return self
