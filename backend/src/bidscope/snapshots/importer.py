@@ -33,8 +33,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
+import stat
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -52,6 +55,13 @@ from bidscope.snapshots.demo import DemoSnapshotAdapter
 from bidscope.snapshots.ggzy import GgzySnapshotAdapter
 
 logger = logging.getLogger(__name__)
+
+
+#: Safe defaults for materializing an untrusted snapshot bundle.  Operators can
+#: lower or raise these through the corresponding ``BIDSCOPE_*`` settings.
+DEFAULT_MAX_IMPORT_FILES = 1_000
+DEFAULT_MAX_IMPORT_FILE_BYTES = 50 * 1024 * 1024
+DEFAULT_MAX_IMPORT_BUNDLE_BYTES = 200 * 1024 * 1024
 
 
 class BundleAdapter(Protocol):
@@ -84,6 +94,21 @@ class SnapshotImportError(Exception):
         self.errors = errors or []
         self.bundle_id = bundle_id
         self.manifest_sha256 = manifest_sha256
+
+
+@dataclass(frozen=True)
+class SnapshotImportLimits:
+    """Bounds enforced before an untrusted bundle is copied to temporary disk."""
+
+    max_files: int = DEFAULT_MAX_IMPORT_FILES
+    max_file_bytes: int = DEFAULT_MAX_IMPORT_FILE_BYTES
+    max_bundle_bytes: int = DEFAULT_MAX_IMPORT_BUNDLE_BYTES
+
+    def __post_init__(self) -> None:
+        if self.max_files <= 0 or self.max_file_bytes <= 0 or self.max_bundle_bytes <= 0:
+            raise ValueError("snapshot import limits must be positive")
+        if self.max_bundle_bytes < self.max_file_bytes:
+            raise ValueError("max_bundle_bytes must be at least max_file_bytes")
 
 
 def _content_hash(notice: Any) -> str:
@@ -122,11 +147,13 @@ class SnapshotImporter:
         repository_factory: Any,
         object_store: ObjectStore | None = None,
         clock: Clock | None = None,
+        import_limits: SnapshotImportLimits | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.repository_factory = repository_factory
         self.object_store = object_store or LocalObjectStore(".data/objects")
         self.clock = clock or SystemClock()
+        self.import_limits = import_limits or SnapshotImportLimits()
 
     # ------------------------------------------------------------- public
 
@@ -134,6 +161,7 @@ class SnapshotImporter:
         """Materialize, validate and import one immutable bundle snapshot."""
         bundle = bundle.resolve()
         try:
+            self._check_bundle_resource_limits(bundle)
             with tempfile.TemporaryDirectory(prefix="bidscope-import-") as temp_root:
                 staged_bundle = Path(temp_root) / bundle.name
                 shutil.copytree(bundle, staged_bundle, symlinks=True)
@@ -142,6 +170,44 @@ class SnapshotImporter:
             raise SnapshotImportError(
                 f"could not materialize bundle for import: {error}"
             ) from error
+
+    def _check_bundle_resource_limits(self, bundle: Path) -> None:
+        """Reject oversized input before staging it or touching persistence."""
+        file_count = 0
+        total_bytes = 0
+        directories = [bundle]
+        while directories:
+            directory = directories.pop()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    metadata = entry.stat(follow_symlinks=False)
+                    if stat.S_ISDIR(metadata.st_mode):
+                        directories.append(Path(entry.path))
+                        continue
+                    if not stat.S_ISREG(metadata.st_mode):
+                        continue
+
+                    file_count += 1
+                    if file_count > self.import_limits.max_files:
+                        self._raise_resource_limit("max_files")
+                    if metadata.st_size > self.import_limits.max_file_bytes:
+                        self._raise_resource_limit("max_file_bytes")
+                    total_bytes += metadata.st_size
+                    if total_bytes > self.import_limits.max_bundle_bytes:
+                        self._raise_resource_limit("max_bundle_bytes")
+
+    @staticmethod
+    def _raise_resource_limit(limit_name: str) -> None:
+        raise SnapshotImportError(
+            f"snapshot bundle resource limit exceeded: {limit_name}",
+            errors=[
+                {
+                    "code": "bundle_resource_limit_exceeded",
+                    "message": f"{limit_name} exceeded",
+                    "path": None,
+                }
+            ],
+        )
 
     async def _import_verified_bundle(self, bundle: Path) -> Any:
         """Import a snapshot bundle, returning its ``SnapshotImport`` record.

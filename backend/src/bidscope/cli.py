@@ -38,7 +38,11 @@ from bidscope.evaluation.real_contracts import (
 from bidscope.evaluation.runner import EvaluationExecutionError, run_deterministic
 from bidscope.graph.executor import run_setup_checkpoints
 from bidscope.persistence.repositories import SnapshotRepository
-from bidscope.snapshots.importer import SnapshotImporter, SnapshotImportError
+from bidscope.snapshots.importer import (
+    SnapshotImporter,
+    SnapshotImportError,
+    SnapshotImportLimits,
+)
 
 app = typer.Typer(
     add_completion=False,
@@ -107,6 +111,11 @@ def _build_importer() -> SnapshotImporter:
         repository_factory=SnapshotRepository,
         object_store=create_object_store(settings),
         clock=SystemClock(),
+        import_limits=SnapshotImportLimits(
+            max_files=settings.snapshot_import_max_files,
+            max_file_bytes=settings.snapshot_import_max_file_bytes,
+            max_bundle_bytes=settings.snapshot_import_max_bundle_bytes,
+        ),
     )
 
 
