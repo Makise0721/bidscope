@@ -151,8 +151,7 @@ def snapshots_inspect(
         "status": "valid" if inspection.valid else "invalid",
         "disposition": inspection.disposition,
         "errors": [
-            {"code": e.code, "message": e.message, "path": e.path}
-            for e in inspection.errors
+            {"code": e.code, "message": e.message, "path": e.path} for e in inspection.errors
         ],
     }
     if json_output:
@@ -202,10 +201,7 @@ def snapshots_import(
         "bundle_hash": record_metrics.get("manifest_sha256"),
         "metrics": record_metrics,
         "warnings": getattr(record, "warnings", None) or {},
-        "reprocessing": getattr(
-            record,
-            "_reprocessing", record_metrics.get("reprocessing", "new")
-        ),
+        "reprocessing": getattr(record, "_reprocessing", record_metrics.get("reprocessing", "new")),
         "errors": [],
     }
     if json_output:
@@ -374,17 +370,25 @@ def evaluation_validate_real(
     manifest: Annotated[
         Path, typer.Option("--manifest", exists=True, file_okay=True, dir_okay=False)
     ],
-    result: Annotated[
-        Path, typer.Option("--result", exists=True, file_okay=True, dir_okay=False)
-    ],
+    result: Annotated[Path, typer.Option("--result", exists=True, file_okay=True, dir_okay=False)],
     catalog: Annotated[
         Path, typer.Option("--catalog", exists=True, file_okay=True, dir_okay=False)
+    ],
+    catalog_signature: Annotated[
+        Path, typer.Option("--catalog-signature", exists=True, file_okay=True, dir_okay=False)
     ],
     json_output: Annotated[bool, typer.Option("--json", help="Print JSON output.")] = False,
 ) -> None:
     """Validate restricted evaluation artifacts and the approved snapshot catalog."""
     try:
-        validated = validate_real_evaluation_files(manifest, result, catalog)
+        _require_startup_settings()
+        validated = validate_real_evaluation_files(
+            manifest,
+            result,
+            catalog,
+            catalog_signature,
+            get_settings().real_evaluation_catalog_public_key,
+        )
     except (RealEvaluationContractError, ValidationError, OSError) as error:
         error_payload: dict[str, Any] = {
             "status": "invalid",
@@ -399,8 +403,7 @@ def evaluation_validate_real(
         raise typer.Exit(code=1) from None
 
     hard_gate_passed = (
-        validated.result.status == "completed"
-        and validated.result.citation_provenance_hard_gate
+        validated.result.status == "completed" and validated.result.citation_provenance_hard_gate
     )
     payload: dict[str, Any] = {
         "status": "validated" if hard_gate_passed else "blocked",

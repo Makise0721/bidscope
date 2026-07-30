@@ -52,9 +52,7 @@ class Settings(BaseSettings):
             cls._sanitize_error_item(cast(Mapping[str, Any], item), secret_values)
             for item in raw_errors
         ]
-        return ValidationError.from_exception_data(
-            cls.__name__, cast(Any, sanitized_errors)
-        )
+        return ValidationError.from_exception_data(cls.__name__, cast(Any, sanitized_errors))
 
     def __init__(self, **data: Any) -> None:
         sanitized_error: ValidationError | None = None
@@ -139,8 +137,7 @@ class Settings(BaseSettings):
             return "**********"
         if isinstance(value, Mapping):
             return {
-                key: cls._sanitize_error_context(item, secret_values)
-                for key, item in value.items()
+                key: cls._sanitize_error_context(item, secret_values) for key, item in value.items()
             }
         if isinstance(value, (list, tuple)):
             return [cls._sanitize_error_context(item, secret_values) for item in value]
@@ -220,6 +217,10 @@ class Settings(BaseSettings):
         _database_dsn_defaults["checkpoint_database_url"]
     )
     real_model_enabled: bool = False
+    #: Base64-encoded Ed25519 public key used to verify restricted evaluation
+    #: snapshot-admission catalog signatures. The matching private key is never
+    #: configured by or stored in this application.
+    real_evaluation_catalog_public_key: str | None = None
     admin_token: SecretStr | None = None
     admin_token_min_length: int = Field(default=32, gt=0)
     allowed_origins: list[AnyHttpUrl] = Field(default_factory=list)
@@ -411,9 +412,7 @@ class Settings(BaseSettings):
         if self.external_scheme != "https":
             invalid_fields.append("external_scheme")
         if invalid_fields:
-            raise ValueError(
-                "production requires valid values for: " + ", ".join(invalid_fields)
-            )
+            raise ValueError("production requires valid values for: " + ", ".join(invalid_fields))
         return self
 
     @staticmethod
@@ -485,9 +484,7 @@ class Settings(BaseSettings):
                 query_key, valid_values = cls._production_dsn_tls_queries[field_name]
                 if not cls._has_valid_percent_encoding(parsed.query):
                     return False
-                query_items = parse_qsl(
-                    parsed.query, keep_blank_values=True, strict_parsing=True
-                )
+                query_items = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
                 if len(query_items) != 1 or query_items[0][0] != query_key:
                     return False
                 if query_items[0][1] not in valid_values:

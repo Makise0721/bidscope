@@ -9,10 +9,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from base64 import b64decode
 from datetime import date
 from pathlib import Path
 from typing import Annotated, Literal
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from bidscope.domain.types import AwareDatetime
@@ -147,6 +150,12 @@ class RealEvaluationMetrics(BaseModel):
     cost_cny: float = Field(ge=0)
     human_usefulness: float | None = Field(default=None, ge=0, le=1)
 
+    @model_validator(mode="after")
+    def _validate_latency_percentiles(self) -> RealEvaluationMetrics:
+        if self.latency_p95_ms < self.latency_p50_ms:
+            raise ValueError("latency_p95_ms must be greater than or equal to latency_p50_ms")
+        return self
+
 
 class RealEvaluationResult(BaseModel):
     """A measured real-data run, separate from deterministic CI evaluation."""
@@ -246,14 +255,45 @@ def _load_json(path: Path) -> dict[str, object]:
     return value
 
 
+def _verify_catalog_signature(
+    catalog_bytes: bytes, signature_path: Path, catalog_public_key: str | None
+) -> None:
+    """Verify a detached Ed25519 signature without exposing verification material."""
+    if not catalog_public_key:
+        raise RealEvaluationContractError("snapshot admission catalog public key is unavailable")
+    try:
+        public_key_bytes = b64decode(catalog_public_key, validate=True)
+        verifier = Ed25519PublicKey.from_public_bytes(public_key_bytes)
+    except (TypeError, ValueError):
+        raise RealEvaluationContractError(
+            "snapshot admission catalog public key is invalid"
+        ) from None
+    try:
+        signature = signature_path.read_bytes()
+        verifier.verify(signature, catalog_bytes)
+    except OSError:
+        raise RealEvaluationContractError(
+            "snapshot admission catalog signature is unavailable"
+        ) from None
+    except InvalidSignature:
+        raise RealEvaluationContractError(
+            "snapshot admission catalog signature is invalid"
+        ) from None
+
+
 def validate_real_evaluation_files(
-    manifest_path: Path, result_path: Path, catalog_path: Path
+    manifest_path: Path,
+    result_path: Path,
+    catalog_path: Path,
+    catalog_signature_path: Path,
+    catalog_public_key: str | None,
 ) -> ValidatedRealEvaluation:
     """Validate restricted evaluation metadata and its dataset linkage."""
     manifest_bytes = manifest_path.read_bytes()
     catalog_bytes = catalog_path.read_bytes()
     manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
     catalog_hash = hashlib.sha256(catalog_bytes).hexdigest()
+    _verify_catalog_signature(catalog_bytes, catalog_signature_path, catalog_public_key)
     manifest = RealEvaluationDatasetManifest.model_validate(_load_json(manifest_path))
     result = RealEvaluationResult.model_validate(_load_json(result_path))
     catalog = RealEvaluationSnapshotCatalog.model_validate(_load_json(catalog_path))
