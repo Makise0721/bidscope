@@ -19,6 +19,9 @@ _BATCH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # This immutable migration register is intentionally exact-match only: dates,
 # names, or other bundle attributes must never imply legacy admission.
 _LEGACY_CCGP_CURATED_BUNDLE_IDS = frozenset({"ccgp-central-20260718"})
+_SAFE_ACQUISITION_EXTRA_KEYS = frozenset(
+    {"operator_note", "content_type", "endpoint_version"}
+)
 
 
 BoundedContractLabel = Annotated[str, Field(min_length=1, max_length=128)]
@@ -96,6 +99,8 @@ class AuthorizedAcquisitionMetadata(BaseModel):
             total_length += len(key) + len(item)
             if total_length > 4096:
                 raise ValueError("acquisition metadata is too large")
+            if key not in _SAFE_ACQUISITION_EXTRA_KEYS:
+                raise ValueError("acquisition metadata field is not allowlisted")
             if any(
                 part in normalized
                 for part in (
@@ -120,6 +125,10 @@ class AuthorizedAcquisitionMetadata(BaseModel):
                     "password=",
                     "secret=",
                     "api-key",
+                    "api_key=",
+                    "access_token=",
+                    "auth=",
+                    "token=",
                     "authorization:",
                 )
             ):
@@ -258,6 +267,8 @@ class SnapshotManifest(BaseModel):
         if self.capture_kind == CaptureKind.RAW_RESPONSE and "response.json" not in self.files:
             raise ValueError("schema_version 2 raw_response requires response.json")
         if self.capture_kind == CaptureKind.RAW_RESPONSE:
+            if any(url.query or url.fragment for url in self.source_urls):
+                raise ValueError("raw_response source URLs must not contain query or fragment data")
             if self.acquisition_metadata is None:
                 raise ValueError("schema_version 2 raw_response requires acquisition_metadata")
             if self.acquisition_metadata.response_sha256 != self.files["response.json"]:

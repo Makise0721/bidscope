@@ -111,6 +111,50 @@ def test_schema_v2_accepts_approved_authorized_contract(tmp_path: Path) -> None:
     assert inspection.manifest.data_contract.authorization_ref == "pilot-ccgp-20260729"
 
 
+def test_schema_v2_accepts_approved_authorized_raw_response(tmp_path: Path) -> None:
+    files = {"response.json": '{"items": []}'}
+    response_hash = hashlib.sha256(files["response.json"].encode()).hexdigest()
+    manifest = _manifest(
+        files,
+        schema_version=2,
+        capture_kind="raw_response",
+        batch_id="ccgp-batch-20260729",
+        data_contract=_authorized_contract(),
+        acquisition_metadata={
+            "response_sha256": response_hash,
+            "status_code": 200,
+            "response_items_field": "items",
+        },
+    )
+    bundle = _write_bundle(tmp_path, files, manifest)
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is True
+    assert inspection.manifest is not None
+    assert inspection.manifest.capture_kind.value == "raw_response"
+
+
+def test_schema_v2_rejects_raw_response_query_metadata(tmp_path: Path) -> None:
+    files = {"response.json": '{"items": []}'}
+    response_hash = hashlib.sha256(files["response.json"].encode()).hexdigest()
+    manifest = _manifest(
+        files,
+        schema_version=2,
+        capture_kind="raw_response",
+        source_urls=["https://www.ccgp.gov.cn/authorized?token=secret"],
+        batch_id="ccgp-batch-20260729",
+        data_contract=_authorized_contract(),
+        acquisition_metadata={"response_sha256": response_hash, "status_code": 200},
+    )
+    bundle = _write_bundle(tmp_path, files, manifest)
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert inspection.disposition == "quarantined"
+
+
 def test_schema_v2_quarantines_unapproved_contract(tmp_path: Path) -> None:
     files = {"detail.html": "<html>pending</html>"}
     manifest = _manifest(

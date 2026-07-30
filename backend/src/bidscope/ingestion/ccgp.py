@@ -169,6 +169,7 @@ class AuthorizedSourceClient:
         """Fetch and validate exactly one page without applying retry policy."""
         request_url, body = self._build_request(cursor)
         timestamp = self.clock.now()
+        signing_failed = False
         try:
             signed = self.signer.sign(
                 SignableRequest(
@@ -181,7 +182,9 @@ class AuthorizedSourceClient:
             )
         except Exception as error:
             del error
-            raise SourceSigningError() from None
+            signing_failed = True
+        if signing_failed:
+            raise SourceSigningError()
         headers = {"Accept": "application/json", **signed}
         if self.endpoint.method == "POST":
             headers["Content-Type"] = "application/json"
@@ -224,7 +227,7 @@ class AuthorizedSourceClient:
             response_sha256=sha256(response_bytes).hexdigest(),
             retrieved_at=timestamp,
             status_code=response.status_code,
-            source_url=request_url,
+            source_url=f"{self.base_url}{self.endpoint.path}",
             response_items_field=self.endpoint.items_field,
             notice_field_map=self.endpoint.notice_field_map,
         )

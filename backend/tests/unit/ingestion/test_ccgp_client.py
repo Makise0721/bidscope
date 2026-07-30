@@ -210,6 +210,7 @@ async def test_fetch_page_redacts_signer_failures_as_non_retryable_source_errors
     assert error.value.retryable is False
     assert "private-key-material" not in str(error.value)
     assert error.value.__cause__ is None
+    assert error.value.__context__ is None
     assert "private-key-material" not in "".join(format_exception(error.value))
 
 
@@ -226,6 +227,7 @@ async def test_fetch_page_redacts_source_error_raised_by_signer() -> None:
 
     assert error.value.code == "signature_failed"
     assert error.value.__cause__ is None
+    assert error.value.__context__ is None
     assert "private-key-material" not in "".join(format_exception(error.value))
 
 

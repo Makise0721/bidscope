@@ -238,6 +238,10 @@ class AuthorizedBundleMaterializer:
                         "password=",
                         "secret=",
                         "api-key",
+                        "api_key=",
+                        "access_token=",
+                        "auth=",
+                        "token=",
                         "authorization:",
                     )
                 ):
@@ -264,11 +268,17 @@ class AuthorizedBundleMaterializer:
     def _validate_source_url(source_url: str) -> None:
         parsed = urlsplit(source_url)
         official_hosts = OFFICIAL_HOSTS_BY_SOURCE[SourceName.CCGP]
+        try:
+            port = parsed.port
+        except ValueError:
+            raise BundleQuarantineError(
+                "invalid_source_url", "authorized source URL is not approved"
+            ) from None
         if (
             parsed.scheme != "https"
             or parsed.hostname is None
             or parsed.hostname.casefold() not in official_hosts
-            or parsed.port not in (None, 443)
+            or port not in (None, 443)
             or parsed.username is not None
             or parsed.password is not None
             or parsed.query
@@ -293,31 +303,38 @@ class AuthorizedBundleMaterializer:
         manifest_bytes: bytes,
         response_bytes: bytes,
     ) -> MaterializedBundle:
-        if target.is_symlink() or not target.is_dir():
-            raise BundleQuarantineError(
-                "bundle_collision", "existing source bundle is not a directory"
+        try:
+            if target.is_symlink() or not target.is_dir():
+                raise BundleQuarantineError(
+                    "bundle_collision", "existing source bundle is not a directory"
+                )
+            root = target.parent.resolve()
+            resolved = target.resolve()
+            if resolved != root and root not in resolved.parents:
+                raise BundleQuarantineError(
+                    "bundle_collision", "existing source bundle escapes staging"
+                )
+            total_bytes = sum(
+                path.stat().st_size for path in target.rglob("*") if path.is_file()
             )
-        root = target.parent.resolve()
-        resolved = target.resolve()
-        if resolved != root and root not in resolved.parents:
-            raise BundleQuarantineError(
-                "bundle_collision", "existing source bundle escapes staging"
+            if total_bytes > self.max_bundle_bytes:
+                raise BundleQuarantineError(
+                    "bundle_too_large", "existing source bundle exceeds the configured limit"
+                )
+            inspection = inspect_bundle(target)
+            if (
+                not inspection.valid
+                or inspection.manifest is None
+                or (target / "manifest.json").read_bytes() != manifest_bytes
+                or (target / "response.json").read_bytes() != response_bytes
+            ):
+                raise BundleQuarantineError(
+                    "bundle_collision", "existing source bundle is not identical"
+                )
+            return MaterializedBundle(
+                target, manifest, manifest.bundle_id, sha256(response_bytes).hexdigest()
             )
-        total_bytes = sum(path.stat().st_size for path in target.rglob("*") if path.is_file())
-        if total_bytes > self.max_bundle_bytes:
+        except OSError:
             raise BundleQuarantineError(
-                "bundle_too_large", "existing source bundle exceeds the configured limit"
-            )
-        inspection = inspect_bundle(target)
-        if (
-            not inspection.valid
-            or inspection.manifest is None
-            or (target / "manifest.json").read_bytes() != manifest_bytes
-            or (target / "response.json").read_bytes() != response_bytes
-        ):
-            raise BundleQuarantineError(
-                "bundle_collision", "existing source bundle is not identical"
-            )
-        return MaterializedBundle(
-            target, manifest, manifest.bundle_id, sha256(response_bytes).hexdigest()
-        )
+                "bundle_read_error", "existing source bundle could not be read"
+            ) from None
