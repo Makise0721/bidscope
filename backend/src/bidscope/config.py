@@ -280,6 +280,11 @@ class Settings(BaseSettings):
     max_request_body_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
     max_sse_connections: int = Field(default=100, gt=0)
     max_report_items: int = Field(default=100, gt=0)
+    #: Bounds for staging an untrusted snapshot import.  These are enforced
+    #: before copying the bundle into temporary storage.
+    snapshot_import_max_files: int = Field(default=1_000, gt=0)
+    snapshot_import_max_file_bytes: int = Field(default=50 * 1024 * 1024, gt=0)
+    snapshot_import_max_bundle_bytes: int = Field(default=200 * 1024 * 1024, gt=0)
     graceful_shutdown_seconds: int = Field(default=30, gt=0)
     scheduler_tick_timeout_seconds: int = Field(default=25, gt=0)
     stale_run_after_seconds: int = Field(default=300, gt=0)
@@ -292,6 +297,15 @@ class Settings(BaseSettings):
     def validate_run_heartbeat_interval(self) -> Settings:
         if self.run_heartbeat_seconds >= self.stale_run_after_seconds:
             raise ValueError("run_heartbeat_seconds must be less than stale_run_after_seconds")
+        return self
+
+    @model_validator(mode="after")
+    def validate_snapshot_import_limits(self) -> Settings:
+        if self.snapshot_import_max_bundle_bytes < self.snapshot_import_max_file_bytes:
+            raise ValueError(
+                "snapshot_import_max_bundle_bytes must be at least "
+                "snapshot_import_max_file_bytes"
+            )
         return self
 
     @model_validator(mode="after")

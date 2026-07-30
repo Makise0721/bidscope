@@ -180,6 +180,9 @@ def test_settings_default_to_bounded_runtime_limits() -> None:
     assert settings.max_request_body_bytes > 0
     assert settings.max_sse_connections > 0
     assert settings.max_report_items > 0
+    assert settings.snapshot_import_max_files > 0
+    assert settings.snapshot_import_max_file_bytes > 0
+    assert settings.snapshot_import_max_bundle_bytes >= settings.snapshot_import_max_file_bytes
     assert settings.graceful_shutdown_seconds > settings.scheduler_tick_timeout_seconds
 
 
@@ -198,6 +201,9 @@ def test_settings_default_to_bounded_runtime_limits() -> None:
         "max_request_body_bytes",
         "max_sse_connections",
         "max_report_items",
+        "snapshot_import_max_files",
+        "snapshot_import_max_file_bytes",
+        "snapshot_import_max_bundle_bytes",
         "graceful_shutdown_seconds",
         "scheduler_tick_timeout_seconds",
     ),
