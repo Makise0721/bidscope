@@ -167,6 +167,23 @@ export BIDSCOPE_S3_PREFIX="recovery"
 export BIDSCOPE_S3_ACCESS_KEY="bidscope-recovery"
 export BIDSCOPE_S3_SECRET_KEY="bidscope-recovery-secret"
 export BIDSCOPE_BACKUP_S3_ENABLED="false"
+# Compose interpolates the isolated ingestion service during ``config -q``
+# even though this recovery drill never starts it. These are non-secret,
+# synthetic placeholders; live acquisition remains explicitly disabled.
+export BIDSCOPE_LIVE_INGESTION_ENABLED="false"
+export BIDSCOPE_CCGP_API_BASE_URL="https://www.ccgp.gov.cn"
+export BIDSCOPE_CCGP_CLIENT_ID="recovery-synthetic-client"
+export BIDSCOPE_CCGP_SIGNING_KEY="recovery-synthetic-signing-key"
+export BIDSCOPE_CCGP_RUNNER_FACTORY="recovery.synthetic:runner"
+export BIDSCOPE_CCGP_AUTHORIZATION_REF="recovery-synthetic"
+export BIDSCOPE_CCGP_DATA_CONTRACT_VERSION="ccgp-authorized-v1"
+export BIDSCOPE_CCGP_DATA_OWNER="recovery-synthetic"
+export BIDSCOPE_CCGP_DATA_REGIONS='["recovery"]'
+export BIDSCOPE_CCGP_DATA_CATEGORIES='["synthetic"]'
+export BIDSCOPE_CCGP_DATA_REVIEW_STATUS="approved"
+export BIDSCOPE_CCGP_DATA_REVIEWED_AT="2026-07-30T00:00:00Z"
+export BIDSCOPE_CCGP_DATA_UPDATE_SLA="weekly"
+export BIDSCOPE_CCGP_DATA_RETENTION_DAYS="365"
 export BIDSCOPE_TEST_CONTROL_TOKEN="recovery-${RUN_ID}-${RANDOM}"
 export BIDSCOPE_RECOVERY_BACKUP_DIR="${BACKUP_DIR}"
 export BIDSCOPE_RECOVERY_OBJECT_DIR="${SOURCE_OBJECT_DIR}"
