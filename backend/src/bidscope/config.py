@@ -266,7 +266,7 @@ class Settings(BaseSettings):
     ccgp_poll_seconds: int = Field(default=900, ge=60)
     ccgp_request_timeout_seconds: int = Field(default=20, gt=0)
     ccgp_max_response_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
-    ccgp_max_pages_per_run: int = Field(default=100, gt=0)
+    ccgp_max_pages_per_run: int = Field(default=100, gt=0, le=100)
     ccgp_min_interval_seconds: int = Field(default=1, gt=0)
     ccgp_data_contract_version: str | None = Field(default=None, max_length=256)
     ccgp_data_owner: str | None = Field(default=None, max_length=256)

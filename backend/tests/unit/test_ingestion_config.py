@@ -168,3 +168,11 @@ def test_complete_live_ingestion_configuration_is_accepted() -> None:
     assert settings.live_ingestion_enabled is True
     assert settings.process_role == "ingestion"
     assert settings.ccgp_signing_key is not None
+
+
+def test_live_ingestion_page_limit_is_hard_bounded() -> None:
+    values = _complete_live_settings()
+    values["ccgp_max_pages_per_run"] = 101
+
+    with pytest.raises(ValidationError, match="ccgp_max_pages_per_run"):
+        Settings(**values)

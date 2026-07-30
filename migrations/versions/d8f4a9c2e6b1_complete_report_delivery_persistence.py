@@ -7,7 +7,7 @@ Create Date: 2026-07-23 00:00:00.000000
 """
 from typing import Sequence, Union
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
@@ -21,6 +21,8 @@ _DUPLICATE_RUN_ID_SAMPLE_LIMIT = 10
 
 def _raise_for_duplicate_report_run_ids() -> None:
     """Fail with remediable context before adding the one-report-per-run rule."""
+    if context.is_offline_mode():
+        return
     # Keep concurrent writes from invalidating the preflight before the constraint DDL.
     op.execute("LOCK TABLE reports IN SHARE ROW EXCLUSIVE MODE")
     rows = op.get_bind().execute(

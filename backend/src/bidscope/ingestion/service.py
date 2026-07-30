@@ -31,6 +31,8 @@ from bidscope.ingestion.ports import (
 from bidscope.observability import METRICS_REGISTRY
 from bidscope.snapshots.importer import SnapshotImportError
 
+MAX_PAGES_PER_RUN = 100
+
 
 @dataclass(frozen=True)
 class AcquisitionResult:
@@ -69,7 +71,11 @@ class IngestionService:
     ) -> None:
         if source != "ccgp":
             raise ValueError("authorized ingestion only supports source='ccgp'")
-        if max_pages_per_run <= 0 or min_interval_seconds < 0:
+        if (
+            max_pages_per_run <= 0
+            or max_pages_per_run > MAX_PAGES_PER_RUN
+            or min_interval_seconds < 0
+        ):
             raise ValueError("ingestion service bounds are invalid")
         if not batch_id.strip():
             raise ValueError("batch_id must be non-blank")

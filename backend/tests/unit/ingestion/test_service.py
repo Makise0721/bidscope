@@ -268,6 +268,22 @@ async def test_failed_object_write_does_not_persist_an_object_key() -> None:
     assert repository.finalize_kwargs["response_object_key"] is None
 
 
+def test_service_page_limit_is_hard_bounded() -> None:
+    with pytest.raises(ValueError, match="ingestion service bounds"):
+        IngestionService(
+            source_client=FakeSourceClient([], [], None),
+            acquisition_repository=FakeRepository([], None),
+            object_store=FakeObjectStore([], None),
+            materializer=FakeMaterializer([], None),
+            importer=FakeImporter([], None),
+            data_contract=_contract(),
+            batch_id="ccgp-batch-20260730",
+            max_pages_per_run=101,
+            commit=lambda: _record_commit([]),
+            audit=lambda _details: _record_audit([]),
+        )
+
+
 @pytest.mark.asyncio
 async def test_run_once_honors_page_limit_without_advancing_cursor() -> None:
     events: list[str] = []

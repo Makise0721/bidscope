@@ -105,7 +105,10 @@ docker compose up -d api scheduler
 docker compose ps
 ```
 
-`api` uses `/readyz` for its HTTP healthcheck. The scheduler and ingestion roles are not HTTP servers, so Compose explicitly disables their inherited image healthcheck; inspect their process state and bounded logs/metrics instead.
+`api` uses `/readyz` for its HTTP healthcheck. The scheduler is not an HTTP
+server and has its inherited image healthcheck disabled. The ingestion role
+uses a process-liveness plus configured-runner healthcheck; inspect its bounded
+logs and metrics as well.
 
 ### Authorized CCGP ingestion boundary
 
