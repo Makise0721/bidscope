@@ -66,6 +66,7 @@ def test_live_ingestion_is_disabled_and_credentials_are_absent_by_default() -> N
         "https://not-ccgp.example.test",
         "https://www.ccgp.gov.cn?token=secret",
         "https://user:password@www.ccgp.gov.cn",
+        "https://www.ccgp.gov.cn:8443",
     ),
 )
 def test_ccgp_base_url_requires_https_and_an_approved_origin(base_url: str) -> None:

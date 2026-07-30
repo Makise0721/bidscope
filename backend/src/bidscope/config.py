@@ -399,6 +399,7 @@ class Settings(BaseSettings):
                 url.scheme != "https"
                 or url.host is None
                 or url.host.casefold() not in official_hosts
+                or url.port not in {None, 443}
                 or url.username is not None
                 or url.password is not None
                 or url.path not in {"", "/"}

@@ -85,6 +85,11 @@ separate process/Compose service in the later operational task:
 
 The API and scheduler share the same production configuration, PostgreSQL databases, and S3-compatible object store. The ingestion role may use the same persistence dependencies but receives the only CCGP signing credentials and must have egress restricted to the configured official HTTPS host. PostgreSQL and MinIO are private Compose services; neither their database/API ports nor the MinIO console are published on the host. The API is bound to `127.0.0.1:8000` so a local reverse proxy can terminate TLS and provide the public entry point.
 
+Until the later operational task binds the role to a dedicated command and
+Compose service, `BIDSCOPE_PROCESS_ROLE` is a settings-level fail-closed
+boundary. It prevents API/scheduler configuration from carrying CCGP signing
+credentials; it is not by itself a process supervisor or network policy.
+
 1. Copy `.env.production.example` to the deployment's `.env` file and replace every blank value with deployment-specific values. Do not commit that file.
 2. Generate a long random `BIDSCOPE_ADMIN_TOKEN`, S3 credentials, PostgreSQL credentials, and pre-encoded DSN passwords.
 3. Set `BIDSCOPE_DATABASE_URL` to a full `postgresql+asyncpg://` DSN and `BIDSCOPE_CHECKPOINT_DATABASE_URL` to a full `postgresql+psycopg://` DSN. Both must explicitly contain a non-empty username, a non-empty password, authority/host, and database name. Percent-encode every reserved character in credentials before placing it in the DSN. The only accepted query is `?ssl=require` for the asyncpg application DSN or `?sslmode=require` for the psycopg checkpoint DSN; target override and credential keys (`host`, `port`, `database`, `dbname`, `service`, `user`, `password`, `passfile`) and all unknown keys are rejected. Fragments are rejected.
