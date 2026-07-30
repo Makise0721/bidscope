@@ -162,12 +162,12 @@ class SnapshotManifest(BaseModel):
             return self
         if self.schema_version != 2:
             raise ValueError(f"unsupported snapshot schema_version: {self.schema_version}")
-        if (
-            self.source != SourceName.CCGP
-            or self.capture_kind != CaptureKind.CURATED_PUBLIC_EXCERPT
-        ):
+        if self.source != SourceName.CCGP or self.capture_kind not in {
+            CaptureKind.CURATED_PUBLIC_EXCERPT,
+            CaptureKind.RAW_RESPONSE,
+        }:
             raise ValueError(
-                "schema_version 2 is reserved for CCGP curated_public_excerpt bundles"
+                "schema_version 2 is reserved for CCGP authorized bundles"
             )
         if self.batch_id is None:
             raise ValueError("schema_version 2 requires batch_id")
@@ -175,4 +175,6 @@ class SnapshotManifest(BaseModel):
             raise ValueError("schema_version 2 requires a data_contract")
         if self.data_contract.review_status != "approved":
             raise ValueError("authorized data contract review_status must be approved")
+        if self.capture_kind == CaptureKind.RAW_RESPONSE and "response.json" not in self.files:
+            raise ValueError("schema_version 2 raw_response requires response.json")
         return self
