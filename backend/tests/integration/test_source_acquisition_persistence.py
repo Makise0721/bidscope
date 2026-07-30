@@ -2,7 +2,7 @@ import asyncio
 from datetime import UTC, datetime
 
 import pytest
-from bidscope.persistence.models import SourceAcquisitionRun, SourceSyncCursor
+from bidscope.persistence.models import SourceSyncCursor
 from bidscope.persistence.repositories import SourceAcquisitionRepository
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -46,6 +46,14 @@ async def test_successful_cursor_advancement_is_atomic_and_versioned(
             cursor_value="page:1",
             watermark_at=datetime(2026, 7, 30, 0, 0, tzinfo=UTC),
         )
+        stale_update = await repository.advance_source_sync_cursor(
+            source="ccgp",
+            expected_version=cursor.version - 1,
+            cursor_before="page:1",
+            cursor_after="stale-page",
+            watermark_at=datetime(2026, 7, 30, 1, 0, tzinfo=UTC),
+            succeeded_at=datetime(2026, 7, 30, 1, 0, 1, tzinfo=UTC),
+        )
         advanced = await repository.advance_source_sync_cursor(
             source="ccgp",
             expected_version=cursor.version,
@@ -56,6 +64,7 @@ async def test_successful_cursor_advancement_is_atomic_and_versioned(
         )
         await session.commit()
 
+    assert stale_update is False
     assert advanced is True
 
     async with session_factory() as session:
@@ -98,18 +107,24 @@ async def test_failed_acquisition_retains_prior_cursor(
         await session.commit()
 
     async with session_factory() as session:
-        cursor = await session.get(SourceSyncCursor, "ccgp")
-        run = await session.get(SourceAcquisitionRun, run.id)
+        repository = SourceAcquisitionRepository(session)
+        cursor = await repository.get_source_sync_cursor("ccgp")
+        latest_run = await repository.get_latest_acquisition_run("ccgp")
+        runs = await repository.list_acquisition_runs("ccgp")
+        statuses = await repository.list_source_statuses()
 
     assert cursor is not None
     assert cursor.cursor_value == "page:7"
     assert cursor.version == 1
     assert cursor.consecutive_failures == 1
-    assert run is not None
-    assert run.status == "failed"
-    assert run.cursor_before == "page:7"
-    assert run.cursor_after is None
-    assert run.failure_code == "timeout"
+    assert latest_run is not None
+    assert latest_run.id == run.id
+    assert latest_run.status == "failed"
+    assert latest_run.cursor_before == "page:7"
+    assert latest_run.cursor_after is None
+    assert latest_run.failure_code == "timeout"
+    assert [item.id for item in runs] == [run.id]
+    assert [item.source for item in statuses] == ["ccgp"]
 
 
 @pytest.mark.asyncio
