@@ -161,6 +161,27 @@ describe("BidScope operational views", () => {
           ],
         }),
       ),
+      http.get("/api/sources/status", () =>
+        HttpResponse.json({
+          items: [
+            {
+              source: "ccgp",
+              status: "disabled",
+              last_success_at: null,
+              next_run_at: null,
+              lag_seconds: null,
+              consecutive_failures: 0,
+              failure_code: null,
+              counts: {
+                requests: 0,
+                records: 0,
+                new_bundles: 0,
+                imported_notices: 0,
+              },
+            },
+          ],
+        }),
+      ),
     );
 
     renderApp("/sources");
@@ -170,6 +191,7 @@ describe("BidScope operational views", () => {
     expect(screen.getByText("ccgp-v1")).toBeInTheDocument();
     expect(screen.getByText("abc12345")).toBeInTheDocument();
     expect(screen.getByText("Stale", { exact: true })).toBeInTheDocument();
+    expect(screen.getByText("Disabled")).toBeInTheDocument();
     expect(screen.getByText(/snapshot_stale/i)).toBeInTheDocument();
     expect(screen.getByText("invalid", { exact: true })).toBeInTheDocument();
     expect(screen.getByText(/snapshot_integrity_error/i)).toBeInTheDocument();
