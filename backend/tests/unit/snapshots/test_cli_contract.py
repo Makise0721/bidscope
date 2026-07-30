@@ -2,17 +2,29 @@ from __future__ import annotations
 
 import hashlib
 import json
+from base64 import b64encode
 from pathlib import Path
 from types import SimpleNamespace
 
 from bidscope import cli
 from bidscope.snapshots.adapters import InspectionError, InspectionResult
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from typer.testing import CliRunner
 
 
-def test_snapshot_inspect_json_exposes_quarantine_disposition(
-    tmp_path: Path, monkeypatch
-) -> None:
+def _write_catalog_signature(catalog_path: Path) -> tuple[Path, str]:
+    signing_key = Ed25519PrivateKey.generate()
+    signature_path = catalog_path.with_suffix(".json.sig")
+    signature_path.write_bytes(signing_key.sign(catalog_path.read_bytes()))
+    public_key = signing_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    return signature_path, b64encode(public_key).decode("ascii")
+
+
+def test_snapshot_inspect_json_exposes_quarantine_disposition(tmp_path: Path, monkeypatch) -> None:
     bundle = tmp_path / "bundle"
     bundle.mkdir()
     inspection = InspectionResult(
@@ -35,9 +47,7 @@ def test_snapshot_inspect_json_exposes_quarantine_disposition(
     assert payload["disposition"] == "quarantined"
 
 
-def test_snapshot_import_json_exposes_auditable_metrics(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_snapshot_import_json_exposes_auditable_metrics(tmp_path: Path, monkeypatch) -> None:
     bundle = tmp_path / "bundle"
     bundle.mkdir()
     record = SimpleNamespace(
@@ -65,6 +75,7 @@ def test_snapshot_import_json_exposes_auditable_metrics(
 
 def test_validate_real_evaluation_cli_is_separate_from_deterministic_gate(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     manifest_path = tmp_path / "manifest.json"
     result_path = tmp_path / "result.json"
@@ -104,6 +115,12 @@ def test_validate_real_evaluation_cli_is_separate_from_deterministic_gate(
         )
         + "\n",
         encoding="utf-8",
+    )
+    signature_path, public_key = _write_catalog_signature(catalog_path)
+    monkeypatch.setattr(
+        cli,
+        "get_settings",
+        lambda: SimpleNamespace(real_evaluation_catalog_public_key=public_key),
     )
     result = {
         "schema_version": "real-evaluation-result-v1",
@@ -150,6 +167,8 @@ def test_validate_real_evaluation_cli_is_separate_from_deterministic_gate(
             str(result_path),
             "--catalog",
             str(catalog_path),
+            "--catalog-signature",
+            str(signature_path),
             "--json",
         ],
     )
@@ -161,20 +180,24 @@ def test_validate_real_evaluation_cli_is_separate_from_deterministic_gate(
     assert payload["deterministic_target_pass"] is None
 
 
-def test_validate_real_evaluation_cli_blocks_failed_result(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_validate_real_evaluation_cli_blocks_failed_result(tmp_path: Path, monkeypatch) -> None:
     manifest_path = tmp_path / "manifest.json"
     result_path = tmp_path / "result.json"
     catalog_path = tmp_path / "catalog.json"
     manifest_path.write_text("{}", encoding="utf-8")
     result_path.write_text("{}", encoding="utf-8")
     catalog_path.write_text("{}", encoding="utf-8")
+    signature_path = tmp_path / "catalog.json.sig"
+    signature_path.write_bytes(b"signature")
 
-    monkeypatch.setattr(
-        cli,
-        "validate_real_evaluation_files",
-        lambda _manifest_path, _result_path, _catalog_path: SimpleNamespace(
+    def fake_validate_real_evaluation_files(
+        _manifest_path: Path,
+        _result_path: Path,
+        _catalog_path: Path,
+        _signature_path: Path,
+        _public_key: str | None,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
             manifest=SimpleNamespace(
                 dataset_id="ccgp-pilot-eval",
                 dataset_version="2026-07-29-v1",
@@ -190,7 +213,51 @@ def test_validate_real_evaluation_cli_blocks_failed_result(
             ),
             manifest_sha256="a" * 64,
             snapshot_catalog_sha256="b" * 64,
-        ),
+        )
+
+    monkeypatch.setattr(cli, "validate_real_evaluation_files", fake_validate_real_evaluation_files)
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "eval",
+            "validate-real",
+            "--manifest",
+            str(manifest_path),
+            "--result",
+            str(result_path),
+            "--catalog",
+            str(catalog_path),
+            "--catalog-signature",
+            str(signature_path),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "blocked"
+    assert payload["release_decision"] == "blocked"
+    assert payload["failure_codes"] == ["provider_unavailable"]
+    assert payload["deterministic_target_pass"] is None
+
+
+def test_validate_real_evaluation_cli_fails_closed_without_leaking_key_material(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    result_path = tmp_path / "result.json"
+    catalog_path = tmp_path / "catalog.json"
+    signature_path = tmp_path / "catalog.sig"
+    key_material = "sensitive-public-key-material"
+    manifest_path.write_text("{}", encoding="utf-8")
+    result_path.write_text("{}", encoding="utf-8")
+    catalog_path.write_text("{}", encoding="utf-8")
+    signature_path.write_bytes(b"not-a-valid-signature")
+    monkeypatch.setattr(
+        cli,
+        "get_settings",
+        lambda: SimpleNamespace(real_evaluation_catalog_public_key=key_material),
     )
 
     result = CliRunner().invoke(
@@ -204,13 +271,15 @@ def test_validate_real_evaluation_cli_blocks_failed_result(
             str(result_path),
             "--catalog",
             str(catalog_path),
+            "--catalog-signature",
+            str(signature_path),
             "--json",
         ],
     )
 
     assert result.exit_code == 1
     payload = json.loads(result.stdout)
-    assert payload["status"] == "blocked"
+    assert payload["status"] == "invalid"
     assert payload["release_decision"] == "blocked"
-    assert payload["failure_codes"] == ["provider_unavailable"]
-    assert payload["deterministic_target_pass"] is None
+    assert key_material not in result.stdout
+    assert str(signature_path) not in result.stdout
