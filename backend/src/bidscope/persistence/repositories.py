@@ -433,14 +433,20 @@ class SourceAcquisitionRepository:
         return result.scalar_one_or_none()
 
     async def list_acquisition_runs(
-        self, source: str | None = None, limit: int = 50
+        self, source: str | None = None, limit: int = 50, offset: int = 0
     ) -> list[SourceAcquisitionRun]:
         bounded_limit = self._bounded_limit(limit)
+        if offset < 0 or offset > 100_000:
+            raise ValueError("offset must be between 0 and 100000")
         statement = sa.select(SourceAcquisitionRun)
         if source is not None:
             statement = statement.where(SourceAcquisitionRun.source == source)
         result = await self.session.execute(
-            statement.order_by(SourceAcquisitionRun.started_at.desc()).limit(bounded_limit)
+            statement.order_by(
+                SourceAcquisitionRun.started_at.desc(), SourceAcquisitionRun.id.desc()
+            )
+            .offset(offset)
+            .limit(bounded_limit)
         )
         return list(result.scalars().all())
 

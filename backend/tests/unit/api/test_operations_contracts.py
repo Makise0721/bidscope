@@ -11,7 +11,11 @@ from bidscope.api.routes.evaluations import _evaluation_row
 from bidscope.api.routes.inbox import list_inbox_events
 from bidscope.api.routes.reports import _serialize_report
 from bidscope.api.routes.runs import CreateRunBody, list_runs
-from bidscope.api.routes.sources import _source_row
+from bidscope.api.routes.sources import (
+    _acquisition_run_row,
+    _acquisition_status_row,
+    _source_row,
+)
 from bidscope.api.routes.subscriptions import pause_subscription, resume_subscription
 from bidscope.clock import FixedClock
 from fastapi import HTTPException
@@ -179,6 +183,98 @@ def test_source_row_exposes_provenance_metadata_for_display() -> None:
     assert latest["retrieved_at"] == "2026-07-18T00:00:00+00:00"
     assert latest["age_days"] is not None
     assert latest["hash_prefix"] == "aaaaaaaa"
+
+
+def test_acquisition_status_is_bounded_and_contains_no_source_payload_metadata() -> None:
+    now = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
+    cursor = SimpleNamespace(
+        source="ccgp",
+        last_success_at=now - timedelta(minutes=15),
+        consecutive_failures=2,
+    )
+    run = SimpleNamespace(
+        status="rate_limited",
+        finished_at=now - timedelta(minutes=1),
+        retry_after_seconds=120,
+        failure_code="rate_limited",
+        request_count=3,
+        record_count=12,
+        new_bundle_count=4,
+        imported_notice_count=9,
+        response_object_key="raw/secret-response.json",
+        response_sha256="a" * 64,
+        cursor_before="secret-cursor",
+        cursor_after="secret-cursor-2",
+    )
+
+    row = _acquisition_status_row(
+        cursor,
+        run,
+        now=now,
+        enabled=True,
+        poll_seconds=600,
+    )
+
+    assert row == {
+        "source": "ccgp",
+        "status": "rate_limited",
+        "last_success_at": "2026-07-30T11:45:00+00:00",
+        "next_run_at": "2026-07-30T12:01:00+00:00",
+        "lag_seconds": 900,
+        "consecutive_failures": 2,
+        "failure_code": "rate_limited",
+        "counts": {
+            "requests": 3,
+            "records": 12,
+            "new_bundles": 4,
+            "imported_notices": 9,
+        },
+    }
+    serialized = str(row)
+    assert "response_object_key" not in serialized
+    assert "response_sha256" not in serialized
+    assert "cursor_before" not in serialized
+    assert "secret" not in serialized
+
+
+def test_acquisition_history_row_excludes_object_keys_and_cursor_values() -> None:
+    run = SimpleNamespace(
+        id="run-1",
+        source="ccgp",
+        status="failed",
+        started_at=datetime(2026, 7, 30, 11, 0, tzinfo=UTC),
+        finished_at=datetime(2026, 7, 30, 11, 1, tzinfo=UTC),
+        request_count=1,
+        record_count=0,
+        new_bundle_count=0,
+        imported_notice_count=0,
+        failure_code="authorization_rejected",
+        http_status=403,
+        retry_after_seconds=None,
+        response_object_key="raw/secret-response.json",
+        cursor_before="secret-cursor",
+        cursor_after=None,
+    )
+
+    row = _acquisition_run_row(run)
+
+    assert row == {
+        "id": "run-1",
+        "source": "ccgp",
+        "status": "failed",
+        "started_at": "2026-07-30T11:00:00+00:00",
+        "finished_at": "2026-07-30T11:01:00+00:00",
+        "counts": {
+            "requests": 1,
+            "records": 0,
+            "new_bundles": 0,
+            "imported_notices": 0,
+        },
+        "failure_code": "authorization_rejected",
+        "http_status": 403,
+        "retry_after_seconds": None,
+    }
+    assert "secret" not in str(row)
 
 
 def test_evaluation_dto_includes_status() -> None:

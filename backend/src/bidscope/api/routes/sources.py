@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -11,7 +12,14 @@ from fastapi import APIRouter, Depends, Query, Request
 from bidscope.api.auth import require_admin_token
 from bidscope.api.dependencies import RunService
 from bidscope.clock import Clock, SystemClock
-from bidscope.persistence.models import SnapshotBundle, SnapshotImport
+from bidscope.ingestion.scheduler import bounded_retry_delay_seconds
+from bidscope.persistence.models import (
+    SnapshotBundle,
+    SnapshotImport,
+    SourceAcquisitionRun,
+    SourceSyncCursor,
+)
+from bidscope.persistence.repositories import SourceAcquisitionRepository
 
 router = APIRouter(
     prefix="/api/sources",
@@ -25,6 +33,8 @@ STALE_AFTER_DAYS = 7
 _MAX_WARNING_COUNT = 20
 _WARNING_TEXT_LIMIT = 100
 _DIAGNOSTIC_FIELDS = frozenset({"code", "message"})
+_MAX_HISTORY_PAGE_SIZE = 50
+_FAILURE_CODE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 
 
 def _run_service(request: Request) -> RunService:
@@ -92,6 +102,105 @@ def _latest_imports(imports: list[SnapshotImport]) -> dict[str, SnapshotImport]:
         if previous is None or current_time > (previous_time or previous.started_at):
             latest[key] = record
     return latest
+
+
+def _safe_failure_code(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and _FAILURE_CODE_PATTERN.fullmatch(value):
+        return value
+    return "source_failure"
+
+
+def _count(value: object) -> int:
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
+def _acquisition_counts(run: SourceAcquisitionRun | Any | None) -> dict[str, int]:
+    return {
+        "requests": _count(getattr(run, "request_count", 0)),
+        "records": _count(getattr(run, "record_count", 0)),
+        "new_bundles": _count(getattr(run, "new_bundle_count", 0)),
+        "imported_notices": _count(getattr(run, "imported_notice_count", 0)),
+    }
+
+
+def _acquisition_run_row(run: SourceAcquisitionRun | Any) -> dict[str, Any]:
+    return {
+        "id": str(run.id),
+        "source": str(run.source),
+        "status": str(run.status),
+        "started_at": _iso(run.started_at),
+        "finished_at": _iso(run.finished_at),
+        "counts": _acquisition_counts(run),
+        "failure_code": _safe_failure_code(run.failure_code),
+        "http_status": run.http_status if isinstance(run.http_status, int) else None,
+        "retry_after_seconds": (
+            run.retry_after_seconds
+            if isinstance(run.retry_after_seconds, int) and run.retry_after_seconds >= 0
+            else None
+        ),
+    }
+
+
+def _elapsed_seconds(now: datetime, then: datetime | None) -> int | None:
+    if then is None:
+        return None
+    if now.tzinfo is None and then.tzinfo is not None:
+        now = now.replace(tzinfo=then.tzinfo)
+    elif now.tzinfo is not None and then.tzinfo is None:
+        then = then.replace(tzinfo=now.tzinfo)
+    return max(0, int((now - then).total_seconds()))
+
+
+def _acquisition_status_row(
+    cursor: SourceSyncCursor | Any | None,
+    run: SourceAcquisitionRun | Any | None,
+    *,
+    now: datetime,
+    enabled: bool,
+    poll_seconds: int,
+) -> dict[str, Any]:
+    source = str(getattr(cursor, "source", None) or getattr(run, "source", "ccgp"))
+    last_success_at = getattr(cursor, "last_success_at", None)
+    run_status = str(getattr(run, "status", "")) if run is not None else ""
+    if not enabled:
+        status = "disabled"
+        next_run_at = None
+    elif run_status == "rate_limited":
+        status = "rate_limited"
+        finished_at = getattr(run, "finished_at", None) or now
+        delay = bounded_retry_delay_seconds(getattr(run, "retry_after_seconds", None))
+        next_run_at = finished_at + timedelta(seconds=delay)
+    elif run_status in {"failed", "quarantined"}:
+        status = "failed"
+        finished_at = getattr(run, "finished_at", None) or now
+        next_run_at = finished_at + timedelta(seconds=max(1, poll_seconds))
+    elif last_success_at is None:
+        status = "failed"
+        next_run_at = now
+    else:
+        lag_seconds = _elapsed_seconds(now, last_success_at) or 0
+        status = "stale" if lag_seconds > STALE_AFTER_DAYS * 86_400 else "healthy"
+        finished_at = getattr(run, "finished_at", None) if run is not None else None
+        next_run_at = (
+            (finished_at or now) + timedelta(seconds=max(1, poll_seconds))
+            if run_status != "running"
+            else None
+        )
+
+    return {
+        "source": source,
+        "status": status,
+        "last_success_at": _iso(last_success_at),
+        "next_run_at": _iso(next_run_at),
+        "lag_seconds": _elapsed_seconds(now, last_success_at),
+        "consecutive_failures": _count(getattr(cursor, "consecutive_failures", 0)),
+        "failure_code": _safe_failure_code(getattr(run, "failure_code", None))
+        if run is not None
+        else None,
+        "counts": _acquisition_counts(run),
+    }
 
 
 def _source_row(
@@ -199,3 +308,65 @@ async def list_sources(
         for source in sorted(source_names)
     ]
     return {"items": items}
+
+
+@router.get("/status")
+async def list_source_status(
+    service: RunService = Depends(_run_service),
+    limit: int = Query(default=50, ge=1, le=100),
+) -> dict[str, list[dict[str, Any]]]:
+    """List bounded acquisition freshness metadata without source payloads."""
+    settings = getattr(service, "settings", None)
+    enabled = bool(
+        getattr(settings, "live_ingestion_enabled", False)
+        and getattr(settings, "process_role", None) == "ingestion"
+    )
+    poll_seconds = int(getattr(settings, "ccgp_poll_seconds", 3600))
+    now = service.clock.now()
+    async with service.session_factory() as session:
+        repository = SourceAcquisitionRepository(session)
+        cursors = await repository.list_source_statuses(limit=limit)
+        runs = await repository.list_acquisition_runs(limit=limit)
+
+    cursor_by_source = {cursor.source: cursor for cursor in cursors}
+    latest_run_by_source: dict[str, SourceAcquisitionRun] = {}
+    for run in runs:
+        latest_run_by_source.setdefault(run.source, run)
+    sources = sorted({"ccgp", *cursor_by_source, *latest_run_by_source})[:limit]
+    return {
+        "items": [
+            _acquisition_status_row(
+                cursor_by_source.get(source),
+                latest_run_by_source.get(source),
+                now=now,
+                enabled=enabled,
+                poll_seconds=poll_seconds,
+            )
+            for source in sources
+        ]
+    }
+
+
+@router.get("/acquisition-runs")
+async def list_source_acquisition_runs(
+    service: RunService = Depends(_run_service),
+    source: str | None = Query(default=None, max_length=32),
+    page: int = Query(default=1, ge=1, le=1000),
+    page_size: int = Query(default=20, ge=1, le=_MAX_HISTORY_PAGE_SIZE),
+) -> dict[str, Any]:
+    """List paginated, payload-free acquisition history for operators."""
+    offset = (page - 1) * page_size
+    async with service.session_factory() as session:
+        repository = SourceAcquisitionRepository(session)
+        runs = await repository.list_acquisition_runs(
+            source=source,
+            limit=page_size + 1,
+            offset=offset,
+        )
+    has_more = len(runs) > page_size
+    return {
+        "items": [_acquisition_run_row(run) for run in runs[:page_size]],
+        "page": page,
+        "page_size": page_size,
+        "has_more": has_more,
+    }

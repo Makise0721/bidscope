@@ -66,6 +66,25 @@ export async function getSources(): Promise<SourceRecord[]> {
   return response.items;
 }
 
+export async function getSourceStatuses(): Promise<SourceStatusRecord[]> {
+  const response = await requestJson<{ items: SourceStatusRecord[] }>(
+    `${API_BASE}/api/sources/status`,
+  );
+  return response.items;
+}
+
+export async function getSourceAcquisitionRuns(
+  source?: string,
+  page = 1,
+  pageSize = 20,
+): Promise<SourceAcquisitionHistory> {
+  const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+  if (source) query.set("source", source);
+  return requestJson<SourceAcquisitionHistory>(
+    `${API_BASE}/api/sources/acquisition-runs?${query.toString()}`,
+  );
+}
+
 export async function getEvaluations(): Promise<EvaluationRecord[]> {
   const response = await requestJson<{ items: EvaluationRecord[] }>(`${API_BASE}/api/evaluations`);
   return response.items;
@@ -309,6 +328,43 @@ export interface SourceRecord {
   status: string;
   latest_valid_bundle: SourceBundleRecord | null;
   validation_warnings: string[];
+}
+
+export interface SourceStatusCounts {
+  requests: number;
+  records: number;
+  new_bundles: number;
+  imported_notices: number;
+}
+
+export interface SourceStatusRecord {
+  source: string;
+  status: "healthy" | "stale" | "rate_limited" | "failed" | "disabled" | string;
+  last_success_at: string | null;
+  next_run_at: string | null;
+  lag_seconds: number | null;
+  consecutive_failures: number;
+  failure_code: string | null;
+  counts: SourceStatusCounts;
+}
+
+export interface SourceAcquisitionRunRecord {
+  id: string;
+  source: string;
+  status: string;
+  started_at: string | null;
+  finished_at: string | null;
+  counts: SourceStatusCounts;
+  failure_code: string | null;
+  http_status: number | null;
+  retry_after_seconds: number | null;
+}
+
+export interface SourceAcquisitionHistory {
+  items: SourceAcquisitionRunRecord[];
+  page: number;
+  page_size: number;
+  has_more: boolean;
 }
 
 export interface EvaluationMetric {

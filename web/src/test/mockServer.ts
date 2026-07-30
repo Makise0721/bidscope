@@ -148,6 +148,12 @@ export const handlers = [
     });
   }),
 
+  http.get("/api/sources/status", async ({ request }) => {
+    const unauthorized = unauthorizedResponse(request);
+    if (unauthorized) return unauthorized;
+    return HttpResponse.json({ items: [] });
+  }),
+
   http.get("/api/reports/:id/docx", async ({ request }) => {
     const unauthorized = unauthorizedResponse(request);
     if (unauthorized) return unauthorized;

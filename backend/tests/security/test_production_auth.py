@@ -163,6 +163,8 @@ def test_production_health_is_public_but_business_paths_require_admin_token() ->
             "/api/subscriptions",
             "/api/inbox-events",
             "/api/sources",
+            "/api/sources/status",
+            "/api/sources/acquisition-runs",
             "/api/evaluations",
         ):
             response = client.get(path)
