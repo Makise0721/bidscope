@@ -78,6 +78,19 @@ def test_schema_v2_requires_authorized_data_contract(tmp_path: Path) -> None:
     assert any(error.code == "missing_data_contract" for error in inspection.errors)
 
 
+def test_schema_v1_quarantines_unregistered_ccgp_curated_bundle(tmp_path: Path) -> None:
+    """A new real bundle cannot bypass v2 authorization by declaring v1."""
+    files = {"detail.html": "<html>unregistered</html>"}
+    manifest = _manifest(files, bundle_id="ccgp-central-20260730")
+    bundle = _write_bundle(tmp_path, files, manifest)
+
+    inspection = inspect_bundle(bundle)
+
+    assert inspection.valid is False
+    assert inspection.disposition == "quarantined"
+    assert any(error.code == "legacy_schema_not_allowed" for error in inspection.errors)
+
+
 def test_schema_v2_accepts_approved_authorized_contract(tmp_path: Path) -> None:
     files = {"detail.html": "<html>authorized</html>"}
     manifest = _manifest(
