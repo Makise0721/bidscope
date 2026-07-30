@@ -239,6 +239,29 @@ _METRIC_DEFINITIONS: dict[str, _MetricDefinition] = {
         ("source",),
         {"source": frozenset({"database", "checkpoint", "object_store", "unknown"})},
     ),
+    "bidscope_acquisition_runs_total": _MetricDefinition(
+        "counter",
+        ("source", "outcome"),
+        {
+            "source": frozenset({"ccgp"}),
+            "outcome": frozenset({"success", "failed", "quarantined", "rate_limited"}),
+        },
+    ),
+    "bidscope_acquisition_duration_seconds": _MetricDefinition(
+        "histogram",
+        ("source",),
+        {"source": frozenset({"ccgp"})},
+    ),
+    "bidscope_source_freshness_seconds": _MetricDefinition(
+        "gauge",
+        ("source",),
+        {"source": frozenset({"ccgp"})},
+    ),
+    "bidscope_acquisition_records_total": _MetricDefinition(
+        "counter",
+        ("source",),
+        {"source": frozenset({"ccgp"})},
+    ),
 }
 
 

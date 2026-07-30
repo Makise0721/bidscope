@@ -35,6 +35,7 @@ class AuditEventType(StrEnum):
     SCHEDULER_TICK_FAILED = "scheduler.tick.failed"
     SNAPSHOT_IMPORT_SUCCEEDED = "snapshot_import.succeeded"
     SNAPSHOT_IMPORT_FAILED = "snapshot_import.failed"
+    SOURCE_ACQUISITION_COMPLETED = "source_acquisition.completed"
     REPORT_VIEWED = "report.viewed"
     DOCX_VIEWED = "docx.viewed"
     DOCX_RETRIED = "docx.retried"

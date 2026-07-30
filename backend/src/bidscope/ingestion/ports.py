@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal, Protocol
@@ -63,3 +63,43 @@ class AuthorizedSourcePage:
     retrieved_at: datetime
     status_code: int
     source_url: str
+
+
+class SourceClient(Protocol):
+    async def fetch_page(self, cursor: str | None) -> AuthorizedSourcePage: ...
+
+
+class SourceObjectStore(Protocol):
+    def put_bytes(self, key: str, data: bytes) -> str: ...
+
+
+class BundleMaterializer(Protocol):
+    def materialize(
+        self,
+        page: AuthorizedSourcePage,
+        *,
+        batch_id: str,
+        data_contract: Any,
+    ) -> Any: ...
+
+
+class SnapshotImporterPort(Protocol):
+    async def import_bundle(self, bundle: Any) -> Any: ...
+
+
+class AcquisitionRepository(Protocol):
+    async def get_or_create_source_sync_cursor(
+        self, source: str, cursor_value: str, watermark_at: datetime
+    ) -> Any: ...
+
+    async def create_acquisition_run(
+        self, source: str, started_at: datetime, cursor_before: str, *, status: str = "running"
+    ) -> Any: ...
+
+    async def advance_source_sync_cursor(self, **kwargs: Any) -> bool: ...
+
+    async def finalize_acquisition_run(self, **kwargs: Any) -> Any: ...
+
+
+AuditRecorder = Callable[[Mapping[str, object]], Awaitable[None]]
+Committer = Callable[[], Awaitable[None]]
