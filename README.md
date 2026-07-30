@@ -4,7 +4,7 @@
 
 BidScope parses public tender notices from Chinese government procurement sources, deduplicates them, verifies evidence, and generates cited reports. It is designed so that every factual claim in every report resolves to an immutable evidence span and source version.
 
-**Status:** P1 security, observability, readiness, bounded runtime, backup/restore, and a clean-host recovery drill are implemented. External backup replication remains disabled unless its explicit, separate credentials are supplied. BidScope remains snapshot-only with deterministic offline evaluation.
+**Status:** P1 security, observability, readiness, bounded runtime, backup/restore, and a clean-host recovery drill are implemented. External backup replication remains disabled unless its explicit, separate credentials are supplied. Authorized CCGP live ingestion is configuration-gated and disabled by default; deterministic evaluation remains offline.
 
 ---
 
@@ -55,7 +55,7 @@ The application writes bounded audit events for critical run, subscription, snap
 
 ## Source Policy
 
-**P0 is snapshot-only.** BidScope does not crawl, scrape, or probe any public procurement website. All search and reporting run against data that has already been imported through an explicit, auditable CLI action.
+**P0 interactive paths are snapshot-only.** BidScope does not crawl, scrape, or probe any public procurement website. An independently deployed ingestion role may later call only an operator-approved HTTPS CCGP interface; API, Agent, report, and subscription paths never create source traffic. All search and reporting run against data that has already been admitted through the explicit, auditable snapshot path.
 
 There are three evidence grades:
 
@@ -97,7 +97,10 @@ Full policy: [`docs/source-policy.md`](docs/source-policy.md).
 +------------------+
 ```
 
-A single Docker image runs both process roles (`api` and `scheduler`), selected by command. PostgreSQL and MinIO are external dependencies.
+A single Docker image runs the `api`, `scheduler`, and (when explicitly enabled)
+`ingestion` process roles, selected by command. PostgreSQL and MinIO are external
+dependencies. Only the ingestion role may receive CCGP client/signing
+credentials; API and scheduler startup rejects them.
 
 - **Backend:** Python 3.12, FastAPI, LangGraph, SQLAlchemy (async), Alembic, APScheduler.
 - **Frontend:** React 19, TypeScript, Vite, TanStack Query.
@@ -280,7 +283,7 @@ Full details: [`docs/evaluation.md`](docs/evaluation.md).
 
 ## Security Boundaries
 
-- **No live network access** in P0. The snapshot path and the scheduler never call public procurement sites.
+- **No live network access by default.** The snapshot path, API, Agent, reports, and scheduler never call public procurement sites. The isolated ingestion role is the only path that may call a configured authorized CCGP HTTPS origin.
 - **Provenance enforcement.** Each notice is validated against an official-host whitelist and a manifest hash. Synthetic data can never impersonate an official source.
 - **Test-only routes** (`/api/test-controls/*`) are registered only when `app_mode == "test"` and are gated by a token.
 - **Non-root container execution.** The Docker image runs as UID 1000.
@@ -308,7 +311,7 @@ The API is available at `http://localhost:8000`. Process liveness is `GET /healt
 
 ## Limitations
 
-- **P0 is snapshot-only.** There is no live fetching of tender notices. All data must be explicitly imported.
+- **Live fetching is opt-in and isolated.** There is no live fetching of tender notices unless the authorized ingestion role is explicitly enabled and fully configured. All searchable data must still be explicitly admitted as a snapshot.
 - **All evaluation metrics are fixture consistency.** They measure whether the deterministic pipeline reproduces its committed expected outputs, not whether the system performs well against real tender data.
 - **The corpus is synthetic.** The 120-notice evaluation corpus uses `source=synthetic_demo` and `example.invalid` URLs. No real tender notices are included in the repository.
 - **Zero-cost is a fixture.** The CNY 0.00 pricing is an offline snapshot, not a live cost measurement.
@@ -327,7 +330,7 @@ The API is available at `http://localhost:8000`. Process liveness is `GET /healt
 
 BidScope is a portfolio project that demonstrates how to build an evidence-first AI system with defensible technical decisions:
 
-- **Ingestion decoupled from interactive runs.** Snapshots are imported through a separate, auditable path so that interactive queries never trigger network access.
+- **Ingestion decoupled from interactive runs.** Authorized live acquisition is an opt-in worker role; snapshots are imported through a separate, auditable path so that interactive queries never trigger network access.
 - **One bounded graph, not ornamental multi-agent orchestration.** A single LangGraph with explicit nodes, interrupts, and checkpoints keeps the system inspectable and recoverable.
 - **Deterministic code where it belongs.** Deduplication, provenance validation, retrieval ranking, and citation verification are all deterministic. The LLM is reserved for intent parsing and synthesis.
 - **Evidence and immutable versions prevent unsupported summaries.** Every claim resolves to an immutable evidence span; source versions are never overwritten.

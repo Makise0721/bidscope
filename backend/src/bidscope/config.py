@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
 from functools import lru_cache
 from typing import Any, ClassVar, Literal, cast
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 from pydantic import AnyHttpUrl, Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from bidscope.domain.enums import SourceName
+from bidscope.domain.provenance import OFFICIAL_HOSTS_BY_SOURCE
 
 MAX_ADMIN_TOKEN_HEADER_LENGTH = 4096
 
@@ -20,6 +24,8 @@ class Settings(BaseSettings):
             "s3_secret_key",
             "backup_s3_access_key",
             "backup_s3_secret_key",
+            "ccgp_client_id",
+            "ccgp_signing_key",
         }
     )
     _dsn_field_names: ClassVar[frozenset[str]] = frozenset(
@@ -212,6 +218,9 @@ class Settings(BaseSettings):
     )
 
     app_mode: Literal["demo", "development", "production", "test"] = "demo"
+    #: Selects the process role. Only the isolated ingestion role may hold
+    #: CCGP signing credentials or enable live source acquisition.
+    process_role: Literal["api", "scheduler", "ingestion"] = "api"
     database_url: SecretStr = SecretStr(_database_dsn_defaults["database_url"])
     checkpoint_database_url: SecretStr = SecretStr(
         _database_dsn_defaults["checkpoint_database_url"]
@@ -236,6 +245,26 @@ class Settings(BaseSettings):
     model_base_url: str = "https://api.deepseek.com"
     model_name: str = "deepseek-chat"
     model_api_key: SecretStr | None = None
+    #: Live acquisition is an explicit opt-in and is disabled in every mode by
+    #: default. The API and subscription scheduler remain snapshot-only.
+    live_ingestion_enabled: bool = False
+    ccgp_api_base_url: AnyHttpUrl | None = None
+    ccgp_client_id: SecretStr | None = None
+    ccgp_signing_key: SecretStr | None = None
+    ccgp_authorization_ref: str | None = Field(default=None, max_length=256)
+    ccgp_poll_seconds: int = Field(default=900, ge=60)
+    ccgp_request_timeout_seconds: int = Field(default=20, gt=0)
+    ccgp_max_response_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
+    ccgp_max_pages_per_run: int = Field(default=100, gt=0)
+    ccgp_min_interval_seconds: int = Field(default=1, gt=0)
+    ccgp_data_contract_version: str | None = Field(default=None, max_length=256)
+    ccgp_data_owner: str | None = Field(default=None, max_length=256)
+    ccgp_data_regions: list[str] = Field(default_factory=list)
+    ccgp_data_categories: list[str] = Field(default_factory=list)
+    ccgp_data_review_status: Literal["approved", "pending", "rejected"] | None = None
+    ccgp_data_reviewed_at: datetime | None = None
+    ccgp_data_update_sla: Literal["weekly"] | None = None
+    ccgp_data_retention_days: int | None = Field(default=None, gt=0, le=3650)
     #: Root directory for the local object store (DOCX outputs and snapshot
     #: payloads in local/demo deployments).
     object_store_root: str = "data/objects"
@@ -352,6 +381,86 @@ class Settings(BaseSettings):
         if model_api_key is None or not model_api_key.strip():
             raise ValueError("model_api_key must be non-empty when real_model_enabled is true")
         return self
+
+    @model_validator(mode="after")
+    def validate_ccgp_configuration(self) -> Settings:
+        """Keep live CCGP access HTTPS-only, allowlisted and role-isolated."""
+        if self.ccgp_api_base_url is not None:
+            url = self.ccgp_api_base_url
+            official_hosts = OFFICIAL_HOSTS_BY_SOURCE[SourceName.CCGP]
+            if (
+                url.scheme != "https"
+                or url.host is None
+                or url.host.casefold() not in official_hosts
+                or url.username is not None
+                or url.password is not None
+                or url.path not in {"", "/"}
+                or url.query is not None
+                or url.fragment is not None
+            ):
+                raise ValueError(
+                    "ccgp_api_base_url must be an HTTPS origin on an approved CCGP host"
+                )
+
+        has_signing_credential = any(
+            not self._is_blank(value) for value in (self.ccgp_client_id, self.ccgp_signing_key)
+        )
+        if self.process_role != "ingestion" and has_signing_credential:
+            raise ValueError("CCGP credentials require process_role='ingestion'")
+        if self.live_ingestion_enabled and self.process_role != "ingestion":
+            raise ValueError("live_ingestion_enabled requires process_role='ingestion'")
+        if not self.live_ingestion_enabled:
+            return self
+
+        required_values = {
+            "ccgp_api_base_url": self.ccgp_api_base_url,
+            "ccgp_client_id": self.ccgp_client_id,
+            "ccgp_signing_key": self.ccgp_signing_key,
+            "ccgp_authorization_ref": self.ccgp_authorization_ref,
+            "ccgp_data_contract_version": self.ccgp_data_contract_version,
+            "ccgp_data_owner": self.ccgp_data_owner,
+            "ccgp_data_review_status": self.ccgp_data_review_status,
+            "ccgp_data_reviewed_at": self.ccgp_data_reviewed_at,
+            "ccgp_data_update_sla": self.ccgp_data_update_sla,
+            "ccgp_data_retention_days": self.ccgp_data_retention_days,
+        }
+        missing = [name for name, value in required_values.items() if self._is_blank(value)]
+        if not self.ccgp_data_regions:
+            missing.append("ccgp_data_regions")
+        if not self.ccgp_data_categories:
+            missing.append("ccgp_data_categories")
+        if missing:
+            raise ValueError(
+                "live_ingestion_enabled requires non-empty values for: " + ", ".join(missing)
+            )
+        for field_name, values in (
+            ("ccgp_data_regions", self.ccgp_data_regions),
+            ("ccgp_data_categories", self.ccgp_data_categories),
+        ):
+            if any(not self._is_bounded_label(value) for value in values):
+                raise ValueError(f"{field_name} contains an invalid bounded label")
+        for field_name, value in (
+            ("ccgp_authorization_ref", self.ccgp_authorization_ref),
+            ("ccgp_data_contract_version", self.ccgp_data_contract_version),
+            ("ccgp_data_owner", self.ccgp_data_owner),
+        ):
+            if value is None or not self._is_bounded_label(value):
+                raise ValueError(f"{field_name} must be a non-empty bounded label")
+        if self.ccgp_data_review_status != "approved":
+            raise ValueError("ccgp_data_review_status must be approved")
+        if self.ccgp_data_reviewed_at is None or self.ccgp_data_reviewed_at.tzinfo is None:
+            raise ValueError("ccgp_data_reviewed_at must be timezone-aware")
+        if self.ccgp_data_update_sla != "weekly":
+            raise ValueError("ccgp_data_update_sla must be weekly")
+        return self
+
+    @staticmethod
+    def _is_bounded_label(value: str, *, max_length: int = 256) -> bool:
+        return bool(
+            value.strip()
+            and len(value) <= max_length
+            and not any(ord(character) <= 0x1F or ord(character) == 0x7F for character in value)
+        )
 
     @model_validator(mode="before")
     @classmethod

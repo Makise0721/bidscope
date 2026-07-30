@@ -1,7 +1,7 @@
 # Deployment
 
 **Version:** 2026-07-28
-**Applies to:** BidScope P1-A Compose security and configuration baseline and P1-C operations packaging
+**Applies to:** BidScope P1-A Compose security and configuration baseline, P1-C operations packaging, and the authorized live-ingestion configuration boundary
 
 For the complete production procedure, including migrations, upgrades/rollback,
 backup verification/pruning/restoration, key rotation, and scheduler diagnosis,
@@ -37,6 +37,9 @@ The production settings validator rejects startup when any of the following is m
 - `BIDSCOPE_REAL_MODEL_ENABLED=true` without `BIDSCOPE_MODEL_API_KEY`.
 - `BIDSCOPE_ALLOWED_ORIGINS` is empty, wildcarded, or contains a path, query, fragment, or user-info component; `BIDSCOPE_TRUSTED_HOSTS` is empty or wildcarded; or `BIDSCOPE_EXTERNAL_SCHEME` is not `https`.
 - Either PostgreSQL DSN uses the wrong explicit driver, omitted credentials/authority/database, a demo default, a fragment, an unknown or target-overriding query parameter, or a TLS query other than `ssl=require` for the asyncpg DSN or `sslmode=require` for the psycopg DSN.
+- `BIDSCOPE_CCGP_API_BASE_URL` is not an HTTPS origin on the existing CCGP official-host allowlist.
+- `BIDSCOPE_PROCESS_ROLE` is not one of `api`, `scheduler`, or `ingestion`; CCGP client/signing credentials are present outside the `ingestion` role; or live ingestion is enabled outside the `ingestion` role.
+- Live ingestion is enabled without the complete operator-approved CCGP authorization and schema-v2 data-contract settings. When live ingestion is disabled (the default), those CCGP credentials are not required.
 
 Validation errors are presented as a bounded startup marker and do not print DSNs, passwords, Admin Tokens, model keys, tracebacks, or Pydantic internals.
 
@@ -61,7 +64,7 @@ Missing, empty, wrong, or oversized Admin Token headers receive `401` with `{"de
 4. The token is not placed in `localStorage`, cookies, URLs, query strings, hashes, bundles, logs, request bodies, or reports. **Clear** removes it from the current tab.
 5. A `401` clears the current tab's token and returns the UI to the authentication-required state. Enter the token again after correcting the credential.
 
-For rotation, generate a new random token, update the deployment secret, restart both roles, and replace the token in every open browser tab. Do not commit `.env` or secret files. Existing tabs continue to send their old token until cleared or replaced, so rotate during a controlled maintenance window.
+For rotation, generate a new random token, update the deployment secret, restart both roles, and replace the token in every open browser tab. For an authorized CCGP integration, rotate the client/signing material through the operator's approved secret store, update only the ingestion role environment, validate the authorization reference and contract, then restart that worker. Do not commit `.env` or secret files. Existing tabs continue to send their old token until cleared or replaced, so rotate during a controlled maintenance window.
 
 ### Audit boundary
 
@@ -71,14 +74,16 @@ P1-B adds `/readyz` as the dependency readiness probe and `/metrics` as a bounde
 
 ## Production Compose Workflow
 
-BidScope uses one image for two roles:
+BidScope currently uses one image for two deployed roles. The authorized
+`ingestion` role is configuration-defined in this task and is introduced as a
+separate process/Compose service in the later operational task:
 
 | Role | Command | Responsibility |
 |---|---|---|
 | `api` | `bidscope api serve` | Serves the FastAPI API and built SPA on container port 8000. |
 | `scheduler` | `bidscope scheduler start` | Runs subscription ticks. Start exactly one scheduler per deployment. |
 
-The API and scheduler share the same production configuration, PostgreSQL databases, and S3-compatible object store. PostgreSQL and MinIO are private Compose services; neither their database/API ports nor the MinIO console are published on the host. The API is bound to `127.0.0.1:8000` so a local reverse proxy can terminate TLS and provide the public entry point.
+The API and scheduler share the same production configuration, PostgreSQL databases, and S3-compatible object store. The ingestion role may use the same persistence dependencies but receives the only CCGP signing credentials and must have egress restricted to the configured official HTTPS host. PostgreSQL and MinIO are private Compose services; neither their database/API ports nor the MinIO console are published on the host. The API is bound to `127.0.0.1:8000` so a local reverse proxy can terminate TLS and provide the public entry point.
 
 1. Copy `.env.production.example` to the deployment's `.env` file and replace every blank value with deployment-specific values. Do not commit that file.
 2. Generate a long random `BIDSCOPE_ADMIN_TOKEN`, S3 credentials, PostgreSQL credentials, and pre-encoded DSN passwords.
@@ -95,7 +100,22 @@ docker compose up -d api scheduler
 docker compose ps
 ```
 
-`api` uses `/readyz` for its HTTP healthcheck. The scheduler is not an HTTP server, so Compose explicitly disables its inherited image healthcheck; inspect its process state and bounded tick logs instead.
+`api` uses `/readyz` for its HTTP healthcheck. The scheduler and ingestion roles are not HTTP servers, so Compose explicitly disables their inherited image healthcheck; inspect their process state and bounded logs/metrics instead.
+
+### Authorized CCGP ingestion boundary
+
+Live acquisition is disabled unless `BIDSCOPE_LIVE_INGESTION_ENABLED=true`.
+Before enabling it, the operator must have an external authorization record and
+an approved schema-v2 data contract. Set `BIDSCOPE_PROCESS_ROLE=ingestion`, the
+exact approved CCGP HTTPS origin, the client/signing material, the bounded poll
+limits, and all `BIDSCOPE_CCGP_DATA_*` contract fields in a protected worker
+environment. Never put those credentials in the API or scheduler environment.
+
+The worker must be deployed with outbound access limited to the configured
+official CCGP host and must not be replaced with browser automation, HTML
+scraping, undocumented endpoint probing, CAPTCHA bypass, or retry behavior that
+defeats source controls. A missing, invalid, or incomplete authorization
+configuration fails closed before any source request.
 
 ## Required Production Variables
 
