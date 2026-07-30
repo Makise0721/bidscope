@@ -23,9 +23,17 @@ from bidscope.domain.snapshots import (
 from bidscope.ingestion.ports import AuthorizedSourcePage
 from bidscope.snapshots.adapters import InspectionResult, inspect_bundle
 
-_SENSITIVE_METADATA_PARTS = ("secret", "password", "credential", "signing")
-_SENSITIVE_METADATA_KEYS = frozenset(
-    {"api_key", "access_token", "authorization_header", "client_id", "headers", "token"}
+_SENSITIVE_METADATA_PARTS = (
+    "secret",
+    "password",
+    "credential",
+    "signing",
+    "api_key",
+    "apikey",
+    "access_key",
+    "authorization",
+    "auth",
+    "token",
 )
 
 
@@ -85,14 +93,21 @@ class AuthorizedBundleMaterializer:
                 "response_too_large", "source response exceeds bundle limit"
             )
         safe_extra = self._safe_extra_metadata(extra_metadata or {})
-        acquisition_metadata = AuthorizedAcquisitionMetadata(
-            response_sha256=actual_hash,
-            status_code=page.status_code,
-            cursor_before=page.cursor_before,
-            cursor_after=page.next_cursor,
-            record_count=len(page.items),
-            extra=safe_extra,
-        )
+        try:
+            acquisition_metadata = AuthorizedAcquisitionMetadata(
+                response_sha256=actual_hash,
+                status_code=page.status_code,
+                cursor_before=page.cursor_before,
+                cursor_after=page.next_cursor,
+                record_count=len(page.items),
+                response_items_field=page.response_items_field,
+                notice_field_map=dict(page.notice_field_map),
+                extra=safe_extra,
+            )
+        except ValidationError as error:
+            raise BundleQuarantineError(
+                "invalid_metadata", "authorized acquisition metadata is invalid"
+            ) from error
 
         identity = {
             "acquisition_metadata": acquisition_metadata.model_dump(mode="json"),
@@ -149,6 +164,10 @@ class AuthorizedBundleMaterializer:
             committed = True
         except BundleQuarantineError:
             raise
+        except ValidationError as error:
+            raise BundleQuarantineError(
+                "invalid_metadata", "authorized acquisition metadata is invalid"
+            ) from error
         except OSError as error:
             raise BundleQuarantineError(
                 "materialization_failed", "could not materialize source bundle"
@@ -201,9 +220,7 @@ class AuthorizedBundleMaterializer:
                             "invalid_metadata", "acquisition metadata keys must be strings"
                         )
                     normalized = raw_key.casefold().replace("-", "_")
-                    if normalized in _SENSITIVE_METADATA_KEYS or any(
-                        part in normalized for part in _SENSITIVE_METADATA_PARTS
-                    ):
+                    if any(part in normalized for part in _SENSITIVE_METADATA_PARTS):
                         raise BundleQuarantineError(
                             "credential_metadata", "credential-bearing metadata is not admitted"
                         )
@@ -213,7 +230,17 @@ class AuthorizedBundleMaterializer:
                     walk(item)
             elif isinstance(value, str):
                 lowered = value.casefold()
-                if any(marker in lowered for marker in ("bearer ", "password=", "secret=")):
+                if any(
+                    marker in lowered
+                    for marker in (
+                        "bearer ",
+                        "basic ",
+                        "password=",
+                        "secret=",
+                        "api-key",
+                        "authorization:",
+                    )
+                ):
                     raise BundleQuarantineError(
                         "credential_metadata", "credential-bearing metadata is not admitted"
                     )
@@ -259,8 +286,8 @@ class AuthorizedBundleMaterializer:
             "authorized source bundle failed integrity inspection",
         )
 
-    @staticmethod
     def _reuse_existing(
+        self,
         target: Path,
         manifest: SnapshotManifest,
         manifest_bytes: bytes,
@@ -275,6 +302,11 @@ class AuthorizedBundleMaterializer:
         if resolved != root and root not in resolved.parents:
             raise BundleQuarantineError(
                 "bundle_collision", "existing source bundle escapes staging"
+            )
+        total_bytes = sum(path.stat().st_size for path in target.rglob("*") if path.is_file())
+        if total_bytes > self.max_bundle_bytes:
+            raise BundleQuarantineError(
+                "bundle_too_large", "existing source bundle exceeds the configured limit"
             )
         inspection = inspect_bundle(target)
         if (

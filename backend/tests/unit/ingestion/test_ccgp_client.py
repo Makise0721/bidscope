@@ -59,6 +59,7 @@ def _endpoint() -> AuthorizedEndpoint:
         items_field="items",
         next_cursor_field="next_cursor",
         request_fields={"scope": "approved"},
+        notice_field_map={"external_id": "notice_id"},
     )
 
 

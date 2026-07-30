@@ -23,6 +23,7 @@ class AuthorizedEndpoint:
     items_field: str
     next_cursor_field: str
     request_fields: Mapping[str, Any] = field(default_factory=dict)
+    notice_field_map: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.path.startswith("/") or "?" in self.path or "#" in self.path:
@@ -63,6 +64,8 @@ class AuthorizedSourcePage:
     retrieved_at: datetime
     status_code: int
     source_url: str
+    response_items_field: str = "items"
+    notice_field_map: Mapping[str, str] = field(default_factory=dict)
 
 
 class SourceClient(Protocol):

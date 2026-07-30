@@ -48,6 +48,7 @@ def _page(response_bytes: bytes = RESPONSE) -> AuthorizedSourcePage:
         retrieved_at=FIXED_NOW,
         status_code=200,
         source_url="https://www.ccgp.gov.cn/authorized/v1/notices",
+        notice_field_map={"external_id": "notice_id"},
     )
 
 
@@ -81,6 +82,9 @@ def test_identical_response_and_metadata_are_byte_identical(tmp_path: Path) -> N
     assert inspection.manifest is not None
     assert inspection.manifest.capture_kind.value == "raw_response"
     assert inspection.manifest.acquisition_metadata is not None
+    assert inspection.manifest.acquisition_metadata.notice_field_map == {
+        "external_id": "notice_id"
+    }
     notices = CcgpSnapshotAdapter().parse(first.path)
     assert [notice.external_id for notice in notices] == ["n-1"]
 
@@ -127,6 +131,19 @@ def test_whole_materialized_bundle_is_bounded(tmp_path: Path) -> None:
     assert error.value.code == "bundle_too_large"
 
 
+def test_existing_bundle_is_checked_against_new_size_limit(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    _materialize(root)
+    materializer = AuthorizedBundleMaterializer(root, max_bundle_bytes=len(RESPONSE) + 1)
+
+    with pytest.raises(BundleQuarantineError) as error:
+        materializer.materialize(
+            _page(), batch_id="ccgp-batch-20260730", data_contract=_contract()
+        )
+
+    assert error.value.code == "bundle_too_large"
+
+
 @pytest.mark.parametrize(
     ("page", "contract", "extra_metadata", "code"),
     [
@@ -145,12 +162,15 @@ def test_whole_materialized_bundle_is_bounded(tmp_path: Path) -> None:
         ),
         (replace(_page(), response_sha256=""), _contract(), {}, "missing_response_hash"),
         (_page(), _contract(), {"client_secret": "never-persist"}, "credential_metadata"),
+        (_page(), _contract(), {"x-api-key": "never-persist"}, "credential_metadata"),
+        (_page(), _contract(), {"operator_note": "Basic never-persist"}, "credential_metadata"),
         (
             _page(),
             _contract(),
             {"request": {"headers": {"Authorization": "Bearer never-persist"}}},
             "credential_metadata",
         ),
+        (_page(), _contract(), {"operator_note": "x" * 257}, "invalid_metadata"),
     ],
 )
 def test_unsafe_authorized_batch_is_quarantined(

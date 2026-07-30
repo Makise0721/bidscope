@@ -95,22 +95,30 @@ class CcgpSnapshotAdapter:
                 path="response.json",
                 detail="invalid_json",
             ) from error
-        if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+        if manifest.acquisition_metadata is None:
+            raise _parse.ParseDrift(
+                "CCGP authorized response has no response contract metadata",
+                path="manifest.json:acquisition_metadata",
+                detail="missing_response_contract",
+            )
+        items_field = manifest.acquisition_metadata.response_items_field
+        if not isinstance(payload, dict) or not isinstance(payload.get(items_field), list):
             raise _parse.ParseDrift(
                 "CCGP authorized response is missing the items list",
-                path="response.json:items",
+                path=f"response.json:{items_field}",
                 detail="items must be a list",
             )
 
         notices: list[NormalizedNotice] = []
-        for index, item in enumerate(payload["items"]):
+        field_map = manifest.acquisition_metadata.notice_field_map
+        for index, item in enumerate(payload[items_field]):
             if not isinstance(item, dict):
                 raise _parse.ParseDrift(
                     "CCGP authorized response item is not an object",
                     path=f"response.json:items[{index}]",
                     detail="item must be an object",
                 )
-            external_id = self._first_text(item, "external_id", "notice_id", "id")
+            external_id = self._mapped_text(item, "external_id", field_map)
             if not external_id:
                 raise _parse.ParseDrift(
                     "CCGP authorized response item has no identifier",
@@ -119,12 +127,12 @@ class CcgpSnapshotAdapter:
                 )
             fields = {
                 "external_id": external_id,
-                "title": self._first_text(item, "title", "name"),
-                "purchaser": self._first_text(item, "purchaser", "buyer"),
-                "region": self._first_text(item, "region", "region_name"),
-                "publish_time": self._first_text(item, "publish_time", "published_at"),
-                "deadline": self._first_text(item, "deadline", "deadline_at"),
-                "budget": self._first_text(item, "budget", "budget_text"),
+                "title": self._mapped_text(item, "title", field_map),
+                "purchaser": self._mapped_text(item, "purchaser", field_map),
+                "region": self._mapped_text(item, "region", field_map),
+                "publish_time": self._mapped_text(item, "publish_time", field_map),
+                "deadline": self._mapped_text(item, "deadline", field_map),
+                "budget": self._mapped_text(item, "budget", field_map),
             }
             notices.append(
                 _parse.build_notice(
@@ -138,13 +146,15 @@ class CcgpSnapshotAdapter:
         return notices
 
     @staticmethod
-    def _first_text(item: dict[str, Any], *keys: str) -> str | None:
-        for key in keys:
-            value = item.get(key)
-            if isinstance(value, str):
-                return _parse.normalize_whitespace(value)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                return str(value)
+    def _mapped_text(
+        item: dict[str, Any], field: str, field_map: dict[str, str]
+    ) -> str | None:
+        key = field_map.get(field, field)
+        value = item.get(key)
+        if isinstance(value, str):
+            return _parse.normalize_whitespace(value)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return str(value)
         return None
 
     def load_expected(self, bundle: Path) -> list[dict[str, object]]:

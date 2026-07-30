@@ -225,6 +225,8 @@ class AuthorizedSourceClient:
             retrieved_at=timestamp,
             status_code=response.status_code,
             source_url=request_url,
+            response_items_field=self.endpoint.items_field,
+            notice_field_map=self.endpoint.notice_field_map,
         )
 
     async def _read_bounded_response(self, response: httpx.Response) -> bytes:

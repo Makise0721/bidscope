@@ -74,6 +74,8 @@ class AuthorizedAcquisitionMetadata(BaseModel):
     cursor_after: Annotated[str | None, Field(max_length=512)] = None
     request_count: Annotated[int, Field(ge=1, le=100)] = 1
     record_count: Annotated[int, Field(ge=0, le=1_000_000)] = 0
+    response_items_field: Annotated[str, Field(min_length=1, max_length=64)] = "items"
+    notice_field_map: dict[str, str] = Field(default_factory=dict, max_length=16)
     extra: dict[str, str] = Field(default_factory=dict, max_length=32)
 
     @field_validator("response_sha256")
@@ -86,21 +88,59 @@ class AuthorizedAcquisitionMetadata(BaseModel):
     @field_validator("extra")
     @classmethod
     def _validate_extra(cls, value: dict[str, str]) -> dict[str, str]:
+        total_length = 0
         for key, item in value.items():
             normalized = key.casefold().replace("-", "_")
-            if any(part in normalized for part in ("secret", "password", "credential", "signing")):
+            if len(key) > 64 or len(item) > 256:
+                raise ValueError("acquisition metadata fields are too long")
+            total_length += len(key) + len(item)
+            if total_length > 4096:
+                raise ValueError("acquisition metadata is too large")
+            if any(
+                part in normalized
+                for part in (
+                    "secret",
+                    "password",
+                    "credential",
+                    "signing",
+                    "api_key",
+                    "apikey",
+                    "access_key",
+                    "authorization",
+                    "auth",
+                    "token",
+                )
+            ):
                 raise ValueError("acquisition metadata contains credential-bearing fields")
-            if normalized in {
-                "api_key",
-                "access_token",
-                "authorization_header",
-                "client_id",
-                "headers",
-                "token",
-            }:
-                raise ValueError("acquisition metadata contains credential-bearing fields")
-            if any(marker in item.casefold() for marker in ("bearer ", "password=", "secret=")):
+            if any(
+                marker in item.casefold()
+                for marker in (
+                    "bearer ",
+                    "basic ",
+                    "password=",
+                    "secret=",
+                    "api-key",
+                    "authorization:",
+                )
+            ):
                 raise ValueError("acquisition metadata contains credential-bearing values")
+        return value
+
+    @field_validator("notice_field_map")
+    @classmethod
+    def _validate_notice_field_map(cls, value: dict[str, str]) -> dict[str, str]:
+        allowed_fields = {
+            "external_id",
+            "title",
+            "purchaser",
+            "region",
+            "publish_time",
+            "deadline",
+            "budget",
+        }
+        for key, item in value.items():
+            if key not in allowed_fields or not item.strip() or len(item) > 64:
+                raise ValueError("notice field mapping is invalid")
         return value
 
 
