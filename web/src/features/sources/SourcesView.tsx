@@ -18,7 +18,9 @@ function statusLabel(value: string): string {
 }
 
 function snapshotStatusLabel(value: string): string {
-  return value === "stale" ? "outdated" : statusLabel(value);
+  if (value === "stale") return "Stale";
+  if (value === "valid") return "Healthy";
+  return statusLabel(value);
 }
 
 function formatLag(seconds: number | null): string {

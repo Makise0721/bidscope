@@ -156,7 +156,7 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "test -n \"$${BIDSCOPE_CCGP_RUNNER_FACTORY}\" && kill -0 1"]
+      test: ["CMD", "bidscope", "ingestion", "healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3

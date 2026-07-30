@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
+from urllib.parse import urlsplit, urlunsplit
 
 import sqlalchemy as sa
 from fastapi import APIRouter, Depends, Query, Request
@@ -125,6 +126,32 @@ def _acquisition_counts(run: SourceAcquisitionRun | Any | None) -> dict[str, int
     }
 
 
+def _safe_source_urls(value: object) -> list[str]:
+    """Return bounded HTTPS URLs without query, fragment, or user-info data."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    safe_urls: list[str] = []
+    for raw in value[:20]:
+        if not isinstance(raw, str) or not raw:
+            continue
+        try:
+            parsed = urlsplit(raw)
+            if (
+                parsed.scheme.casefold() != "https"
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.port not in {None, 443}
+            ):
+                continue
+            safe = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+        except ValueError:
+            continue
+        if safe and safe not in safe_urls:
+            safe_urls.append(safe)
+    return safe_urls
+
+
 def _acquisition_run_row(run: SourceAcquisitionRun | Any) -> dict[str, Any]:
     return {
         "id": str(run.id),
@@ -203,6 +230,16 @@ def _acquisition_status_row(
     }
 
 
+def _source_acquisition_is_active(
+    cursor: SourceSyncCursor | Any | None,
+    run: SourceAcquisitionRun | Any | None,
+    *,
+    configured: bool,
+) -> bool:
+    """Use persisted acquisition state so the API can observe the worker role."""
+    return configured or cursor is not None or run is not None
+
+
 def _source_row(
     source: str,
     bundles: list[SnapshotBundle],
@@ -244,7 +281,7 @@ def _source_row(
             "bundle_id": latest.bundle_id,
             "file_identity": latest.bundle_id,
             "capture_kind": latest.capture_kind,
-            "source_urls": list(latest.source_urls or [])[:20],
+            "source_urls": _safe_source_urls(latest.source_urls),
             "retrieved_at": _iso(retrieved_at),
             "hash_prefix": hash_prefix,
             "parser_version": latest.parser_version,
@@ -317,7 +354,7 @@ async def list_source_status(
 ) -> dict[str, list[dict[str, Any]]]:
     """List bounded acquisition freshness metadata without source payloads."""
     settings = getattr(service, "settings", None)
-    enabled = bool(
+    configured = bool(
         getattr(settings, "live_ingestion_enabled", False)
         and getattr(settings, "process_role", None) == "ingestion"
     )
@@ -339,7 +376,11 @@ async def list_source_status(
                 cursor_by_source.get(source),
                 latest_run_by_source.get(source),
                 now=now,
-                enabled=enabled,
+                enabled=_source_acquisition_is_active(
+                    cursor_by_source.get(source),
+                    latest_run_by_source.get(source),
+                    configured=configured,
+                ),
                 poll_seconds=poll_seconds,
             )
             for source in sources

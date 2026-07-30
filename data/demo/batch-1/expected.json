@@ -16,6 +16,7 @@
         "raw_text": "680万元"
       },
       "summary": null,
+      "cancellation": false,
       "parser_version": "demo-v1",
       "raw_fields": {
         "synthetic_channel": "channel_a"
@@ -37,6 +38,7 @@
         "raw_text": "530万元"
       },
       "summary": null,
+      "cancellation": false,
       "parser_version": "demo-v1",
       "raw_fields": {
         "synthetic_channel": "channel_a"
@@ -58,6 +60,7 @@
         "raw_text": "480万元"
       },
       "summary": null,
+      "cancellation": false,
       "parser_version": "demo-v1",
       "raw_fields": {
         "synthetic_channel": "channel_a"
@@ -79,6 +82,7 @@
         "raw_text": "900万元"
       },
       "summary": null,
+      "cancellation": false,
       "parser_version": "demo-v1",
       "raw_fields": {
         "synthetic_channel": "channel_b"
@@ -100,6 +104,7 @@
         "raw_text": "1200万元"
       },
       "summary": null,
+      "cancellation": false,
       "parser_version": "demo-v1",
       "raw_fields": {
         "synthetic_channel": "channel_b"
@@ -121,6 +126,7 @@
         "raw_text": "500万元"
       },
       "summary": null,
+      "cancellation": false,
       "parser_version": "demo-v1",
       "raw_fields": {
         "synthetic_channel": "channel_a"
@@ -142,6 +148,7 @@
         "raw_text": "750万元"
       },
       "summary": null,
+      "cancellation": false,
       "parser_version": "demo-v1",
       "raw_fields": {
         "synthetic_channel": "channel_a"
@@ -163,6 +170,7 @@
         "raw_text": "600万元"
       },
       "summary": null,
+      "cancellation": false,
       "parser_version": "demo-v1",
       "raw_fields": {
         "synthetic_channel": "channel_b"
@@ -184,6 +192,7 @@
         "raw_text": "200万元"
       },
       "summary": null,
+      "cancellation": false,
       "parser_version": "demo-v1",
       "raw_fields": {
         "synthetic_channel": "channel_a"
@@ -205,6 +214,7 @@
         "raw_text": "560万元"
       },
       "summary": null,
+      "cancellation": false,
       "parser_version": "demo-v1",
       "raw_fields": {
         "synthetic_channel": "channel_a"
@@ -226,6 +236,7 @@
         "raw_text": "550万元"
       },
       "summary": null,
+      "cancellation": false,
       "parser_version": "demo-v1",
       "raw_fields": {
         "synthetic_channel": "channel_b"
@@ -247,6 +258,7 @@
         "raw_text": "680万元"
       },
       "summary": null,
+      "cancellation": false,
       "parser_version": "demo-v1",
       "raw_fields": {
         "synthetic_channel": "channel_b"

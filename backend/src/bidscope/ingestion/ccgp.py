@@ -29,6 +29,7 @@ from bidscope.ingestion.ports import (
 
 MAX_RETRY_AFTER_SECONDS = 86_400
 DEFAULT_RETRY_AFTER_SECONDS = 60
+MAX_CURSOR_LENGTH = 512
 
 
 class SourceClientError(RuntimeError):
@@ -243,6 +244,8 @@ class AuthorizedSourceClient:
         return b"".join(chunks)
 
     def _build_request(self, cursor: str | None) -> tuple[str, bytes]:
+        if cursor is not None and len(cursor) > MAX_CURSOR_LENGTH:
+            raise SourcePayloadError("source cursor exceeds the maximum length")
         fields = dict(self.endpoint.request_fields)
         if cursor is not None:
             fields[self.endpoint.cursor_field] = cursor
@@ -306,6 +309,8 @@ class AuthorizedSourceClient:
             raise SourcePayloadError(
                 f"{self.endpoint.next_cursor_field!r} must be a string or null"
             )
+        if raw_next_cursor is not None and len(raw_next_cursor) > MAX_CURSOR_LENGTH:
+            raise SourcePayloadError("source cursor exceeds the maximum length")
         return tuple(items), raw_next_cursor or None
 
     def _retry_after_seconds(self, response: httpx.Response) -> int:

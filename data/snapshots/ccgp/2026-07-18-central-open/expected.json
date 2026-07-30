@@ -16,6 +16,7 @@
         "raw_text": "人民币680万元"
       },
       "summary": null,
+      "cancellation": false,
       "parser_version": "ccgp-v1",
       "raw_fields": {}
     }

@@ -165,7 +165,7 @@ def build_notice(
     capture_kind: CaptureKind,
     parser_version: str,
     source_url: HttpUrl,
-    fields: dict[str, str | None],
+    fields: dict[str, Any],
     extra_raw_fields: dict[str, Any] | None = None,
 ) -> NormalizedNotice:
     """Construct a NormalizedNotice from a normalised fields dict.
@@ -198,6 +198,27 @@ def build_notice(
         publish_time=publish_time,
         deadline=deadline,
         budget=budget,
+        cancellation=_parse_cancellation(fields.get("cancellation")),
         parser_version=parser_version,
         raw_fields=raw_fields,
     )
+
+
+def _parse_cancellation(value: Any) -> bool:
+    """Normalize the small, explicit set of source withdrawal markers."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value == 1
+    if isinstance(value, str):
+        return value.strip().casefold() in {
+            "withdrawn",
+            "withdrawal",
+            "cancelled",
+            "canceled",
+            "撤回",
+            "取消",
+            "true",
+            "1",
+        }
+    return False

@@ -14,6 +14,8 @@ from bidscope.api.routes.runs import CreateRunBody, list_runs
 from bidscope.api.routes.sources import (
     _acquisition_run_row,
     _acquisition_status_row,
+    _safe_source_urls,
+    _source_acquisition_is_active,
     _source_row,
 )
 from bidscope.api.routes.subscriptions import pause_subscription, resume_subscription
@@ -162,6 +164,41 @@ def test_source_row_includes_import_warning_code_in_validation_warnings() -> Non
     row = _source_row("ccgp", [_bundle(retrieved_at)], {"bundle-db-id": import_record})
 
     assert "parse_drift" in row["validation_warnings"]
+
+
+def test_source_row_strips_query_and_fragment_from_display_urls() -> None:
+    bundle = _bundle(datetime(2026, 7, 30, tzinfo=UTC))
+    bundle.source_urls = [
+        "https://www.ccgp.gov.cn/tender/20260718?token=secret#details",
+        "https://user:password@www.ccgp.gov.cn/private",
+        "https://www.ccgp.gov.cn/tender/20260718",
+    ]
+
+    row = _source_row("ccgp", [bundle], {"bundle-db-id": _successful_import()})
+
+    assert row["latest_valid_bundle"]["source_urls"] == [
+        "https://www.ccgp.gov.cn/tender/20260718"
+    ]
+
+
+def test_api_observes_worker_state_from_persisted_acquisition_records() -> None:
+    assert not _source_acquisition_is_active(None, None, configured=False)
+    assert _source_acquisition_is_active(
+        SimpleNamespace(source="ccgp"), None, configured=False
+    )
+    assert _source_acquisition_is_active(
+        None, SimpleNamespace(source="ccgp"), configured=False
+    )
+
+
+def test_safe_source_urls_rejects_credentials_and_malformed_values() -> None:
+    assert _safe_source_urls(
+        [
+            "https://www.ccgp.gov.cn/path?secret=value",
+            "https://user:password@www.ccgp.gov.cn/path",
+            "https://[invalid/path",
+        ]
+    ) == ["https://www.ccgp.gov.cn/path"]
 
 
 def test_create_run_body_rejects_user_request_longer_than_4000_characters() -> None:

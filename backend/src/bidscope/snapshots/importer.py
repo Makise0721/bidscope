@@ -415,6 +415,7 @@ class SnapshotImporter:
             budget_minor_units=notice.budget.minor_units if notice.budget else None,
             budget_currency=notice.budget.currency if notice.budget else None,
             summary=notice.summary,
+            cancellation=notice.cancellation,
             raw_fields=dict(notice.raw_fields),
         )
 

@@ -40,6 +40,7 @@ from bidscope.graph.executor import run_setup_checkpoints
 from bidscope.ingestion.scheduler import (
     IngestionConfigurationError,
     IngestionDisabledError,
+    check_ingestion_readiness,
     run_ingestion_once,
     start_ingestion_loop,
 )
@@ -568,6 +569,18 @@ def ingestion_start() -> None:
         asyncio.run(start_ingestion_loop(get_settings(), sleep=asyncio.sleep))
     except (IngestionDisabledError, IngestionConfigurationError) as error:
         _ingestion_error(error)
+
+
+@ingestion_app.command("healthcheck")
+def ingestion_healthcheck() -> None:
+    """Check the isolated worker runner and persistence dependencies."""
+    _require_startup_settings()
+    configure_windows_selector_event_loop_policy()
+    try:
+        asyncio.run(check_ingestion_readiness(get_settings()))
+    except (IngestionDisabledError, IngestionConfigurationError) as error:
+        _ingestion_error(error)
+    typer.echo("ingestion ready")
 
 
 if __name__ == "__main__":

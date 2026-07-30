@@ -204,6 +204,7 @@ class SnapshotRepository:
         budget_currency: str | None,
         summary: str | None,
         raw_fields: dict[str, object],
+        cancellation: bool = False,
     ) -> NoticeVersion:
         version = NoticeVersion(
             source_notice_id=source_notice_id,
@@ -219,6 +220,7 @@ class SnapshotRepository:
             budget_minor_units=budget_minor_units,
             budget_currency=budget_currency,
             summary=summary,
+            cancellation=cancellation,
             raw_fields=raw_fields,
         )
         self.session.add(version)

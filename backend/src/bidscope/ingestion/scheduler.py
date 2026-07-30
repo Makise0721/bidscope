@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from bidscope.api.dependencies import create_object_store
 from bidscope.config import Settings
 from bidscope.db import create_engine_and_session
+from bidscope.delivery.objects import LocalObjectStore, S3ObjectStore
 
 INGESTION_ADVISORY_LOCK_KEY = int.from_bytes(
     hashlib.sha256(b"bidscope:authorized-ingestion:v1").digest()[:8],
@@ -97,6 +101,50 @@ async def run_ingestion_once(
             return await run_with_ingestion_lock(connection, run)
     finally:
         await engine.dispose()
+
+
+async def check_ingestion_readiness(
+    settings: Settings,
+    *,
+    runner_factory: Callable[[Settings], Callable[[], Awaitable[Any]]] | None = None,
+) -> dict[str, str]:
+    """Check runner construction, PostgreSQL, and object-store readiness."""
+    ensure_ingestion_enabled(settings)
+    resolved_factory = runner_factory or load_ingestion_runner_factory(settings)
+    try:
+        runner = resolved_factory(settings)
+    except Exception:
+        raise IngestionConfigurationError(
+            "authorized ingestion runner could not be constructed"
+        ) from None
+    if not callable(runner):
+        raise IngestionConfigurationError("authorized ingestion runner is not callable")
+
+    engine, _session_factory = create_engine_and_session(settings)
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(sa.text("SELECT 1"))
+
+        object_store = create_object_store(settings)
+        if isinstance(object_store, LocalObjectStore):
+            if not Path(object_store.root).is_dir():
+                raise OSError("local object store root is unavailable")
+        elif isinstance(object_store, S3ObjectStore):
+            await asyncio.to_thread(
+                object_store.client.head_bucket,
+                Bucket=object_store.bucket,
+            )
+        else:
+            raise TypeError("unsupported object store")
+    except IngestionConfigurationError:
+        raise
+    except Exception:
+        raise IngestionConfigurationError(
+            "authorized ingestion dependencies are unavailable"
+        ) from None
+    finally:
+        await engine.dispose()
+    return {"status": "ok"}
 
 
 def load_ingestion_runner_factory(

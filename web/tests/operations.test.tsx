@@ -169,7 +169,7 @@ describe("BidScope operational views", () => {
     expect(screen.getByText(/curated public excerpt/i)).toBeInTheDocument();
     expect(screen.getByText("ccgp-v1")).toBeInTheDocument();
     expect(screen.getByText("abc12345")).toBeInTheDocument();
-    expect(screen.getByText(/stale/i)).toBeInTheDocument();
+    expect(screen.getByText("Stale", { exact: true })).toBeInTheDocument();
     expect(screen.getByText(/snapshot_stale/i)).toBeInTheDocument();
     expect(screen.getByText("invalid", { exact: true })).toBeInTheDocument();
     expect(screen.getByText(/snapshot_integrity_error/i)).toBeInTheDocument();

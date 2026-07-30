@@ -16,6 +16,7 @@
         "raw_text": "920万元"
       },
       "summary": null,
+      "cancellation": false,
       "parser_version": "demo-v1",
       "raw_fields": {
         "synthetic_channel": "channel_a"
@@ -37,6 +38,7 @@
         "raw_text": "530万元"
       },
       "summary": null,
+      "cancellation": false,
       "parser_version": "demo-v1",
       "raw_fields": {
         "synthetic_channel": "channel_a"
@@ -58,6 +60,7 @@
         "raw_text": "480万元"
       },
       "summary": null,
+      "cancellation": false,
       "parser_version": "demo-v1",
       "raw_fields": {
         "synthetic_channel": "channel_a"
@@ -79,6 +82,7 @@
         "raw_text": "900万元"
       },
       "summary": null,
+      "cancellation": false,
       "parser_version": "demo-v1",
       "raw_fields": {
         "synthetic_channel": "channel_b"
@@ -100,6 +104,7 @@
         "raw_text": "640万元"
       },
       "summary": null,
+      "cancellation": false,
       "parser_version": "demo-v1",
       "raw_fields": {
         "synthetic_channel": "channel_a"
@@ -121,6 +126,7 @@
         "raw_text": "880万元"
       },
       "summary": null,
+      "cancellation": false,
       "parser_version": "demo-v1",
       "raw_fields": {
         "synthetic_channel": "channel_b"

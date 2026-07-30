@@ -274,3 +274,17 @@ async def test_fetch_page_rejects_malformed_page_shape() -> None:
             await client.fetch_page(None)
     finally:
         await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fetch_page_rejects_overlong_next_cursor() -> None:
+    client, _signer, http_client = _client(
+        lambda _request: httpx.Response(
+            200, json={"items": [], "next_cursor": "x" * 513}
+        )
+    )
+    try:
+        with pytest.raises(SourcePayloadError, match="cursor"):
+            await client.fetch_page(None)
+    finally:
+        await http_client.aclose()

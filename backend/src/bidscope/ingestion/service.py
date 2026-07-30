@@ -22,6 +22,7 @@ from bidscope.ingestion.materializer import BundleQuarantineError
 from bidscope.ingestion.ports import (
     AcquisitionRepository,
     AuditRecorder,
+    AuthorizedSourcePage,
     BundleMaterializer,
     Committer,
     SnapshotImporterPort,
@@ -32,6 +33,8 @@ from bidscope.observability import METRICS_REGISTRY
 from bidscope.snapshots.importer import SnapshotImportError
 
 MAX_PAGES_PER_RUN = 100
+MAX_TRANSIENT_RETRIES = 2
+MAX_TRANSIENT_BACKOFF_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -120,7 +123,7 @@ class IngestionService:
 
         try:
             for page_index in range(self.max_pages_per_run):
-                page = await self.source_client.fetch_page(request_cursor)
+                page = await self._fetch_page_with_retry(request_cursor)
                 request_count += 1
                 record_count += len(page.items)
                 last_retrieved_at = page.retrieved_at
@@ -263,6 +266,23 @@ class IngestionService:
             last_retrieved_at=last_retrieved_at,
             started_monotonic=started_monotonic,
         )
+
+    async def _fetch_page_with_retry(self, cursor: str | None) -> AuthorizedSourcePage:
+        """Retry only transient transport failures with bounded exponential backoff."""
+        attempts = 0
+        while True:
+            try:
+                return await self.source_client.fetch_page(cursor)
+            except SourceClientError as error:
+                if (
+                    not error.retryable
+                    or isinstance(error, SourceRateLimitedError)
+                    or attempts >= MAX_TRANSIENT_RETRIES
+                ):
+                    raise
+                delay = min(2**attempts, MAX_TRANSIENT_BACKOFF_SECONDS)
+                attempts += 1
+                await self.sleep(delay)
 
     async def _finish(
         self,

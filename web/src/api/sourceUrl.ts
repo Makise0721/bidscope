@@ -21,6 +21,8 @@ export function isAllowedSourceUrl(source: string, value: string): boolean {
       url.port === "" &&
       url.username === "" &&
       url.password === "" &&
+      url.search === "" &&
+      url.hash === "" &&
       hosts.has(url.hostname)
     );
   } catch {

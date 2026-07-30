@@ -812,6 +812,7 @@ class SubscriptionService:
             budget_minor_units=version.budget_minor_units,
             budget_currency=version.budget_currency,
             deadline=version.deadline,
+            cancellation=getattr(version, "cancellation", False),
             claim_supporting_texts=evidence_texts,
         )
 

@@ -27,6 +27,7 @@ class NormalizedNotice(BaseModel):
     deadline: AwareDatetime | None = None
     budget: Money | None = None
     summary: str | None = None
+    cancellation: bool = False
     parser_version: str
     raw_fields: Annotated[dict[str, Any], Field(default_factory=dict)]
 

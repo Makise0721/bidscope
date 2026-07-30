@@ -81,6 +81,7 @@ def _apply_structured_filters(
     statement: SelectStatement, filters: RetrievalFilter
 ) -> SelectStatement:
     """Apply structured filters to a notice_versions statement."""
+    statement = statement.where(NoticeVersion.cancellation.is_(False))
     if filters.regions:
         statement = statement.where(
             sa.or_(

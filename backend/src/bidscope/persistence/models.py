@@ -92,6 +92,9 @@ class NoticeVersion(Base, TimestampMixin):
     budget_minor_units: Mapped[int | None] = mapped_column(sa.BigInteger)
     budget_currency: Mapped[str | None] = mapped_column(sa.Text)
     summary: Mapped[str | None] = mapped_column(sa.Text)
+    cancellation: Mapped[bool] = mapped_column(
+        sa.Boolean, server_default=sa.text("false"), nullable=False
+    )
     raw_fields: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=_EMPTY_JSON)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(1024))
 

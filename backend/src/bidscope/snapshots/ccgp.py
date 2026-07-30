@@ -133,6 +133,7 @@ class CcgpSnapshotAdapter:
                 "publish_time": self._mapped_text(item, "publish_time", field_map),
                 "deadline": self._mapped_text(item, "deadline", field_map),
                 "budget": self._mapped_text(item, "budget", field_map),
+                "cancellation": self._mapped_cancellation(item, field_map),
             }
             notices.append(
                 _parse.build_notice(
@@ -156,6 +157,24 @@ class CcgpSnapshotAdapter:
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return str(value)
         return None
+
+    @staticmethod
+    def _mapped_cancellation(item: dict[str, Any], field_map: dict[str, str]) -> bool:
+        """Map explicit withdrawal/cancellation markers without guessing status."""
+        cancellation_key = field_map.get("cancellation", "cancellation")
+        withdrawn_key = field_map.get("withdrawn", "withdrawn")
+        status_key = field_map.get("status", "status")
+        values = (item.get(cancellation_key), item.get(withdrawn_key), item.get(status_key))
+        return any(
+            value is True
+            or (isinstance(value, (int, float)) and not isinstance(value, bool) and value == 1)
+            or (
+                isinstance(value, str)
+                and value.strip().casefold()
+                in {"withdrawn", "withdrawal", "cancelled", "canceled", "撤回", "取消", "true", "1"}
+            )
+            for value in values
+        )
 
     def load_expected(self, bundle: Path) -> list[dict[str, object]]:
         return _parse.load_expected(bundle)

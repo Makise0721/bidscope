@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from bidscope.domain.enums import CaptureKind, SourceName
 from bidscope.snapshots import _parse
 from bidscope.snapshots.ccgp import CcgpSnapshotAdapter
 
@@ -56,6 +57,19 @@ def test_ccgp_parses_curated_excerpt_fields(project_root: Path) -> None:
     assert notice.budget.minor_units == 680_000_000
     assert notice.budget.raw_text == "人民币680万元"
     assert notice.parser_version == "ccgp-v1"
+
+
+def test_ccgp_maps_explicit_withdrawal_markers() -> None:
+    assert CcgpSnapshotAdapter._mapped_cancellation({"withdrawn": True}, {}) is True
+    assert CcgpSnapshotAdapter._mapped_cancellation({"status": "cancelled"}, {}) is True
+    notice = _parse.build_notice(
+        source=SourceName.CCGP,
+        capture_kind=CaptureKind.RAW_RESPONSE,
+        parser_version="ccgp-authorized-v1",
+        source_url="https://www.ccgp.gov.cn/authorized/v1/notices",
+        fields={"external_id": "withdrawn-1", "title": "Withdrawn", "cancellation": True},
+    )
+    assert notice.cancellation is True
 
 
 def test_ccgp_drift_when_title_element_missing(

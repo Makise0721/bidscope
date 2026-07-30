@@ -70,6 +70,17 @@ class RateLimitedSourceClient:
         raise SourceRateLimitedError(30)
 
 
+class RetryableSourceClient:
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    async def fetch_page(self, cursor: str | None) -> AuthorizedSourcePage:
+        self.attempts += 1
+        if self.attempts < 3:
+            raise SourceTimeoutError()
+        return _page(cursor, None, "n-recovered")
+
+
 class FakeRepository:
     def __init__(self, events: list[str], fail_at: str | None) -> None:
         self.events = events
@@ -343,8 +354,38 @@ async def test_run_once_records_bounded_rate_limit_without_advancing_cursor() ->
     assert result.retry_after_seconds == 30
     assert repository.advanced is False
 
+
+@pytest.mark.asyncio
+async def test_run_once_retries_transient_timeouts_with_bounded_backoff() -> None:
+    events: list[str] = []
+    source_client = RetryableSourceClient()
+    service = IngestionService(
+        source_client=source_client,
+        acquisition_repository=FakeRepository(events, None),
+        object_store=FakeObjectStore(events, None),
+        materializer=FakeMaterializer(events, None),
+        importer=FakeImporter(events, None),
+        data_contract=_contract(),
+        batch_id="ccgp-batch-20260730",
+        clock=FixedClock(FIXED_NOW),
+        sleep=lambda seconds: _record_sleep_value(events, seconds),
+        commit=lambda: _record_commit(events),
+        audit=lambda _details: _record_audit(events),
+    )
+
+    result = await service.run_once()
+
+    assert result.status == "success"
+    assert source_client.attempts == 3
+    assert events.count("sleep:1") == 1
+    assert events.count("sleep:2") == 1
+
 async def _record_sleep(events: list[str]) -> None:
     events.append("sleep")
+
+
+async def _record_sleep_value(events: list[str], seconds: float) -> None:
+    events.append(f"sleep:{seconds:g}")
 
 
 async def _record_commit(events: list[str]) -> None:
