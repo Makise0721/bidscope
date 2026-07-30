@@ -6,6 +6,7 @@ import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from hashlib import sha256
+from traceback import format_exception
 
 import httpx
 import pytest
@@ -13,6 +14,7 @@ from bidscope.clock import FixedClock
 from bidscope.ingestion.ccgp import (
     AuthorizedSourceClient,
     SourceAuthorizationError,
+    SourceClientError,
     SourceHTTPError,
     SourcePayloadError,
     SourceRateLimitedError,
@@ -40,6 +42,13 @@ class RecordingSigner:
 class FailingSigner:
     def sign(self, _request: SignableRequest) -> dict[str, str]:
         raise RuntimeError("private-key-material")
+
+
+class FailingSourceErrorSigner:
+    def sign(self, _request: SignableRequest) -> dict[str, str]:
+        raise SourceClientError(
+            "private-key-material", code="secret_failure", retryable=True
+        )
 
 
 def _endpoint() -> AuthorizedEndpoint:
@@ -199,6 +208,24 @@ async def test_fetch_page_redacts_signer_failures_as_non_retryable_source_errors
     assert error.value.code == "signature_failed"
     assert error.value.retryable is False
     assert "private-key-material" not in str(error.value)
+    assert error.value.__cause__ is None
+    assert "private-key-material" not in "".join(format_exception(error.value))
+
+
+@pytest.mark.asyncio
+async def test_fetch_page_redacts_source_error_raised_by_signer() -> None:
+    client, _signer, http_client = _client(
+        lambda _request: httpx.Response(200), FailingSourceErrorSigner()
+    )
+    try:
+        with pytest.raises(SourceSigningError) as error:
+            await client.fetch_page(None)
+    finally:
+        await http_client.aclose()
+
+    assert error.value.code == "signature_failed"
+    assert error.value.__cause__ is None
+    assert "private-key-material" not in "".join(format_exception(error.value))
 
 
 @pytest.mark.asyncio

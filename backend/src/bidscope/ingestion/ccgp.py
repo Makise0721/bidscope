@@ -179,10 +179,9 @@ class AuthorizedSourceClient:
                     client_id=self.client_id,
                 )
             )
-        except SourceClientError:
-            raise
         except Exception as error:
-            raise SourceSigningError() from error
+            del error
+            raise SourceSigningError() from None
         headers = {"Accept": "application/json", **signed}
         if self.endpoint.method == "POST":
             headers["Content-Type"] = "application/json"
