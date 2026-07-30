@@ -64,6 +64,7 @@ def test_compose_production_services_share_required_settings_without_literal_sec
 
     assert "x-production-environment: &production-environment" in compose
     assert compose.count("<<: *production-environment") == 3
+    assert "x-ingestion-environment: &ingestion-environment" in compose
     assert "BIDSCOPE_APP_MODE: production" in compose
     assert "BIDSCOPE_OBJECT_STORE_TYPE: s3" in compose
     assert "BIDSCOPE_APP_MODE: demo" not in compose
@@ -156,6 +157,10 @@ def test_rendered_compose_keeps_infrastructure_unpublished(
         environment = services[service_name]["environment"]
         assert environment["BIDSCOPE_MODEL_BASE_URL"] == "https://model.example.test/v1"
         assert environment["BIDSCOPE_MODEL_NAME"] == "model-sentinel"
+    ingestion_environment = services["ingestion"]["environment"]
+    assert "BIDSCOPE_ADMIN_TOKEN" not in ingestion_environment
+    assert "BIDSCOPE_MODEL_API_KEY" not in ingestion_environment
+    assert "BIDSCOPE_CHECKPOINT_DATABASE_URL" not in ingestion_environment
 
 
 def test_dockerfile_includes_postgres_backup_tools_and_writable_backup_root() -> None:
@@ -237,7 +242,7 @@ def test_compose_requires_preencoded_postgres_dsns_and_keeps_service_credentials
     assert compose.count(
         "BIDSCOPE_DATABASE_URL: ${BIDSCOPE_DATABASE_URL:?set BIDSCOPE_DATABASE_URL to a "
         "pre-encoded PostgreSQL application DSN}"
-    ) == 3
+    ) == 4
     assert compose.count(
         "BIDSCOPE_CHECKPOINT_DATABASE_URL: "
         "${BIDSCOPE_CHECKPOINT_DATABASE_URL:?set BIDSCOPE_CHECKPOINT_DATABASE_URL to a "
@@ -316,6 +321,20 @@ def compose_environment() -> dict[str, str]:
                 "postgresql+psycopg://bidscope:p%40ss%3Aword%2F%3F%23%5B%5D"
                 "@postgres:5432/bidscope"
             ),
+            "BIDSCOPE_LIVE_INGESTION_ENABLED": "true",
+            "BIDSCOPE_CCGP_API_BASE_URL": "https://www.ccgp.gov.cn",
+            "BIDSCOPE_CCGP_CLIENT_ID": "staging-client",
+            "BIDSCOPE_CCGP_SIGNING_KEY": "staging-signing-key",
+            "BIDSCOPE_CCGP_RUNNER_FACTORY": "bidscope.ingestion.operator:build_runner",
+            "BIDSCOPE_CCGP_AUTHORIZATION_REF": "staging-authorization",
+            "BIDSCOPE_CCGP_DATA_CONTRACT_VERSION": "ccgp-authorized-v1",
+            "BIDSCOPE_CCGP_DATA_OWNER": "staging-owner",
+            "BIDSCOPE_CCGP_DATA_REGIONS": '["national"]',
+            "BIDSCOPE_CCGP_DATA_CATEGORIES": '["procurement"]',
+            "BIDSCOPE_CCGP_DATA_REVIEW_STATUS": "approved",
+            "BIDSCOPE_CCGP_DATA_REVIEWED_AT": "2026-07-30T00:00:00Z",
+            "BIDSCOPE_CCGP_DATA_UPDATE_SLA": "weekly",
+            "BIDSCOPE_CCGP_DATA_RETENTION_DAYS": "365",
         }
     )
     return environment

@@ -292,6 +292,12 @@ class SourceAcquisitionRun(Base):
     )
     response_object_key: Mapped[str | None] = mapped_column(sa.String(512))
     response_sha256: Mapped[str | None] = mapped_column(sa.String(64))
+    response_object_keys: Mapped[list[str]] = mapped_column(
+        JSONB, server_default=_JSON_ARRAY, nullable=False
+    )
+    response_sha256s: Mapped[list[str]] = mapped_column(
+        JSONB, server_default=_JSON_ARRAY, nullable=False
+    )
     http_status: Mapped[int | None] = mapped_column(sa.SmallInteger)
     retry_after_seconds: Mapped[int | None] = mapped_column(sa.Integer)
     failure_code: Mapped[str | None] = mapped_column(sa.String(64))

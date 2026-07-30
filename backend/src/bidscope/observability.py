@@ -303,13 +303,20 @@ class MetricsRegistry:
                 raise ValueError(f"invalid value for label {label_name}")
         return tuple(sorted(supplied.items()))
 
-    def counter(self, name: str, labels: Mapping[str, str] | None = None) -> None:
+    def counter(
+        self,
+        name: str,
+        labels: Mapping[str, str] | None = None,
+        amount: int = 1,
+    ) -> None:
         definition = _METRIC_DEFINITIONS.get(name)
         if definition is None or definition.kind != "counter":
             raise ValueError(f"metric is not a counter: {name}")
+        if amount < 0:
+            raise ValueError("counter amount must be non-negative")
         key = (name, self._labels_key(name, labels))
         with self._lock:
-            self._values[key] += 1
+            self._values[key] += amount
 
     def observe(self, name: str, value: float, labels: Mapping[str, str] | None = None) -> None:
         definition = _METRIC_DEFINITIONS.get(name)

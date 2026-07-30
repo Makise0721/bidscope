@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from bidscope.config import Settings
+from bidscope.db import create_engine_and_session
 
 INGESTION_ADVISORY_LOCK_KEY = int.from_bytes(
     hashlib.sha256(b"bidscope:authorized-ingestion:v1").digest()[:8],
@@ -79,13 +81,46 @@ async def run_ingestion_once(
     *,
     runner_factory: Callable[[Settings], Callable[[], Awaitable[Any]]] | None = None,
 ) -> Any:
-    """Validate role controls and execute an injected authorized runner."""
+    """Validate role controls, acquire the worker lock, and run one acquisition."""
     ensure_ingestion_enabled(settings)
-    if runner_factory is None:
+    resolved_factory = runner_factory or load_ingestion_runner_factory(settings)
+    runner = resolved_factory(settings)
+    if not callable(runner):
+        raise IngestionConfigurationError("authorized ingestion runner is not callable")
+
+    async def run() -> Any:
+        return await runner()
+
+    engine, _session_factory = create_engine_and_session(settings)
+    try:
+        async with engine.connect() as connection:
+            return await run_with_ingestion_lock(connection, run)
+    finally:
+        await engine.dispose()
+
+
+def load_ingestion_runner_factory(
+    settings: Settings,
+) -> Callable[[Settings], Callable[[], Awaitable[Any]]]:
+    """Load the operator-supplied endpoint/signing adapter without guessing it."""
+    reference = settings.ccgp_runner_factory
+    if not reference or ":" not in reference:
         raise IngestionConfigurationError(
             "authorized ingestion signer and endpoint runner are not configured"
         )
-    return await runner_factory(settings)()
+    module_name, attribute = reference.split(":", 1)
+    try:
+        module = importlib.import_module(module_name)
+        factory = getattr(module, attribute)
+    except Exception:
+        raise IngestionConfigurationError(
+            "authorized ingestion signer and endpoint runner are not available"
+        ) from None
+    if not callable(factory):
+        raise IngestionConfigurationError(
+            "authorized ingestion runner factory is not callable"
+        )
+    return cast(Callable[[Settings], Callable[[], Awaitable[Any]]], factory)
 
 
 async def start_ingestion_loop(
@@ -96,6 +131,22 @@ async def start_ingestion_loop(
 ) -> None:
     """Run the bounded polling loop; the caller owns graceful shutdown."""
     ensure_ingestion_enabled(settings)
+    resolved_factory = runner_factory or load_ingestion_runner_factory(settings)
     while True:
-        await run_ingestion_once(settings, runner_factory=runner_factory)
-        await sleep(settings.ccgp_poll_seconds)
+        result = await run_ingestion_once(settings, runner_factory=resolved_factory)
+        status = (
+            result.get("status")
+            if isinstance(result, dict)
+            else getattr(result, "status", None)
+        )
+        retry_after = (
+            result.get("retry_after_seconds")
+            if isinstance(result, dict)
+            else getattr(result, "retry_after_seconds", None)
+        )
+        delay = (
+            bounded_retry_delay_seconds(retry_after)
+            if status == "rate_limited"
+            else settings.ccgp_poll_seconds
+        )
+        await sleep(delay)

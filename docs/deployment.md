@@ -119,8 +119,11 @@ environment. Never put those credentials in the API or scheduler environment.
 The worker must be deployed with outbound access limited to the configured
 official CCGP host and must not be replaced with browser automation, HTML
 scraping, undocumented endpoint probing, CAPTCHA bypass, or retry behavior that
-defeats source controls. A missing, invalid, or incomplete authorization
-configuration fails closed before any source request.
+defeats source controls. Set `BIDSCOPE_CCGP_RUNNER_FACTORY` to the
+operator-supplied `module:attribute` entry point that constructs the exact
+approved endpoint contract and signing implementation; the application never
+guesses either. A missing, invalid, or incomplete authorization configuration
+fails closed before any source request.
 
 ## Required Production Variables
 

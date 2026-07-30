@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from datetime import datetime
 from functools import lru_cache
@@ -258,6 +259,9 @@ class Settings(BaseSettings):
     ccgp_api_base_url: AnyHttpUrl | None = None
     ccgp_client_id: SecretStr | None = None
     ccgp_signing_key: SecretStr | None = None
+    #: Dotted entry point supplied by the authorized operator. The application
+    #: never guesses endpoint fields or a signing algorithm.
+    ccgp_runner_factory: str | None = Field(default=None, max_length=256)
     ccgp_authorization_ref: str | None = Field(default=None, max_length=256)
     ccgp_poll_seconds: int = Field(default=900, ge=60)
     ccgp_request_timeout_seconds: int = Field(default=20, gt=0)
@@ -357,6 +361,8 @@ class Settings(BaseSettings):
     def validate_production_admin_token(self) -> Settings:
         if self.app_mode not in {"development", "production"}:
             return self
+        if self.app_mode == "production" and self.process_role == "ingestion":
+            return self
 
         raw_token = self._secret_text(self.admin_token)
         if raw_token is not None:
@@ -431,6 +437,7 @@ class Settings(BaseSettings):
             "ccgp_data_reviewed_at": self.ccgp_data_reviewed_at,
             "ccgp_data_update_sla": self.ccgp_data_update_sla,
             "ccgp_data_retention_days": self.ccgp_data_retention_days,
+            "ccgp_runner_factory": self.ccgp_runner_factory,
         }
         missing = [name for name, value in required_values.items() if self._is_blank(value)]
         if not self.ccgp_data_regions:
@@ -441,6 +448,10 @@ class Settings(BaseSettings):
             raise ValueError(
                 "live_ingestion_enabled requires non-empty values for: " + ", ".join(missing)
             )
+        if self.ccgp_runner_factory is None or not re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_.]*:[A-Za-z_][A-Za-z0-9_]*", self.ccgp_runner_factory
+        ):
+            raise ValueError("ccgp_runner_factory must be a bounded module:attribute reference")
         for field_name, values in (
             ("ccgp_data_regions", self.ccgp_data_regions),
             ("ccgp_data_categories", self.ccgp_data_categories),
@@ -525,23 +536,29 @@ class Settings(BaseSettings):
             return self
 
         invalid_fields: list[str] = []
-        for field_name in self._dsn_field_names:
+        dsn_fields = (
+            frozenset({"database_url"})
+            if self.process_role == "ingestion"
+            else self._dsn_field_names
+        )
+        for field_name in dsn_fields:
             value = self._secret_text(getattr(self, field_name))
             if not self._is_valid_production_dsn(field_name, value):
                 invalid_fields.append(field_name)
         if self.object_store_type != "s3":
             invalid_fields.append("object_store_type")
-        if not self.allowed_origins or any(
-            "*" in str(origin) or not self._is_exact_production_origin(origin)
-            for origin in self.allowed_origins
-        ):
-            invalid_fields.append("allowed_origins")
-        if not self.trusted_hosts or any(
-            not host.strip() or "*" in host for host in self.trusted_hosts
-        ):
-            invalid_fields.append("trusted_hosts")
-        if self.external_scheme != "https":
-            invalid_fields.append("external_scheme")
+        if self.process_role != "ingestion":
+            if not self.allowed_origins or any(
+                "*" in str(origin) or not self._is_exact_production_origin(origin)
+                for origin in self.allowed_origins
+            ):
+                invalid_fields.append("allowed_origins")
+            if not self.trusted_hosts or any(
+                not host.strip() or "*" in host for host in self.trusted_hosts
+            ):
+                invalid_fields.append("trusted_hosts")
+            if self.external_scheme != "https":
+                invalid_fields.append("external_scheme")
         if invalid_fields:
             raise ValueError("production requires valid values for: " + ", ".join(invalid_fields))
         return self

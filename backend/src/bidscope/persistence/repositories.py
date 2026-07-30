@@ -364,6 +364,8 @@ class SourceAcquisitionRepository:
         imported_notice_count: int | None = None,
         response_object_key: str | None = None,
         response_sha256: str | None = None,
+        response_object_keys: list[str] | None = None,
+        response_sha256s: list[str] | None = None,
         http_status: int | None = None,
         retry_after_seconds: int | None = None,
         failure_code: str | None = None,
@@ -396,6 +398,10 @@ class SourceAcquisitionRepository:
             run.response_object_key = response_object_key
         if response_sha256 is not None:
             run.response_sha256 = response_sha256
+        if response_object_keys is not None:
+            run.response_object_keys = list(response_object_keys)
+        if response_sha256s is not None:
+            run.response_sha256s = list(response_sha256s)
         if http_status is not None:
             run.http_status = http_status
         if retry_after_seconds is not None:

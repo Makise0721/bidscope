@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 import sqlalchemy as sa
 from bidscope import cli
 from bidscope.config import Settings
+from bidscope.ingestion import scheduler as ingestion_scheduler
 from bidscope.ingestion.scheduler import (
     INGESTION_ADVISORY_LOCK_KEY,
     IngestionConfigurationError,
@@ -35,6 +37,7 @@ def _enabled_settings() -> Settings:
         ccgp_api_base_url="https://www.ccgp.gov.cn",
         ccgp_client_id="operator-client",
         ccgp_signing_key="operator-signing-key",
+        ccgp_runner_factory="bidscope.ingestion.operator:build_runner",
         ccgp_authorization_ref="pilot-20260730",
         ccgp_data_contract_version="ccgp-authorized-v1",
         ccgp_data_owner="operator",
@@ -91,6 +94,54 @@ class _SharedLockConnection:
         return _FakeResult(True)
 
 
+class _ConnectionContext:
+    def __init__(self, connection: _SharedLockConnection) -> None:
+        self.connection = connection
+
+    async def __aenter__(self) -> _SharedLockConnection:
+        return self.connection
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+
+class _FakeEngine:
+    def __init__(self, connection: _SharedLockConnection) -> None:
+        self.connection = connection
+        self.disposed = False
+
+    def connect(self) -> _ConnectionContext:
+        return _ConnectionContext(self.connection)
+
+    async def dispose(self) -> None:
+        self.disposed = True
+
+
+@pytest.mark.asyncio
+async def test_run_once_uses_the_database_advisory_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _SharedLockConnection()
+    engine = _FakeEngine(connection)
+    monkeypatch.setattr(
+        ingestion_scheduler,
+        "create_engine_and_session",
+        lambda _settings: (engine, None),
+    )
+
+    async def runner() -> dict[str, str]:
+        return {"status": "success"}
+
+    result = await ingestion_scheduler.run_ingestion_once(
+        _enabled_settings(),
+        runner_factory=lambda _settings: runner,
+    )
+
+    assert result == {"status": "success"}
+    assert connection.held is False
+    assert engine.disposed is True
+
+
 @pytest.mark.asyncio
 async def test_two_workers_share_one_nonblocking_ingestion_lock() -> None:
     connection = _SharedLockConnection()
@@ -114,6 +165,39 @@ async def test_two_workers_share_one_nonblocking_ingestion_lock() -> None:
     assert runs == 1
     assert first_result == {"status": "success"}
     assert second == {"status": "skipped", "reason": "ingestion_lock_not_acquired"}
+
+
+@pytest.mark.asyncio
+async def test_ingestion_loop_honors_bounded_rate_limit_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _enabled_settings()
+    sleeps: list[float] = []
+    calls = 0
+
+    async def runner() -> SimpleNamespace:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return SimpleNamespace(status="rate_limited", retry_after_seconds=30)
+        raise RuntimeError("stop fixture loop")
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 1:
+            return
+
+    monkeypatch.setattr(
+        "bidscope.ingestion.scheduler.run_ingestion_once",
+        lambda _settings, runner_factory=None: runner(),
+    )
+
+    with pytest.raises(RuntimeError, match="stop fixture loop"):
+        from bidscope.ingestion.scheduler import start_ingestion_loop
+
+        await start_ingestion_loop(settings, runner_factory=lambda _settings: runner, sleep=sleep)
+
+    assert sleeps == [30]
 
 
 def test_ingestion_cli_run_once_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:

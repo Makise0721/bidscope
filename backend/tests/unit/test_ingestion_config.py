@@ -37,6 +37,7 @@ def _complete_live_settings() -> dict[str, object]:
         "ccgp_api_base_url": "https://www.ccgp.gov.cn",
         "ccgp_client_id": "client-id",
         "ccgp_signing_key": "signing-key",
+        "ccgp_runner_factory": "bidscope.ingestion.operator:build_runner",
         "ccgp_authorization_ref": "approval-2026-001",
         "ccgp_data_contract_version": "ccgp-authorized-v1",
         "ccgp_data_owner": "authorized-operator",
@@ -100,6 +101,7 @@ def test_enabled_production_ingestion_requires_complete_authorization_contract()
     (
         "ccgp_client_id",
         "ccgp_signing_key",
+        "ccgp_runner_factory",
         "ccgp_authorization_ref",
         "ccgp_data_contract_version",
         "ccgp_data_owner",

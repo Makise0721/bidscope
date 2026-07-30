@@ -80,6 +80,7 @@ class FakeRepository:
         self.run = SimpleNamespace(id="run-1")
         self.advanced = False
         self.finalized_status: str | None = None
+        self.finalize_kwargs: dict[str, Any] = {}
 
     async def get_or_create_source_sync_cursor(self, **kwargs: Any) -> Any:
         self.events.append("cursor_read")
@@ -101,6 +102,7 @@ class FakeRepository:
     async def finalize_acquisition_run(self, **kwargs: Any) -> Any:
         self.events.append(f"run_finalize:{kwargs['status']}")
         self.finalized_status = kwargs["status"]
+        self.finalize_kwargs = kwargs
         return self.run
 
 
@@ -177,6 +179,13 @@ async def test_run_once_orders_acquire_store_materialize_import_then_cursor_comm
     assert events.index("materialize") < events.index("import")
     assert events.index("import") < events.index("cursor_advance")
     assert events.index("cursor_advance") < events.index("audit") < events.index("commit")
+    assert repository.finalize_kwargs["response_object_keys"] == [
+        f"acquisitions/ccgp/{sha256(page).hexdigest()}.json"
+        for page in (
+            _page("cursor-1", "cursor-2", "n-1").response_bytes,
+            _page("cursor-2", None, "n-2").response_bytes,
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -210,6 +219,53 @@ async def test_run_once_failures_do_not_advance_cursor_and_are_recorded(fail_at:
     assert repository.advanced is False
     assert repository.finalized_status in {"failed", "quarantined"}
     assert "commit" in events
+
+
+@pytest.mark.asyncio
+async def test_single_terminal_page_records_cursor_success_watermark() -> None:
+    events: list[str] = []
+    repository = FakeRepository(events, None)
+    service = IngestionService(
+        source_client=FakeSourceClient([_page("cursor-1", None, "n-1")], events, None),
+        acquisition_repository=repository,
+        object_store=FakeObjectStore(events, None),
+        materializer=FakeMaterializer(events, None),
+        importer=FakeImporter(events, None),
+        data_contract=_contract(),
+        batch_id="ccgp-batch-20260730",
+        clock=FixedClock(FIXED_NOW),
+        commit=lambda: _record_commit(events),
+        audit=lambda _details: _record_audit(events),
+    )
+
+    result = await service.run_once()
+
+    assert result.status == "success"
+    assert result.cursor_after is None
+    assert repository.advanced is True
+    assert repository.cursor.cursor_value == "cursor-1"
+
+
+@pytest.mark.asyncio
+async def test_failed_object_write_does_not_persist_an_object_key() -> None:
+    events: list[str] = []
+    repository = FakeRepository(events, "object")
+    service = IngestionService(
+        source_client=FakeSourceClient([_page("cursor-1", None, "n-1")], events, "object"),
+        acquisition_repository=repository,
+        object_store=FakeObjectStore(events, "object"),
+        materializer=FakeMaterializer(events, "object"),
+        importer=FakeImporter(events, "object"),
+        data_contract=_contract(),
+        batch_id="ccgp-batch-20260730",
+        clock=FixedClock(FIXED_NOW),
+        commit=lambda: _record_commit(events),
+        audit=lambda _details: _record_audit(events),
+    )
+
+    await service.run_once()
+
+    assert repository.finalize_kwargs["response_object_key"] is None
 
 
 @pytest.mark.asyncio

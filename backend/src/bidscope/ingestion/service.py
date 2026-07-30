@@ -7,6 +7,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from hashlib import sha256
 from typing import Literal
 
 from bidscope.audit import AuditEventType, AuditOutcome
@@ -107,6 +108,8 @@ class IngestionService:
         last_retrieved_at = started_at
         response_object_key: str | None = None
         response_sha256: str | None = None
+        response_object_keys: list[str] = []
+        response_sha256s: list[str] = []
         http_status: int | None = None
 
         try:
@@ -115,13 +118,14 @@ class IngestionService:
                 request_count += 1
                 record_count += len(page.items)
                 last_retrieved_at = page.retrieved_at
-                response_sha256 = page.response_sha256
                 http_status = page.status_code
-                response_object_key = (
-                    f"acquisitions/{self.source}/{run_id}/"
-                    f"{request_count}-{page.response_sha256}.json"
-                )
-                self.object_store.put_bytes(response_object_key, page.response_bytes)
+                actual_response_sha256 = sha256(page.response_bytes).hexdigest()
+                page_object_key = f"acquisitions/{self.source}/{actual_response_sha256}.json"
+                self.object_store.put_bytes(page_object_key, page.response_bytes)
+                response_object_key = page_object_key
+                response_sha256 = actual_response_sha256
+                response_object_keys.append(page_object_key)
+                response_sha256s.append(actual_response_sha256)
                 bundle = self.materializer.materialize(
                     page, batch_id=self.batch_id, data_contract=self.data_contract
                 )
@@ -147,32 +151,16 @@ class IngestionService:
             else:
                 raise SourcePayloadError("maximum pages per acquisition run exceeded")
 
-            if last_cursor != cursor_before:
-                advanced = await self.acquisition_repository.advance_source_sync_cursor(
-                    source=self.source,
-                    expected_version=int(cursor.version),
-                    cursor_before=cursor_before,
-                    cursor_after=last_cursor,
-                    watermark_at=last_retrieved_at,
-                    succeeded_at=self.clock.now(),
-                )
-                if not advanced:
-                    raise RuntimeError("source cursor ownership was lost")
-            return await self._finish(
-                run_id=run_id,
-                status="success",
+            advanced = await self.acquisition_repository.advance_source_sync_cursor(
+                source=self.source,
+                expected_version=int(cursor.version),
                 cursor_before=cursor_before,
-                cursor_after=last_cursor if last_cursor != cursor_before else None,
-                request_count=request_count,
-                record_count=record_count,
-                imported_notice_count=imported_notice_count,
-                new_bundle_count=new_bundle_count,
-                response_object_key=response_object_key,
-                response_sha256=response_sha256,
-                http_status=http_status,
-                last_retrieved_at=last_retrieved_at,
-                started_monotonic=started_monotonic,
+                cursor_after=last_cursor,
+                watermark_at=last_retrieved_at,
+                succeeded_at=self.clock.now(),
             )
+            if not advanced:
+                raise RuntimeError("source cursor ownership was lost")
         except SourceRateLimitedError as error:
             return await self._finish(
                 run_id=run_id,
@@ -185,6 +173,8 @@ class IngestionService:
                 new_bundle_count=new_bundle_count,
                 response_object_key=response_object_key,
                 response_sha256=response_sha256,
+                response_object_keys=response_object_keys,
+                response_sha256s=response_sha256s,
                 http_status=error.status_code or http_status,
                 failure_code=error.code,
                 retry_after_seconds=error.retry_after_seconds,
@@ -203,6 +193,8 @@ class IngestionService:
                 new_bundle_count=new_bundle_count,
                 response_object_key=response_object_key,
                 response_sha256=response_sha256,
+                response_object_keys=response_object_keys,
+                response_sha256s=response_sha256s,
                 http_status=http_status,
                 failure_code=getattr(error, "code", "import_failed"),
                 last_retrieved_at=last_retrieved_at,
@@ -220,6 +212,8 @@ class IngestionService:
                 new_bundle_count=new_bundle_count,
                 response_object_key=response_object_key,
                 response_sha256=response_sha256,
+                response_object_keys=response_object_keys,
+                response_sha256s=response_sha256s,
                 http_status=error.status_code or http_status,
                 failure_code=error.code,
                 retry_after_seconds=error.retry_after_seconds,
@@ -238,11 +232,31 @@ class IngestionService:
                 new_bundle_count=new_bundle_count,
                 response_object_key=response_object_key,
                 response_sha256=response_sha256,
+                response_object_keys=response_object_keys,
+                response_sha256s=response_sha256s,
                 http_status=http_status,
                 failure_code="unexpected_error",
                 last_retrieved_at=last_retrieved_at,
                 started_monotonic=started_monotonic,
             )
+
+        return await self._finish(
+            run_id=run_id,
+            status="success",
+            cursor_before=cursor_before,
+            cursor_after=last_cursor if last_cursor != cursor_before else None,
+            request_count=request_count,
+            record_count=record_count,
+            imported_notice_count=imported_notice_count,
+            new_bundle_count=new_bundle_count,
+            response_object_key=response_object_key,
+            response_sha256=response_sha256,
+            response_object_keys=response_object_keys,
+            response_sha256s=response_sha256s,
+            http_status=http_status,
+            last_retrieved_at=last_retrieved_at,
+            started_monotonic=started_monotonic,
+        )
 
     async def _finish(
         self,
@@ -257,6 +271,8 @@ class IngestionService:
         new_bundle_count: int,
         response_object_key: str | None,
         response_sha256: str | None,
+        response_object_keys: list[str],
+        response_sha256s: list[str],
         http_status: int | None,
         last_retrieved_at: datetime,
         started_monotonic: float,
@@ -275,6 +291,8 @@ class IngestionService:
             imported_notice_count=imported_notice_count,
             response_object_key=response_object_key,
             response_sha256=response_sha256,
+            response_object_keys=response_object_keys,
+            response_sha256s=response_sha256s,
             http_status=http_status,
             retry_after_seconds=retry_after_seconds,
             failure_code=failure_code,
@@ -293,6 +311,8 @@ class IngestionService:
                 "response_sha256": response_sha256,
                 "request_count": request_count,
                 "record_count": record_count,
+                "new_bundle_count": new_bundle_count,
+                "imported_notice_count": imported_notice_count,
                 "failure_code": failure_code,
             }
         )
@@ -331,7 +351,8 @@ class IngestionService:
                 max(0.0, (finished_at - retrieved_at).total_seconds()),
                 labels,
             )
-            for _ in range(min(record_count, 100_000)):
-                METRICS_REGISTRY.counter("bidscope_acquisition_records_total", labels)
+            METRICS_REGISTRY.counter(
+                "bidscope_acquisition_records_total", labels, amount=record_count
+            )
         except Exception:
             return

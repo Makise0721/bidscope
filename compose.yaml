@@ -16,6 +16,16 @@ x-production-environment: &production-environment
   BIDSCOPE_S3_ACCESS_KEY: ${BIDSCOPE_S3_ACCESS_KEY:?set BIDSCOPE_S3_ACCESS_KEY to the S3 access key}
   BIDSCOPE_S3_SECRET_KEY: ${BIDSCOPE_S3_SECRET_KEY:?set BIDSCOPE_S3_SECRET_KEY to the S3 secret key}
 
+x-ingestion-environment: &ingestion-environment
+  BIDSCOPE_APP_MODE: production
+  BIDSCOPE_OBJECT_STORE_TYPE: s3
+  BIDSCOPE_S3_ENDPOINT: ${BIDSCOPE_S3_ENDPOINT:?set BIDSCOPE_S3_ENDPOINT to the S3 endpoint}
+  BIDSCOPE_S3_REGION: ${BIDSCOPE_S3_REGION:?set BIDSCOPE_S3_REGION to the S3 region}
+  BIDSCOPE_S3_BUCKET: ${BIDSCOPE_S3_BUCKET:?set BIDSCOPE_S3_BUCKET to the S3 bucket name}
+  BIDSCOPE_S3_PREFIX: ${BIDSCOPE_S3_PREFIX:?set BIDSCOPE_S3_PREFIX to the S3 key prefix}
+  BIDSCOPE_S3_ACCESS_KEY: ${BIDSCOPE_S3_ACCESS_KEY:?set BIDSCOPE_S3_ACCESS_KEY to the S3 access key}
+  BIDSCOPE_S3_SECRET_KEY: ${BIDSCOPE_S3_SECRET_KEY:?set BIDSCOPE_S3_SECRET_KEY to the S3 secret key}
+
 x-minio-environment: &minio-environment
   MINIO_ROOT_USER: ${BIDSCOPE_S3_ACCESS_KEY:?set BIDSCOPE_S3_ACCESS_KEY}
   MINIO_ROOT_PASSWORD: ${BIDSCOPE_S3_SECRET_KEY:?set BIDSCOPE_S3_SECRET_KEY}
@@ -120,14 +130,14 @@ services:
       dockerfile: Dockerfile
     command: ["bidscope", "ingestion", "start"]
     environment:
-      <<: *production-environment
+      <<: *ingestion-environment
       BIDSCOPE_PROCESS_ROLE: ingestion
       BIDSCOPE_LIVE_INGESTION_ENABLED: ${BIDSCOPE_LIVE_INGESTION_ENABLED:?set BIDSCOPE_LIVE_INGESTION_ENABLED=true only after approval}
       BIDSCOPE_DATABASE_URL: ${BIDSCOPE_DATABASE_URL:?set BIDSCOPE_DATABASE_URL to a pre-encoded PostgreSQL application DSN}
-      BIDSCOPE_CHECKPOINT_DATABASE_URL: ${BIDSCOPE_CHECKPOINT_DATABASE_URL:?set BIDSCOPE_CHECKPOINT_DATABASE_URL to a pre-encoded PostgreSQL checkpoint DSN}
       BIDSCOPE_CCGP_API_BASE_URL: ${BIDSCOPE_CCGP_API_BASE_URL:?set the operator-approved CCGP API origin}
       BIDSCOPE_CCGP_CLIENT_ID: ${BIDSCOPE_CCGP_CLIENT_ID:?set the operator-approved CCGP client id}
       BIDSCOPE_CCGP_SIGNING_KEY: ${BIDSCOPE_CCGP_SIGNING_KEY:?set the operator-approved CCGP signing material}
+      BIDSCOPE_CCGP_RUNNER_FACTORY: ${BIDSCOPE_CCGP_RUNNER_FACTORY:?set the operator-supplied runner factory module:attribute}
       BIDSCOPE_CCGP_AUTHORIZATION_REF: ${BIDSCOPE_CCGP_AUTHORIZATION_REF:?set the approved authorization reference}
       BIDSCOPE_CCGP_DATA_CONTRACT_VERSION: ${BIDSCOPE_CCGP_DATA_CONTRACT_VERSION:?set the approved data contract version}
       BIDSCOPE_CCGP_DATA_OWNER: ${BIDSCOPE_CCGP_DATA_OWNER:?set the approved data owner}
@@ -146,7 +156,7 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "test -n \"$${BIDSCOPE_CCGP_AUTHORIZATION_REF}\""]
+      test: ["CMD-SHELL", "test -n \"$${BIDSCOPE_CCGP_RUNNER_FACTORY}\" && kill -0 1"]
       interval: 30s
       timeout: 5s
       retries: 3
