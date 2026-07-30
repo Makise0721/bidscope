@@ -204,9 +204,15 @@ running a model or changing the deterministic `target_pass` gate:
 uv run bidscope eval validate-real \
   --manifest /controlled/staging/evaluation/dataset-manifest.json \
   --catalog /controlled/staging/evaluation/snapshot-admission-catalog.json \
+  --catalog-signature /controlled/staging/evaluation/snapshot-admission-catalog.sig \
   --result /controlled/staging/evaluation/result.json \
   --json
 ```
+
+This command requires `BIDSCOPE_REAL_EVALUATION_CATALOG_PUBLIC_KEY`, a
+Base64-encoded Ed25519 public key. The catalog must carry a detached signature
+from the corresponding external private key; an unsigned or altered catalog is
+blocked. The private key must never be configured in BidScope.
 
 Real data, prompts, credentials and evaluation payloads are not committed to
 the repository. See the productization governance and evaluation specifications

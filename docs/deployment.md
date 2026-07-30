@@ -108,6 +108,7 @@ docker compose ps
 - `BIDSCOPE_S3_ENDPOINT`, `BIDSCOPE_S3_REGION`, `BIDSCOPE_S3_BUCKET`, `BIDSCOPE_S3_PREFIX`, `BIDSCOPE_S3_ACCESS_KEY`, and `BIDSCOPE_S3_SECRET_KEY`
 - `BIDSCOPE_REAL_MODEL_ENABLED`; it defaults to `false` in Compose
 - `BIDSCOPE_MODEL_API_KEY` when `BIDSCOPE_REAL_MODEL_ENABLED=true`
+- `BIDSCOPE_REAL_EVALUATION_CATALOG_PUBLIC_KEY` when validating restricted real-evaluation artifacts; it is a Base64-encoded Ed25519 public key only, never the matching private key
 - `BIDSCOPE_MODEL_BASE_URL` and `BIDSCOPE_MODEL_NAME`; Compose passes both values to API and scheduler, defaulting to the Settings values when unset
 
 Production mode rejects the built-in demo database DSNs. It also rejects DSNs with missing explicit credentials, missing authority, missing database name, unsupported driver scheme, target-overriding or unknown query parameters, or fragments. The two DSNs are stored as secrets in application settings and are only unwrapped at database, migration, and checkpoint driver boundaries.
@@ -174,6 +175,7 @@ changes the deterministic CI gate:
 bidscope eval validate-real \
   --manifest /controlled/staging/evaluation/dataset-manifest.json \
   --catalog /controlled/staging/evaluation/snapshot-admission-catalog.json \
+  --catalog-signature /controlled/staging/evaluation/snapshot-admission-catalog.sig \
   --result /controlled/staging/evaluation/result.json \
   --json
 ```
@@ -181,6 +183,9 @@ bidscope eval validate-real \
 The validator checks dataset/version linkage, snapshot IDs, exact manifest and
 admission-catalog SHA-256 values, approved CCGP schema-v2 catalog entries,
 bounded model metadata, sample count and citation/provenance hard-gate outcomes.
+It also verifies the detached catalog signature against
+`BIDSCOPE_REAL_EVALUATION_CATALOG_PUBLIC_KEY`; do not provision the matching
+private key to this application.
 A valid completed result reports `status=validated` and
 `release_decision=review_required`; it does not emit or reuse
 `deterministic_target_pass`. A failed or hard-gate-invalid result is blocked.
