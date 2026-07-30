@@ -99,4 +99,3 @@ async def start_ingestion_loop(
     while True:
         await run_ingestion_once(settings, runner_factory=runner_factory)
         await sleep(settings.ccgp_poll_seconds)
-
