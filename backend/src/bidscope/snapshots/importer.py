@@ -237,6 +237,8 @@ class SnapshotImporter:
             notices = self._parse(bundle)
         except SnapshotImportError:
             raise
+        except _parse.ParseDrift:
+            raise
         except Exception as error:
             raise SnapshotImportError(
                 "bundle parser rejected the staged payload",
