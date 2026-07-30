@@ -37,6 +37,12 @@ from bidscope.evaluation.real_contracts import (
 )
 from bidscope.evaluation.runner import EvaluationExecutionError, run_deterministic
 from bidscope.graph.executor import run_setup_checkpoints
+from bidscope.ingestion.scheduler import (
+    IngestionConfigurationError,
+    IngestionDisabledError,
+    run_ingestion_once,
+    start_ingestion_loop,
+)
 from bidscope.persistence.repositories import SnapshotRepository
 from bidscope.snapshots.importer import (
     SnapshotImporter,
@@ -67,6 +73,12 @@ scheduler_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(scheduler_app, name="scheduler")
+
+ingestion_app = typer.Typer(
+    help="Authorized live-ingestion process role.",
+    no_args_is_help=True,
+)
+app.add_typer(ingestion_app, name="ingestion")
 
 eval_app = typer.Typer(
     help="Offline evaluation commands.",
@@ -519,6 +531,43 @@ def scheduler_start() -> None:
     except KeyboardInterrupt:
         scheduler.shutdown()
         typer.echo("scheduler stopped")
+
+
+# --- authorized ingestion ---------------------------------------------------
+
+
+def _ingestion_error(error: IngestionDisabledError | IngestionConfigurationError) -> None:
+    typer.echo(str(error), err=True)
+    raise typer.Exit(code=2) from None
+
+
+@ingestion_app.command("run-once")
+def ingestion_run_once(
+    json_output: Annotated[bool, typer.Option("--json", help="Print JSON output.")] = False,
+) -> None:
+    """Run one authorized CCGP acquisition; disabled unless explicitly enabled."""
+    _require_startup_settings()
+    configure_windows_selector_event_loop_policy()
+    try:
+        result = asyncio.run(run_ingestion_once(get_settings()))
+    except (IngestionDisabledError, IngestionConfigurationError) as error:
+        _ingestion_error(error)
+    payload = result if isinstance(result, dict) else getattr(result, "__dict__", result)
+    if json_output:
+        typer.echo(_json_payload(payload))
+    else:
+        typer.echo(f"ingestion {payload.get('status', 'completed')}")
+
+
+@ingestion_app.command("start")
+def ingestion_start() -> None:
+    """Start the isolated authorized-ingestion polling loop."""
+    _require_startup_settings()
+    configure_windows_selector_event_loop_policy()
+    try:
+        asyncio.run(start_ingestion_loop(get_settings(), sleep=asyncio.sleep))
+    except (IngestionDisabledError, IngestionConfigurationError) as error:
+        _ingestion_error(error)
 
 
 if __name__ == "__main__":
