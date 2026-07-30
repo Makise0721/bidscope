@@ -1,2 +1,1 @@
 """Bounded source acquisition primitives."""
-

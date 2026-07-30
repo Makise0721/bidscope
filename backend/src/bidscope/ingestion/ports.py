@@ -63,4 +63,3 @@ class AuthorizedSourcePage:
     retrieved_at: datetime
     status_code: int
     source_url: str
-
