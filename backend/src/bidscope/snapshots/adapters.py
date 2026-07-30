@@ -94,6 +94,8 @@ def _convert_manifest_errors(data: dict[str, Any]) -> list[InspectionError]:
                     code = "missing_data_contract"
                 elif "review_status must be approved" in msg:
                     code = "authorization_not_approved"
+                elif "legacy admission register" in msg:
+                    code = "legacy_schema_not_allowed"
                 elif "schema_version 2" in msg:
                     code = "invalid_data_contract"
                 elif "source=synthetic_demo" in msg or "synthetic_demo bundles" in msg:

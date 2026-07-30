@@ -15,6 +15,11 @@ _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _CONTRACT_VERSION_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*-v[0-9]+$")
 _BATCH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
+# The sole pre-v2 real bundle admitted before authorization contracts existed.
+# This immutable migration register is intentionally exact-match only: dates,
+# names, or other bundle attributes must never imply legacy admission.
+_LEGACY_CCGP_CURATED_BUNDLE_IDS = frozenset({"ccgp-central-20260718"})
+
 
 BoundedContractLabel = Annotated[str, Field(min_length=1, max_length=128)]
 
@@ -146,6 +151,14 @@ class SnapshotManifest(BaseModel):
     @model_validator(mode="after")
     def _validate_authorized_contract(self) -> "SnapshotManifest":
         if self.schema_version == 1:
+            if (
+                self.source == SourceName.CCGP
+                and self.capture_kind == CaptureKind.CURATED_PUBLIC_EXCERPT
+                and self.bundle_id not in _LEGACY_CCGP_CURATED_BUNDLE_IDS
+            ):
+                raise ValueError(
+                    "schema_version 1 CCGP curated bundle is not in the legacy admission register"
+                )
             return self
         if self.schema_version != 2:
             raise ValueError(f"unsupported snapshot schema_version: {self.schema_version}")
