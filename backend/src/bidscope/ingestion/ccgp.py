@@ -174,36 +174,33 @@ class AuthorizedSourceClient:
             headers["Content-Type"] = "application/json"
 
         try:
-            response = await self._http_client.request(
+            async with self._http_client.stream(
                 self.endpoint.method,
                 request_url,
                 headers=headers,
                 content=body,
                 timeout=self.timeout_seconds,
-            )
+                follow_redirects=False,
+            ) as response:
+                if response.status_code in (401, 403):
+                    raise SourceAuthorizationError(response.status_code)
+                if response.status_code == 429:
+                    raise SourceRateLimitedError(self._retry_after_seconds(response))
+                if response.status_code < 200 or response.status_code >= 300:
+                    raise SourceHTTPError(response.status_code)
+
+                declared_length = response.headers.get("Content-Length")
+                if declared_length is not None:
+                    try:
+                        if int(declared_length) > self.max_response_bytes:
+                            raise SourceResponseTooLargeError(self.max_response_bytes)
+                    except ValueError as error:
+                        raise SourcePayloadError("Content-Length is invalid") from error
+                response_bytes = await self._read_bounded_response(response)
         except httpx.TimeoutException as error:
             raise SourceTimeoutError() from error
         except httpx.TransportError as error:
             raise SourceTransportError() from error
-
-        if response.status_code in (401, 403):
-            raise SourceAuthorizationError(response.status_code)
-        if response.status_code == 429:
-            raise SourceRateLimitedError(self._retry_after_seconds(response))
-        if response.status_code < 200 or response.status_code >= 300:
-            raise SourceHTTPError(response.status_code)
-
-        declared_length = response.headers.get("Content-Length")
-        if declared_length is not None:
-            try:
-                if int(declared_length) > self.max_response_bytes:
-                    raise SourceResponseTooLargeError(self.max_response_bytes)
-            except ValueError as error:
-                raise SourcePayloadError("Content-Length is invalid") from error
-
-        response_bytes = response.content
-        if len(response_bytes) > self.max_response_bytes:
-            raise SourceResponseTooLargeError(self.max_response_bytes)
         payload = self._decode_payload(response_bytes)
         items, next_cursor = self._parse_page(payload)
         return AuthorizedSourcePage(
@@ -216,6 +213,16 @@ class AuthorizedSourceClient:
             status_code=response.status_code,
             source_url=request_url,
         )
+
+    async def _read_bounded_response(self, response: httpx.Response) -> bytes:
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in response.aiter_bytes():
+            total += len(chunk)
+            if total > self.max_response_bytes:
+                raise SourceResponseTooLargeError(self.max_response_bytes)
+            chunks.append(chunk)
+        return b"".join(chunks)
 
     def _build_request(self, cursor: str | None) -> tuple[str, bytes]:
         fields = dict(self.endpoint.request_fields)

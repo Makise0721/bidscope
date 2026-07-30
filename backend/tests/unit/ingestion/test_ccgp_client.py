@@ -13,6 +13,7 @@ from bidscope.clock import FixedClock
 from bidscope.ingestion.ccgp import (
     AuthorizedSourceClient,
     SourceAuthorizationError,
+    SourceHTTPError,
     SourcePayloadError,
     SourceRateLimitedError,
     SourceResponseTooLargeError,
@@ -126,6 +127,28 @@ async def test_fetch_page_rejects_response_before_json_parsing_when_over_limit()
             await client.fetch_page(None)
     finally:
         await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fetch_page_does_not_follow_redirects_to_an_unapproved_host() -> None:
+    call_count = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(
+            302,
+            headers={"Location": "https://not-ccgp.example.test/redirected"},
+        )
+
+    client, _signer, http_client = _client(handler)
+    try:
+        with pytest.raises(SourceHTTPError):
+            await client.fetch_page(None)
+    finally:
+        await http_client.aclose()
+
+    assert call_count == 1
 
 
 @pytest.mark.asyncio
