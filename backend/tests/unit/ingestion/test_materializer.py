@@ -160,6 +160,12 @@ def test_existing_bundle_is_checked_against_new_size_limit(tmp_path: Path) -> No
             {},
             "invalid_source_url",
         ),
+        (
+            replace(_page(), source_url="https://[abc"),
+            _contract(),
+            {},
+            "invalid_source_url",
+        ),
         (replace(_page(), response_sha256=""), _contract(), {}, "missing_response_hash"),
         (_page(), _contract(), {"client_secret": "never-persist"}, "credential_metadata"),
         (_page(), _contract(), {"x-api-key": "never-persist"}, "credential_metadata"),

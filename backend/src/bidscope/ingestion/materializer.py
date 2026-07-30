@@ -266,18 +266,19 @@ class AuthorizedBundleMaterializer:
 
     @staticmethod
     def _validate_source_url(source_url: str) -> None:
-        parsed = urlsplit(source_url)
-        official_hosts = OFFICIAL_HOSTS_BY_SOURCE[SourceName.CCGP]
         try:
+            parsed = urlsplit(source_url)
             port = parsed.port
+            hostname = parsed.hostname
         except ValueError:
             raise BundleQuarantineError(
                 "invalid_source_url", "authorized source URL is not approved"
             ) from None
+        official_hosts = OFFICIAL_HOSTS_BY_SOURCE[SourceName.CCGP]
         if (
             parsed.scheme != "https"
-            or parsed.hostname is None
-            or parsed.hostname.casefold() not in official_hosts
+            or hostname is None
+            or hostname.casefold() not in official_hosts
             or port not in (None, 443)
             or parsed.username is not None
             or parsed.password is not None
