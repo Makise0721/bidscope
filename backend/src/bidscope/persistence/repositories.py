@@ -14,9 +14,10 @@ repository never generates random defaults, consistent with the schema's
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 import sqlalchemy as sa
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,7 +27,9 @@ from bidscope.persistence.models import (
     NoticeVersion,
     SnapshotBundle,
     SnapshotImport,
+    SourceAcquisitionRun,
     SourceNotice,
+    SourceSyncCursor,
 )
 
 
@@ -242,3 +245,207 @@ class SnapshotRepository:
         self.session.add(evidence)
         await self.session.flush()
         return evidence
+
+
+class SourceAcquisitionRepository:
+    """Persistence operations for live source cursors and run metadata.
+
+    Methods flush changes but never commit. The caller owns the transaction so
+    cursor advancement can happen in the same transaction as the work it
+    represents.
+    """
+
+    _MAX_STATUS_READ_LIMIT = 100
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def get_or_create_source_sync_cursor(
+        self,
+        source: str,
+        cursor_value: str,
+        watermark_at: datetime,
+    ) -> SourceSyncCursor:
+        """Return the existing cursor or insert the first cursor atomically."""
+        existing = await self.get_source_sync_cursor(source)
+        if existing is not None:
+            return existing
+
+        cursor = SourceSyncCursor(
+            source=source,
+            cursor_value=cursor_value,
+            watermark_at=watermark_at,
+        )
+        savepoint = await self.session.begin_nested()
+        try:
+            self.session.add(cursor)
+            await self.session.flush()
+            await savepoint.commit()
+            return cursor
+        except IntegrityError:
+            await savepoint.rollback()
+            existing = await self.get_source_sync_cursor(source)
+            if existing is not None:
+                return existing
+            raise
+
+    async def get_source_sync_cursor(self, source: str) -> SourceSyncCursor | None:
+        return await self.session.get(SourceSyncCursor, source)
+
+    async def get_source_sync_cursor_for_update(
+        self, source: str
+    ) -> SourceSyncCursor | None:
+        statement = (
+            sa.select(SourceSyncCursor)
+            .where(SourceSyncCursor.source == source)
+            .with_for_update()
+        )
+        result = await self.session.execute(statement)
+        return result.scalar_one_or_none()
+
+    async def advance_source_sync_cursor(
+        self,
+        source: str,
+        *,
+        expected_version: int,
+        cursor_before: str,
+        cursor_after: str,
+        watermark_at: datetime,
+        succeeded_at: datetime,
+    ) -> bool:
+        """Advance a cursor only if the caller still owns its prior version."""
+        statement = (
+            sa.update(SourceSyncCursor)
+            .where(
+                SourceSyncCursor.source == source,
+                SourceSyncCursor.version == expected_version,
+                SourceSyncCursor.cursor_value == cursor_before,
+            )
+            .values(
+                cursor_value=cursor_after,
+                watermark_at=watermark_at,
+                last_success_at=succeeded_at,
+                updated_at=succeeded_at,
+                consecutive_failures=0,
+                version=SourceSyncCursor.version + 1,
+            )
+        )
+        result = await self.session.execute(statement)
+        return cast(CursorResult[Any], result).rowcount == 1
+
+    async def create_acquisition_run(
+        self,
+        source: str,
+        started_at: datetime,
+        cursor_before: str,
+        *,
+        status: str = "running",
+    ) -> SourceAcquisitionRun:
+        run = SourceAcquisitionRun(
+            source=source,
+            started_at=started_at,
+            status=status,
+            cursor_before=cursor_before,
+        )
+        self.session.add(run)
+        await self.session.flush()
+        return run
+
+    async def finalize_acquisition_run(
+        self,
+        run_id: str,
+        *,
+        finished_at: datetime,
+        status: str,
+        cursor_after: str | None = None,
+        request_count: int | None = None,
+        record_count: int | None = None,
+        new_bundle_count: int | None = None,
+        imported_notice_count: int | None = None,
+        response_object_key: str | None = None,
+        response_sha256: str | None = None,
+        http_status: int | None = None,
+        retry_after_seconds: int | None = None,
+        failure_code: str | None = None,
+    ) -> SourceAcquisitionRun | None:
+        statement = (
+            sa.select(SourceAcquisitionRun)
+            .where(
+                SourceAcquisitionRun.id == run_id,
+                SourceAcquisitionRun.status == "running",
+            )
+            .with_for_update()
+        )
+        result = await self.session.execute(statement)
+        run = result.scalar_one_or_none()
+        if run is None:
+            return None
+
+        run.finished_at = finished_at
+        run.status = status
+        run.cursor_after = cursor_after
+        if request_count is not None:
+            run.request_count = request_count
+        if record_count is not None:
+            run.record_count = record_count
+        if new_bundle_count is not None:
+            run.new_bundle_count = new_bundle_count
+        if imported_notice_count is not None:
+            run.imported_notice_count = imported_notice_count
+        if response_object_key is not None:
+            run.response_object_key = response_object_key
+        if response_sha256 is not None:
+            run.response_sha256 = response_sha256
+        if http_status is not None:
+            run.http_status = http_status
+        if retry_after_seconds is not None:
+            run.retry_after_seconds = retry_after_seconds
+        run.failure_code = failure_code
+
+        if status in {"failed", "quarantined", "rate_limited"}:
+            cursor = await self.get_source_sync_cursor_for_update(run.source)
+            if cursor is not None:
+                cursor.consecutive_failures += 1
+                cursor.updated_at = finished_at
+                cursor.version += 1
+
+        await self.session.flush()
+        return run
+
+    async def list_source_statuses(self, limit: int = 100) -> list[SourceSyncCursor]:
+        bounded_limit = self._bounded_limit(limit)
+        result = await self.session.execute(
+            sa.select(SourceSyncCursor)
+            .order_by(SourceSyncCursor.source)
+            .limit(bounded_limit)
+        )
+        return list(result.scalars().all())
+
+    async def get_latest_acquisition_run(
+        self, source: str
+    ) -> SourceAcquisitionRun | None:
+        result = await self.session.execute(
+            sa.select(SourceAcquisitionRun)
+            .where(SourceAcquisitionRun.source == source)
+            .order_by(SourceAcquisitionRun.started_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def list_acquisition_runs(
+        self, source: str | None = None, limit: int = 50
+    ) -> list[SourceAcquisitionRun]:
+        bounded_limit = self._bounded_limit(limit)
+        statement = sa.select(SourceAcquisitionRun)
+        if source is not None:
+            statement = statement.where(SourceAcquisitionRun.source == source)
+        result = await self.session.execute(
+            statement.order_by(SourceAcquisitionRun.started_at.desc()).limit(bounded_limit)
+        )
+        return list(result.scalars().all())
+
+    @classmethod
+    def _bounded_limit(cls, limit: int) -> int:
+        if limit < 1 or limit > cls._MAX_STATUS_READ_LIMIT:
+            raise ValueError(f"limit must be between 1 and {cls._MAX_STATUS_READ_LIMIT}")
+        return limit

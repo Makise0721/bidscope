@@ -229,6 +229,109 @@ class AuditEvent(Base):
     )
 
 
+# ---------------------------------------------------------- live ingestion ---
+
+
+class SourceSyncCursor(Base):
+    """Durable per-source cursor state for live acquisition workers."""
+
+    __tablename__ = "source_sync_cursors"
+
+    # The source is the natural key: a cursor is unique per source and has no
+    # separate identity that callers need to handle.
+    source: Mapped[str] = mapped_column(sa.String(32), primary_key=True)
+    cursor_value: Mapped[str] = mapped_column(sa.String(512), nullable=False)
+    watermark_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True), nullable=False
+    )
+    last_success_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True), server_default=_NOW_DEFAULT, nullable=False
+    )
+    consecutive_failures: Mapped[int] = mapped_column(
+        sa.Integer, server_default=sa.text("0"), nullable=False
+    )
+    version: Mapped[int] = mapped_column(
+        sa.BigInteger, server_default=sa.text("0"), nullable=False
+    )
+
+    __table_args__ = (
+        sa.CheckConstraint("source IN ('ccgp')", name="source_allowed"),
+        sa.CheckConstraint("consecutive_failures >= 0", name="failures_nonnegative"),
+        sa.CheckConstraint("version >= 0", name="version_nonnegative"),
+    )
+
+
+class SourceAcquisitionRun(Base):
+    """Bounded metadata for one source acquisition attempt.
+
+    This record intentionally contains no response bodies, request headers,
+    credentials, query strings, or exception tracebacks.
+    """
+
+    __tablename__ = "source_acquisition_runs"
+
+    id: Mapped[str] = _pk()
+    source: Mapped[str] = mapped_column(sa.String(32), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(sa.String(16), nullable=False)
+    cursor_before: Mapped[str] = mapped_column(sa.String(512), nullable=False)
+    cursor_after: Mapped[str | None] = mapped_column(sa.String(512))
+    request_count: Mapped[int] = mapped_column(
+        sa.Integer, server_default=sa.text("0"), nullable=False
+    )
+    record_count: Mapped[int] = mapped_column(
+        sa.Integer, server_default=sa.text("0"), nullable=False
+    )
+    new_bundle_count: Mapped[int] = mapped_column(
+        sa.Integer, server_default=sa.text("0"), nullable=False
+    )
+    imported_notice_count: Mapped[int] = mapped_column(
+        sa.Integer, server_default=sa.text("0"), nullable=False
+    )
+    response_object_key: Mapped[str | None] = mapped_column(sa.String(512))
+    response_sha256: Mapped[str | None] = mapped_column(sa.String(64))
+    http_status: Mapped[int | None] = mapped_column(sa.SmallInteger)
+    retry_after_seconds: Mapped[int | None] = mapped_column(sa.Integer)
+    failure_code: Mapped[str | None] = mapped_column(sa.String(64))
+
+    __table_args__ = (
+        sa.CheckConstraint("source IN ('ccgp')", name="source_allowed"),
+        sa.CheckConstraint(
+            "status IN ('running', 'success', 'failed', 'quarantined', 'rate_limited')",
+            name="status_allowed",
+        ),
+        sa.CheckConstraint(
+            "failure_code IS NULL OR failure_code ~ '^[a-z0-9][a-z0-9_.-]{0,63}$'",
+            name="failure_code_format",
+        ),
+        sa.CheckConstraint(
+            "response_sha256 IS NULL OR response_sha256 ~ '^[0-9a-f]{64}$'",
+            name="response_sha256_format",
+        ),
+        sa.CheckConstraint(
+            "http_status IS NULL OR http_status BETWEEN 100 AND 599",
+            name="http_status_range",
+        ),
+        sa.CheckConstraint(
+            "retry_after_seconds IS NULL OR retry_after_seconds >= 0",
+            name="retry_after_nonnegative",
+        ),
+        sa.CheckConstraint("request_count >= 0", name="request_count_nonnegative"),
+        sa.CheckConstraint("record_count >= 0", name="record_count_nonnegative"),
+        sa.CheckConstraint("new_bundle_count >= 0", name="new_bundle_count_nonnegative"),
+        sa.CheckConstraint(
+            "imported_notice_count >= 0", name="imported_notice_count_nonnegative"
+        ),
+        sa.Index("ix_source_acquisition_runs_source", "source"),
+        sa.Index(
+            "ix_source_acquisition_runs_started_at_desc",
+            sa.text("started_at DESC"),
+        ),
+    )
+
+
 # ------------------------------------------------------------------ reports ---
 
 
