@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from bidscope.config import Settings
 from pydantic import ValidationError
@@ -92,10 +94,69 @@ def test_enabled_production_ingestion_requires_complete_authorization_contract()
         Settings(**values)
 
 
-def test_api_and_scheduler_reject_ccgp_credentials() -> None:
+@pytest.mark.parametrize(
+    "missing_field",
+    (
+        "ccgp_client_id",
+        "ccgp_signing_key",
+        "ccgp_authorization_ref",
+        "ccgp_data_contract_version",
+        "ccgp_data_owner",
+        "ccgp_data_regions",
+        "ccgp_data_categories",
+        "ccgp_data_review_status",
+        "ccgp_data_reviewed_at",
+        "ccgp_data_update_sla",
+        "ccgp_data_retention_days",
+    ),
+)
+def test_enabled_ingestion_requires_each_authorization_contract_field(
+    missing_field: str,
+) -> None:
+    values = _complete_live_settings()
+    values.pop(missing_field)
+
+    with pytest.raises(ValidationError, match=missing_field):
+        Settings(**values)
+
+
+@pytest.mark.parametrize("credential_field", ("ccgp_client_id", "ccgp_signing_key"))
+def test_api_and_scheduler_reject_each_ccgp_credential(credential_field: str) -> None:
     for process_role in ("api", "scheduler"):
         with pytest.raises(ValidationError, match="process_role='ingestion'"):
-            Settings(_env_file=None, process_role=process_role, ccgp_signing_key="secret-key")
+            Settings(
+                _env_file=None,
+                process_role=process_role,
+                **{credential_field: "secret-key"},
+            )
+
+
+def test_live_ingestion_is_rejected_for_api_and_scheduler_roles() -> None:
+    values = _complete_live_settings()
+    for process_role in ("api", "scheduler"):
+        values["process_role"] = process_role
+        with pytest.raises(ValidationError, match="process_role='ingestion'"):
+            Settings(**values)
+
+
+def test_invalid_ccgp_url_errors_do_not_echo_userinfo_or_query_values() -> None:
+    secret = "ccgp-url-secret-7f42"
+    with pytest.raises(ValidationError) as error:
+        Settings(
+            _env_file=None,
+            ccgp_api_base_url=f"https://user:{secret}@www.ccgp.gov.cn?token={secret}",
+        )
+
+    rendered = "\n".join(
+        (
+            str(error.value),
+            str(error.value.errors()),
+            error.value.json(),
+            json.dumps(error.value.errors(), default=str),
+        )
+    )
+    assert secret not in rendered
+    assert error.value.errors(include_context=True)[0]["input"]["ccgp_api_base_url"] == "**********"
 
 
 def test_complete_live_ingestion_configuration_is_accepted() -> None:

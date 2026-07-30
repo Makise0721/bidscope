@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     _dsn_field_names: ClassVar[frozenset[str]] = frozenset(
         {"database_url", "checkpoint_database_url"}
     )
+    _redacted_input_field_names: ClassVar[frozenset[str]] = frozenset(
+        {
+            *_secret_field_names,
+            *_dsn_field_names,
+            "ccgp_api_base_url",
+        }
+    )
     _database_dsn_defaults: ClassVar[dict[str, str]] = {
         "database_url": "postgresql+asyncpg://bidscope:bidscope@localhost:5432/bidscope",
         "checkpoint_database_url": "postgresql+psycopg://bidscope:bidscope@localhost:5432/bidscope",
@@ -104,7 +111,7 @@ class Settings(BaseSettings):
     ) -> None:
         if isinstance(value, Mapping):
             for key, item in value.items():
-                if key in cls._secret_field_names:
+                if key in cls._redacted_input_field_names:
                     cls._collect_secret_value(item, secret_values)
                 elif isinstance(item, (Mapping, list, tuple)):
                     cls._collect_error_input_values(item, secret_values)
@@ -122,7 +129,7 @@ class Settings(BaseSettings):
         location = item.get("loc", ())
         if "input" in item:
             if isinstance(location, tuple) and any(
-                part in cls._secret_field_names | cls._dsn_field_names
+                part in cls._redacted_input_field_names
                 for part in location
                 if isinstance(part, str)
             ):
@@ -198,7 +205,7 @@ class Settings(BaseSettings):
             return {
                 key: (
                     "**********"
-                    if key in cls._secret_field_names | cls._dsn_field_names
+                    if key in cls._redacted_input_field_names
                     and value[key] is not None
                     else cls._sanitize_error_value(value[key], secret_values)
                 )

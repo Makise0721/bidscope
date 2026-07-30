@@ -97,9 +97,9 @@ Full policy: [`docs/source-policy.md`](docs/source-policy.md).
 +------------------+
 ```
 
-A single Docker image runs the `api`, `scheduler`, and (when explicitly enabled)
-`ingestion` process roles, selected by command. PostgreSQL and MinIO are external
-dependencies. Only the ingestion role may receive CCGP client/signing
+A single Docker image is designed to run the `api`, `scheduler`, and a later
+isolated `ingestion` process role, selected by command. PostgreSQL and MinIO are
+external dependencies. Only the ingestion role may receive CCGP client/signing
 credentials; API and scheduler startup rejects them.
 
 - **Backend:** Python 3.12, FastAPI, LangGraph, SQLAlchemy (async), Alembic, APScheduler.
