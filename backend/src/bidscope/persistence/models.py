@@ -383,6 +383,21 @@ class ReportClaim(Base, TimestampMixin):
     report_item_id: Mapped[str] = _fk("report_items")
     ordinal: Mapped[int] = mapped_column(sa.Integer, server_default=sa.text("0"), nullable=False)
     text: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    #: Semantic Citation Contract §3 status; NULL means unverified.
+    support_status: Mapped[str | None] = mapped_column(sa.Text)
+
+
+class ReportClaimVerification(Base, TimestampMixin):
+    __tablename__ = "report_claim_verifications"
+
+    id: Mapped[str] = _pk()
+    report_claim_id: Mapped[str] = _fk("report_claims")
+    report_id: Mapped[str] = _fk("reports")
+    status: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    rationale: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    evidence_ids_used: Mapped[list[str]] = mapped_column(JSONB, server_default=_JSON_ARRAY)
+    conflict_evidence_ids: Mapped[list[str]] = mapped_column(JSONB, server_default=_JSON_ARRAY)
+    verifier_version: Mapped[str] = mapped_column(sa.Text, nullable=False)
 
 
 class ReportClaimCitation(Base, TimestampMixin):
