@@ -74,6 +74,37 @@ export const reportWithEvidence = {
   ],
 };
 
+/** Report DTO with a review partition (Semantic Citation Contract §5):
+ * an UNSUPPORTED claim is excluded from ``claims`` and carried in
+ * ``review_claims`` together with its full verification record. */
+export const reportWithReviewClaims = {
+  ...reportWithEvidence,
+  items: reportWithEvidence.items.map((item) => ({
+    ...item,
+    claims: [
+      {
+        text: "预算金额为 500 万元",
+        citation_ids: ["evidence-1"],
+        support_status: "supported",
+      },
+    ],
+    review_claims: [
+      {
+        text: "预算确定为 680 万元",
+        citation_ids: ["evidence-1"],
+        support_status: "unsupported",
+        verification: {
+          status: "unsupported",
+          rationale: "证据记载金额为 500 万元，与 680 万元冲突。",
+          evidence_ids_used: ["evidence-1"],
+          conflict_evidence_ids: ["evidence-1"],
+          verifier_version: "fake-deterministic-v1",
+        },
+      },
+    ],
+  })),
+};
+
 export const handlers = [
   http.post("/api/runs", async ({ request }) => {
     const unauthorized = unauthorizedResponse(request);

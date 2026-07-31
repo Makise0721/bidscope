@@ -25,6 +25,7 @@ from bidscope.domain.enums import RunStatus
 from bidscope.domain.intents import SearchIntent
 from bidscope.domain.notices import NoticeEvidence
 from bidscope.domain.runs import RunEvent, SerializableError
+from bidscope.evidence.semantic_verifier import ClaimVerification
 from bidscope.llm.types import ModelUsage, ReportDraft, VerifiedOpportunity
 
 
@@ -97,9 +98,14 @@ class RunState(BaseModel):
     errors: Annotated[list[SerializableError], operator.add] = Field(default_factory=list)
     retry_count: int = 0
     degraded_modes: Annotated[list[str], operator.add] = Field(default_factory=list)
+    #: Semantic Citation Contract verdicts, produced by ``verify_semantics`` and
+    #: consumed by ``persist_and_deliver``. Empty when no verifier is wired.
+    claim_verifications: Annotated[list[ClaimVerification], operator.add] = Field(
+        default_factory=list
+    )
     #: Relational ``RunEvent.seq`` base for this checkpoint attempt. ``None``
     #: preserves compatibility with checkpoints written before Task 3.
     event_seq_offset: int | None = None
 
 
-__all__ = ["DuplicateGroup", "RetrievalPlan", "RunState"]
+__all__ = ["ClaimVerification", "DuplicateGroup", "RetrievalPlan", "RunState"]

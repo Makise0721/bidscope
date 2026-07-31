@@ -10,12 +10,13 @@ from __future__ import annotations
 import logging
 import time
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import sqlalchemy as sa
 from bidscope.delivery.docx import DeliveryError, ExportRecord, ReportDelivery
 from bidscope.delivery.objects import ObjectStore
+from bidscope.domain.enums import ClaimSupportStatus
 from bidscope.domain.notices import NoticeEvidence as DomainEvidence
 from bidscope.domain.reports import (
     Report as DomainReport,
@@ -29,12 +30,14 @@ from bidscope.domain.reports import (
 from bidscope.domain.reports import (
     ReportItem as DomainItem,
 )
+from bidscope.evidence.semantic_verifier import ClaimVerification
 from bidscope.observability import METRICS_REGISTRY
 from bidscope.persistence.models import (
     NoticeEvidence,
     ReportCitation,
     ReportClaim,
     ReportClaimCitation,
+    ReportClaimVerification,
     ReportItem,
 )
 from bidscope.persistence.models import Report as ReportModel
@@ -71,14 +74,17 @@ class ReportPersistence:
         self,
         report: DomainReport,
         evidence_by_hash: Mapping[str, EvidenceBinding],
+        claim_verifications: Sequence[ClaimVerification] = (),
     ) -> PersistedReport:
         """Create one evidence-bound report per run, or load its existing projection.
 
-        A single transaction covers the report, ordered items, claims, and both
-        citation relation types. Evidence is never copied from the run state:
-        every citation resolves to an immutable ``notice_evidence`` row before
-        the transaction can commit.
+        A single transaction covers the report, ordered items, claims, both
+        citation relation types and — when supplied — the Semantic Citation
+        Contract verdicts. Evidence is never copied from the run state: every
+        citation resolves to an immutable ``notice_evidence`` row before the
+        transaction can commit.
         """
+        verifications_by_item = _index_verifications(claim_verifications)
         start = time.monotonic()
         outcome = "failed"
         try:
@@ -121,7 +127,12 @@ class ReportPersistence:
                                 session, persisted_item, item, evidence_by_hash
                             )
                             await self._persist_claims(
-                                session, persisted_item, item, evidence_ids, evidence_by_hash
+                                session,
+                                persisted_item,
+                                item,
+                                evidence_ids,
+                                evidence_by_hash,
+                                verifications_by_item.get(item.notice_id, {}),
                             )
 
                     persisted = PersistedReport(
@@ -200,15 +211,33 @@ class ReportPersistence:
         item: DomainItem,
         evidence_ids: dict[str, str],
         evidence_by_hash: Mapping[str, EvidenceBinding],
+        verifications: Mapping[int, ClaimVerification],
     ) -> None:
         for ordinal, claim in enumerate(item.claims):
+            verification = verifications.get(ordinal)
             persisted_claim = ReportClaim(
                 report_item_id=persisted_item.id,
                 ordinal=ordinal,
                 text=claim.text,
+                support_status=(
+                    verification.verification.status.value
+                    if verification is not None
+                    else (claim.support_status.value if claim.support_status is not None else None)
+                ),
             )
             session.add(persisted_claim)
             await session.flush()
+            if verification is not None:
+                verdict = verification.verification
+                session.add(ReportClaimVerification(
+                    report_claim_id=persisted_claim.id,
+                    report_id=persisted_item.report_id,
+                    status=verdict.status.value,
+                    rationale=verdict.rationale,
+                    evidence_ids_used=list(verdict.evidence_ids_used),
+                    conflict_evidence_ids=list(verdict.conflict_evidence_ids),
+                    verifier_version=verdict.verifier_version,
+                ))
             seen_citation_ids: set[str] = set()
             citation_ordinal = 0
             for evidence_hash in claim.citation_ids:
@@ -324,7 +353,13 @@ class ReportPersistence:
                 claim_ids = citation_ids_by_claim[str(claim.id)]
                 if claim_ids:
                     claims_by_item[str(claim.report_item_id)].append(DomainClaim(
-                        text=claim.text, citation_ids=claim_ids
+                        text=claim.text,
+                        citation_ids=claim_ids,
+                        support_status=(
+                            ClaimSupportStatus(claim.support_status)
+                            if claim.support_status is not None
+                            else None
+                        ),
                     ))
 
         domain_items = [
@@ -352,6 +387,21 @@ class ReportPersistence:
         return PersistedReport(
             id=str(row.id), report=domain_report, docx_object_key=row.docx_object_key
         )
+
+
+def _index_verifications(
+    verifications: Sequence[ClaimVerification],
+) -> dict[str, dict[int, ClaimVerification]]:
+    """Index Semantic Citation verdicts by ``(notice_id, claim ordinal)``.
+
+    The graph emits verdicts per report item and claim ordinal; this lookup is
+    what lets :meth:`ReportPersistence._persist_claims` attach each verdict to
+    exactly the right claim row inside the single persist transaction.
+    """
+    by_item: dict[str, dict[int, ClaimVerification]] = defaultdict(dict)
+    for entry in verifications:
+        by_item[entry.notice_id][entry.claim_index] = entry
+    return by_item
 
 
 __all__ = ["PersistedReport", "ReportPersistence"]

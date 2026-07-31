@@ -172,6 +172,53 @@ export function EvidenceDrawer({ item, onClose }: EvidenceDrawerProps) {
             </ul>
           </section>
         )}
+
+        {item.review_claims && item.review_claims.length > 0 && (
+          <section className="evidence-section">
+            <h4>复核队列 (Review)</h4>
+            <p className="muted">
+              以下断言未通过语义校验，未计入已验证情报，仅供审计复核。
+            </p>
+            <ul className="claim-list">
+              {item.review_claims.map((claim, index) => (
+                <li
+                  key={index}
+                  className={`claim claim-${claim.support_status ?? "uncertain"}`}
+                >
+                  <p>
+                    <span
+                      className={`status-label status-${claim.support_status ?? "uncertain"}`}
+                      data-testid={`review-status-${claim.support_status ?? "uncertain"}`}
+                    >
+                      {claim.support_status === "unsupported"
+                        ? "证据冲突"
+                        : "存疑"}
+                    </span>{" "}
+                    {claim.text}
+                  </p>
+                  {claim.verification && (
+                    <p className="claim-rationale muted">{claim.verification.rationale}</p>
+                  )}
+                  {claim.citation_ids.length > 0 && (
+                    <ul className="claim-citations">
+                      {claim.citation_ids.map((id) => (
+                        <li key={id} className="muted">
+                          {citationById.get(id)?.label ?? id}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {claim.verification && (
+                    <p className="claim-meta muted">
+                      判定: {claim.verification.status} · 版本:{" "}
+                      {claim.verification.verifier_version}
+                    </p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
       </div>
     </div>
   );

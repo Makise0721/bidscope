@@ -404,6 +404,25 @@ export interface ReportCitation {
 export interface ReportClaim {
   text: string;
   citation_ids: string[];
+  /** Semantic Citation Contract status; absent on legacy unverified claims. */
+  support_status?: string;
+}
+
+/** Full Semantic Citation Contract verification record (§4), audit/review only. */
+export interface ClaimVerification {
+  status: string;
+  rationale: string;
+  evidence_ids_used: string[];
+  conflict_evidence_ids: string[];
+  verifier_version: string;
+}
+
+/** A claim excluded from the main list (UNSUPPORTED/UNCERTAIN) with its verdict. */
+export interface ReviewClaim {
+  text: string;
+  citation_ids: string[];
+  support_status: string;
+  verification?: ClaimVerification | null;
 }
 
 export interface ReportItem {
@@ -423,6 +442,8 @@ export interface ReportItem {
   provenance?: ReportProvenance;
   citations?: ReportCitation[];
   claims?: ReportClaim[];
+  /** Claims filtered out of ``claims`` (UNSUPPORTED/UNCERTAIN), for review. */
+  review_claims?: ReviewClaim[];
 }
 
 export interface ReportRecord {

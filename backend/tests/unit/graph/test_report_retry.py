@@ -95,8 +95,10 @@ class ScriptedReportModel:
 
 
 class FailingOnlineReportPersistence(FakeReportPersistence):
-    async def persist_online_report(self, report, evidence_by_hash):  # type: ignore[no-untyped-def]
-        _ = report, evidence_by_hash
+    async def persist_online_report(  # type: ignore[no-untyped-def]
+        self, report, evidence_by_hash, claim_verifications=()
+    ):
+        _ = report, evidence_by_hash, claim_verifications
         raise DeliveryError("online persistence unavailable")
 
 

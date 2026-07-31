@@ -13,8 +13,14 @@ class FakeReportPersistence:
         self.persisted: list[PersistedReport] = []
         self.exports: list[PersistedReport] = []
 
-    async def persist_online_report(self, report, evidence_by_hash):  # type: ignore[no-untyped-def]
+    async def persist_online_report(
+        self,
+        report,
+        evidence_by_hash,
+        claim_verifications=(),
+    ):  # type: ignore[no-untyped-def]
         _ = evidence_by_hash
+        _ = claim_verifications
         persisted = PersistedReport(
             id=f"test-report-{len(self.persisted) + 1}",
             report=report,

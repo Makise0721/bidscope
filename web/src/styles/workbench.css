@@ -316,6 +316,37 @@ body {
   font-size: 12px;
 }
 
+/* Semantic Citation Contract: claims that failed semantic verification stay
+   visually separated from verified claims and carry an explicit doubt label. */
+.claim-uncertain {
+  background: #fffaf0;
+}
+
+.claim-unsupported {
+  background: #fdf3f2;
+}
+
+.claim-rationale {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
+.claim-meta {
+  margin: 4px 0 0;
+  font-size: 11px;
+  font-family: ui-monospace, "Cascadia Code", monospace;
+}
+
+.status-uncertain {
+  background: #fff4d6;
+  color: #8a5a00;
+}
+
+.status-unsupported {
+  background: #fce8e6;
+  color: #a33a32;
+}
+
 .status-warning {
   color: #8a5a00;
 }
