@@ -159,7 +159,7 @@ async def test_persist_claim_verifications_and_replay_status(
     verifications = _verifications(item.notice_id, "evidence-001")
     persistence = ReportPersistence(session_factory, LocalObjectStore(tmp_path / "objects"))
 
-    persisted = await persistence.persist_online_report(
+    await persistence.persist_online_report(
         report, evidence_by_hash, claim_verifications=verifications
     )
 
