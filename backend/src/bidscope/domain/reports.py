@@ -2,6 +2,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, Field, model_validator
 
+from bidscope.domain.enums import ClaimSupportStatus
 from bidscope.domain.types import AwareDatetime
 
 
@@ -13,6 +14,10 @@ class ReportCitation(BaseModel):
 class ReportClaim(BaseModel):
     text: str
     citation_ids: list[str]
+    #: Semantic Citation Contract verdict attached at delivery time. ``None``
+    #: means the claim has not been semantically verified (no verifier wired).
+    #: The deterministic ``validate_claim`` layer deliberately ignores it.
+    support_status: ClaimSupportStatus | None = None
 
     @model_validator(mode="after")
     def _require_citations(self) -> "ReportClaim":

@@ -45,3 +45,15 @@ class InboxEventType(StrEnum):
     MATERIAL_CHANGE = "material_change"
     SOURCE_COMPLETENESS_WARNING = "source_completeness_warning"
     RUN_FAILURE = "run_failure"
+
+
+class ClaimSupportStatus(StrEnum):
+    """Semantic Citation Contract §3: how the cited evidence relates to a claim.
+
+    The judgment is about the *relationship* between the current citation
+    evidence set and the claim — never about the claim's truth in the world.
+    """
+
+    SUPPORTED = "supported"
+    UNSUPPORTED = "unsupported"
+    UNCERTAIN = "uncertain"
