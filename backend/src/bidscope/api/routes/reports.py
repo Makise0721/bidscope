@@ -22,6 +22,7 @@ from bidscope.persistence.models import (
     ReportCitation,
     ReportClaim,
     ReportClaimCitation,
+    ReportClaimVerification,
     ReportItem,
     SourceNotice,
 )
@@ -140,6 +141,65 @@ def _serialize_citation(citation: Mapping[str, Any]) -> dict[str, Any]:
     return serialized
 
 
+def _serialize_verification(verification: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Bounded DTO of a Semantic Citation Contract verification record (§4)."""
+    if not isinstance(verification, Mapping):
+        return None
+    bounded: dict[str, Any] = {
+        "status": _bounded_text(verification.get("status"), _ITEM_TEXT_LIMIT) or "",
+        "rationale": _bounded_text(verification.get("rationale"), _ITEM_TEXT_LIMIT) or "",
+        "evidence_ids_used": [
+            _bounded_text(value, _ITEM_TEXT_LIMIT) or ""
+            for value in verification.get("evidence_ids_used", [])[:_CITATIONS_LIMIT]
+        ],
+        "conflict_evidence_ids": [
+            _bounded_text(value, _ITEM_TEXT_LIMIT) or ""
+            for value in verification.get("conflict_evidence_ids", [])[:_CITATIONS_LIMIT]
+        ],
+        "verifier_version": (
+            _bounded_text(verification.get("verifier_version"), _ITEM_TEXT_LIMIT) or ""
+        ),
+    }
+    return bounded
+
+
+def _serialize_claims(
+    claims: Sequence[Mapping[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split claims into the main intelligence list and the review queue.
+
+    Semantic Citation Contract §5: only SUPPORTED claims (and legacy claims
+    that were never semantically verified) appear in the main list.
+    UNSUPPORTED and UNCERTAIN claims — with their full verification record —
+    go to ``review_claims`` so they stay auditable without being treated as
+    verified intelligence.
+    """
+    if not claims:
+        return [], []
+    main: list[dict[str, Any]] = []
+    review: list[dict[str, Any]] = []
+    for claim in claims[:_CLAIMS_LIMIT]:
+        text = _bounded_text(claim.get("text"), _ITEM_TEXT_LIMIT) or ""
+        citation_ids = [
+            _bounded_text(value, _ITEM_TEXT_LIMIT) or ""
+            for value in claim.get("citation_ids", [])[:_CITATIONS_LIMIT]
+        ]
+        status = claim.get("support_status")
+        if status is not None and str(status) != "supported":
+            review.append({
+                "text": text,
+                "citation_ids": citation_ids,
+                "support_status": _bounded_text(status, _ITEM_TEXT_LIMIT) or "",
+                "verification": _serialize_verification(claim.get("verification")),
+            })
+        else:
+            payload: dict[str, Any] = {"text": text, "citation_ids": citation_ids}
+            if status is not None:
+                payload["support_status"] = _bounded_text(status, _ITEM_TEXT_LIMIT) or ""
+            main.append(payload)
+    return main, review
+
+
 def _serialize_item(
     item: Any,
     provenance: Any = None,
@@ -203,17 +263,11 @@ def _serialize_item(
         serialized["citations"] = [
             _serialize_citation(citation) for citation in citations[:_CITATIONS_LIMIT]
         ]
-    if claims:
-        serialized["claims"] = [
-            {
-                "text": _bounded_text(claim.get("text"), _ITEM_TEXT_LIMIT) or "",
-                "citation_ids": [
-                    _bounded_text(value, _ITEM_TEXT_LIMIT) or ""
-                    for value in claim.get("citation_ids", [])[:_CITATIONS_LIMIT]
-                ],
-            }
-            for claim in claims[:_CLAIMS_LIMIT]
-        ]
+    main_claims, review_claims = _serialize_claims(claims)
+    if main_claims:
+        serialized["claims"] = main_claims
+    if review_claims:
+        serialized["review_claims"] = review_claims
     return serialized
 
 
@@ -368,10 +422,25 @@ async def _fetch_report(
                 )
                 for claim_id, span_hash in claim_citation_result:
                     citation_ids_by_claim[str(claim_id)].append(span_hash)
+                verification_by_claim: dict[str, dict[str, Any]] = {}
+                verification_result = await session.execute(
+                    sa.select(ReportClaimVerification)
+                    .where(ReportClaimVerification.report_claim_id.in_(claim_ids))
+                )
+                for row in verification_result.scalars():
+                    verification_by_claim[str(row.report_claim_id)] = {
+                        "status": row.status,
+                        "rationale": row.rationale,
+                        "evidence_ids_used": list(row.evidence_ids_used or []),
+                        "conflict_evidence_ids": list(row.conflict_evidence_ids or []),
+                        "verifier_version": row.verifier_version,
+                    }
                 for claim in claim_rows:
                     claims_by_item[str(claim.report_item_id)].append({
                         "text": claim.text,
                         "citation_ids": citation_ids_by_claim[str(claim.id)],
+                        "support_status": claim.support_status,
+                        "verification": verification_by_claim.get(str(claim.id)),
                     })
     return report, items, provenance, citations_by_item, claims_by_item
 

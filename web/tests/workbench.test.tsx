@@ -7,7 +7,7 @@ import { http, HttpResponse } from "msw";
 import { App } from "../src/app/App";
 import { RunReport } from "../src/features/workbench/RunReport";
 import { getAdminToken } from "../src/auth/adminToken";
-import { RUN_ID, server, REPRESENTATIVE_QUERY, reportWithEvidence } from "../src/test/mockServer";
+import { RUN_ID, server, REPRESENTATIVE_QUERY, reportWithEvidence, reportWithReviewClaims } from "../src/test/mockServer";
 
 function renderApp(route = "/") {
   const queryClient = new QueryClient({
@@ -143,5 +143,23 @@ describe("BidScope evidence workbench - main flow", () => {
     const labels = screen.getAllByText("预算金额证据");
     expect(labels.length).toBeGreaterThanOrEqual(1);
     expect(labels[0]).toBeVisible();
+  });
+
+  it("renders review claims with their doubt label and rationale", async () => {
+    const user = userEvent.setup();
+    render(<RunReport report={reportWithReviewClaims} />);
+
+    await user.click(await screen.findByRole("button", { name: /open evidence/i }));
+    // The UNSUPPORTED claim stays out of the verified claims section and is
+    // rendered in the review queue with an explicit "证据冲突" label.
+    const section = await screen.findByText(/复核队列/i);
+    expect(section).toBeVisible();
+    expect(await screen.findByText(/预算确定为 680 万元/)).toBeInTheDocument();
+    expect(
+      screen.getByTestId("review-status-unsupported"),
+    ).toHaveTextContent("证据冲突");
+    expect(
+      screen.getByText(/证据记载金额为 500 万元，与 680 万元冲突/),
+    ).toBeInTheDocument();
   });
 });
