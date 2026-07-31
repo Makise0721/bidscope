@@ -196,6 +196,14 @@ def build_demo_graph(
         bind=sa.create_engine(_to_sync_dsn(settings.database_dsn()))
     )
     resolved_store = object_store or LocalObjectStore(root=settings.object_store_root)
+    if settings.real_model_enabled:
+        from bidscope.evidence.deepseek_verifier import DeepSeekSemanticVerifier
+
+        semantic_verifier: object = DeepSeekSemanticVerifier(settings)
+    else:
+        from bidscope.evidence.fake_verifier import FakeSemanticVerifier
+
+        semantic_verifier = FakeSemanticVerifier()
     deps = GraphDeps(
         intent_model=FakeIntentModel(),
         duplicate_model=FakeDuplicateModel(),
@@ -204,6 +212,7 @@ def build_demo_graph(
         clock=clock or SystemClock(),
         load_notice_views=lambda ids: _load_notice_views(notice_factory, ids),
         report_persistence=ReportPersistence(session_factory, resolved_store),
+        semantic_verifier=semantic_verifier,
     )
     return build_graph(deps, checkpointer=FencedCheckpointSaver(checkpointer))
 

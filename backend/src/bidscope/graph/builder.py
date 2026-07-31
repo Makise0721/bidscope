@@ -60,6 +60,9 @@ class GraphDeps:
     clock: Any
     load_notice_views: Callable[[list[str]], dict[str, Any]]
     report_persistence: Any
+    #: Semantic Citation Contract verifier. ``None`` (the default) skips
+    #: semantic verification so unit tests and minimal wiring stay valid.
+    semantic_verifier: Any = None
 
 
 def _route_after_validate(state: Any) -> str:
@@ -120,11 +123,11 @@ def build_graph(
     checkpointer: BaseCheckpointSaver[Any] | None = None,
     recursion_limit: int = 16,
 ) -> QueryWorkflow:
-    """Compile the first-six-nodes query workflow.
+    """Compile the query workflow.
 
-    Returns a :class:`QueryWorkflow` that starts at ``parse_intent`` and is
-    frozen at ``candidates_resolved``; later tasks extend it with evidence,
-    synthesis and delivery nodes.
+    Starts at ``parse_intent`` and runs through evidence verification,
+    synthesis, deterministic report validation, semantic verification
+    (:func:`bidscope.graph.nodes.verify_semantics`) and delivery.
     """
     graph = StateGraph(RunState)
 
@@ -138,6 +141,7 @@ def build_graph(
     graph.add_node("verify_evidence", nodes.verify_evidence)
     graph.add_node("synthesize_report", nodes.synthesize_report)
     graph.add_node("validate_report", nodes.validate_report)
+    graph.add_node("verify_semantics", nodes.verify_semantics)
     graph.add_node("persist_and_deliver", nodes.persist_and_deliver)
 
     graph.set_entry_point("parse_intent")
@@ -161,16 +165,18 @@ def build_graph(
     graph.add_edge("verify_evidence", "synthesize_report")
     graph.add_edge("synthesize_report", "validate_report")
     # A validation failure loops back to synthesis once (retry); otherwise the
-    # run delivers or fails as ``EvidenceInsufficient``.
+    # run proceeds to semantic verification, then delivers or fails as
+    # ``EvidenceInsufficient``.
     graph.add_conditional_edges(
         "validate_report",
         nodes.route_after_validate_report,
         {
             "synthesize_report": "synthesize_report",
-            "persist_and_deliver": "persist_and_deliver",
+            "persist_and_deliver": "verify_semantics",
             "__end__": "__end__",
         },
     )
+    graph.add_edge("verify_semantics", "persist_and_deliver")
 
     # Interrupt AFTER ``pause`` so an awaiting-confirmation run pauses with the
     # status already applied; ``Command(resume=...)`` continues retrieval.

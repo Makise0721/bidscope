@@ -30,7 +30,7 @@ from bidscope.domain.runs import SerializableError
 from bidscope.domain.types import BidScopeErrorCode
 from bidscope.evidence.extractor import extract_evidence
 from bidscope.evidence.validator import validate_report as validate_report_bindings
-from bidscope.graph.state import DuplicateGroup, RetrievalPlan
+from bidscope.graph.state import ClaimVerification, DuplicateGroup, RetrievalPlan
 from bidscope.llm.types import DuplicatePair, EvidenceSpan, ReportDraft, VerifiedOpportunity
 from bidscope.retrieval.deduplication import classify_duplicate
 from bidscope.retrieval.search import RetrievalFilter
@@ -386,6 +386,95 @@ async def validate_report(state: Any, config: RunnableConfig) -> dict[str, Any]:
     }
 
 
+def _evidence_for_claim(
+    claim: Any,
+    item: Any,
+    evidence_by_id: Any,
+) -> list[NoticeEvidence]:
+    """Resolve a claim's citation ids to evidence spans of the item's version.
+
+    Deterministic ``validate_report`` already guaranteed every citation id
+    resolves and matches the item's notice version; this helper re-derives the
+    same lookup the verifier consumes. Evidence objects have no id field of
+    their own, so the claim's citation ids are returned in parallel order.
+    """
+    resolved: list[NoticeEvidence] = []
+    for citation_id in claim.citation_ids:
+        binding = evidence_by_id.get(citation_id)
+        if binding is None:
+            continue
+        candidates = binding if isinstance(binding, (list, tuple)) else (binding,)
+        match = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.notice_version_id == item.notice_id
+            ),
+            None,
+        )
+        if match is not None:
+            resolved.append(match)
+    return resolved
+
+
+async def verify_semantics(state: Any, config: RunnableConfig) -> dict[str, Any]:
+    """Semantic Citation Contract §2: judge each claim against its own evidence.
+
+    A *soft* gate: the verdicts are collected (never blocking the run) and
+    consumed by ``persist_and_deliver``, which persists the full judgment
+    record and filters UNSUPPORTED/UNCERTAIN claims out of the delivered
+    intelligence list. When no verifier is wired (e.g. unit tests) or a
+    verifier call fails, the run degrades gracefully with an empty verdict set
+    rather than failing.
+    """
+    deps = _deps(config)
+    verifier = getattr(deps, "semantic_verifier", None)
+    draft = state.report
+    if verifier is None or draft is None or not draft.items:
+        return {
+            "claim_verifications": [],
+            "node_events": [_event(
+                config, state, "verify_semantics", "semantics_skipped", "ok"
+            )],
+        }
+
+    verdicts: list[Any] = []
+    degraded = False
+    for item in draft.items:
+        for claim_index, claim in enumerate(item.claims):
+            evidence = _evidence_for_claim(claim, item, state.evidence_by_id)
+            if not evidence:
+                continue
+            try:
+                verdict = await verifier.verify(
+                    claim,
+                    evidence,
+                    evidence_ids=list(claim.citation_ids),
+                )
+            except Exception:  # noqa: BLE001 - soft gate, degrade not fail
+                degraded = True
+                continue
+            verdicts.append(ClaimVerification(
+                notice_id=item.notice_id,
+                claim_index=claim_index,
+                verification=verdict,
+            ))
+
+    update: dict[str, Any] = {
+        "claim_verifications": verdicts,
+        "node_events": [_event(
+            config,
+            state,
+            "verify_semantics",
+            "semantics_degraded" if degraded else "semantics_verified",
+            "degraded" if degraded else "ok",
+        )],
+    }
+    if degraded:
+        update["degraded_modes"] = ["semantic_verifier_unavailable"]
+    return update
+
+
 async def persist_and_deliver(state: Any, config: RunnableConfig) -> dict[str, Any]:
     """Persist a validated online report before attempting its DOCX attachment."""
     deps = _deps(config)
@@ -410,11 +499,13 @@ async def persist_and_deliver(state: Any, config: RunnableConfig) -> dict[str, A
         freshness_window=draft.freshness_window,
         source_availability=draft.source_availability,
         completeness_warning=draft.completeness_warning,
-        items=draft.items,
+        items=_apply_support_status(draft.items, state.claim_verifications),
     )
     try:
         persisted = await deps.report_persistence.persist_online_report(
-            report, state.evidence_by_id
+            report,
+            state.evidence_by_id,
+            claim_verifications=state.claim_verifications,
         )
     except DeliveryError as error:
         return {
@@ -448,6 +539,37 @@ async def persist_and_deliver(state: Any, config: RunnableConfig) -> dict[str, A
         "status": RunStatus.COMPLETED,
         "node_events": [_event(config, state, "persist_and_deliver", "report_delivered", "ok")],
     }
+
+
+def _apply_support_status(
+    items: list[Any],
+    verifications: list[Any],
+) -> list[Any]:
+    """Stamp each draft item's claims with their semantic verdict status.
+
+    The verdicts are keyed by ``(notice_id, claim ordinal)`` in run state; this
+    copies the draft items so the persisted :class:`~bidscope.domain.reports.Report`
+    carries ``support_status`` on every claim that was verified, while the draft
+    itself (and the retry loop) stays untouched. Claims without a verdict keep
+    ``support_status=None``.
+    """
+    by_notice: dict[str, dict[int, Any]] = {}
+    for entry in verifications:
+        by_notice.setdefault(entry.notice_id, {})[entry.claim_index] = entry.verification
+    stamped: list[Any] = []
+    for item in items:
+        if not item.claims:
+            stamped.append(item)
+            continue
+        verdicts = by_notice.get(item.notice_id, {})
+        claims = [
+            claim.model_copy(update={
+                "support_status": verdicts[index].status if index in verdicts else None,
+            })
+            for index, claim in enumerate(item.claims)
+        ]
+        stamped.append(item.model_copy(update={"claims": claims}))
+    return stamped
 
 
 def _intent_conditions(intent: Any) -> dict[str, str]:
@@ -494,5 +616,7 @@ __all__ = [
     "route_after_validate_report",
     "synthesize_report",
     "validate_intent",
+    "validate_report",
     "verify_evidence",
+    "verify_semantics",
 ]
